@@ -1,7 +1,7 @@
 # evaluations/evaluation_helpers.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import os
 from pathlib import Path
 
@@ -170,24 +170,25 @@ def evaluate_policy_per_step(
     deterministic: bool = True,
     render: bool = False,
     render_interval: int = 10,
+    probe_fn: Optional[Callable[[ContinuousEnv], Any]] = None,
 ) -> Dict[str, Any]:
     """
     Step-level eval for continuous-time model on a Single ContinuousEnv.
 
-    Returns a dict:
-      {
-        "episode_step_rewards": List[List[float]],
-        "episode_timestamps":   List[List[float]],
-        "episode_lengths":      List[int],
-        "episode_returns":      List[float],
-        "episode_frames":       Optional[List[List[np.ndarray]]],
-      }
+    `probe_fn`, if given, is called after each step with the env and its
+    return value is recorded in `episode_step_probes` (parallel to rewards).
+
+    Returns a dict with the usual fields plus, if probe_fn is provided,
+    `episode_step_probes: List[List[Any]]`.
     """
     episode_step_rewards: List[List[float]] = []
     episode_timestamps: List[List[float]] = []
     episode_lengths: List[int] = []
     episode_returns: List[float] = []
     episode_frames: Optional[List[List[np.ndarray]]] = [] if render else None
+    episode_step_probes: Optional[List[List[Any]]] = (
+        [] if probe_fn is not None else None
+    )
 
     device = model.device if model is not None else "auto"
     device = get_device(device)
@@ -199,6 +200,7 @@ def evaluate_policy_per_step(
         step_rewards: List[float] = []
         ts: List[float] = []
         frames: List[np.ndarray] = []
+        probes: List[Any] = []
         step_idx = 0
 
         while not done:
@@ -221,6 +223,9 @@ def evaluate_policy_per_step(
             ts.append(float(t))
             obs = np.asarray(next_obs, dtype=np.float32)
 
+            if probe_fn is not None:
+                probes.append(probe_fn(env))
+
             if render and (step_idx % render_interval == 0):
                 frame = env.render(mode="rgb_array")
                 if frame is not None:
@@ -234,14 +239,19 @@ def evaluate_policy_per_step(
         episode_returns.append(float(np.sum(step_rewards)))
         if render and episode_frames is not None:
             episode_frames.append(frames)
+        if episode_step_probes is not None:
+            episode_step_probes.append(probes)
 
-    return {
+    out: Dict[str, Any] = {
         "episode_step_rewards": episode_step_rewards,
         "episode_timestamps": episode_timestamps,
         "episode_lengths": episode_lengths,
         "episode_returns": episode_returns,
         "episode_frames": episode_frames,
     }
+    if episode_step_probes is not None:
+        out["episode_step_probes"] = episode_step_probes
+    return out
 
 
 def evaluate_sb3_policy_per_step(
@@ -251,15 +261,21 @@ def evaluate_sb3_policy_per_step(
     deterministic: bool = True,
     render: bool = False,
     render_interval: int = 10,
+    probe_fn: Optional[Callable[[ContinuousEnv], Any]] = None,
 ) -> Dict[str, Any]:
     """
     Step-level eval for SB3 model, for visualization/benchmarking.
+
+    See `evaluate_policy_per_step` for the `probe_fn` semantics.
     """
     episode_step_rewards: List[List[float]] = []
     episode_timestamps: List[List[float]] = []
     episode_lengths: List[int] = []
     episode_returns: List[float] = []
     episode_frames: Optional[List[List[np.ndarray]]] = [] if render else None
+    episode_step_probes: Optional[List[List[Any]]] = (
+        [] if probe_fn is not None else None
+    )
 
     for _ in range(n_eval_episodes):
         obs, _ = env.reset()
@@ -268,6 +284,7 @@ def evaluate_sb3_policy_per_step(
         step_rewards: List[float] = []
         ts: List[float] = []
         frames: List[np.ndarray] = []
+        probes: List[Any] = []
         step_idx = 0
 
         while not done:
@@ -281,6 +298,9 @@ def evaluate_sb3_policy_per_step(
             ts.append(float(t))
             obs = next_obs
 
+            if probe_fn is not None:
+                probes.append(probe_fn(env))
+
             if render and (step_idx % render_interval == 0):
                 frame = env.render(mode="rgb_array")
                 if frame is not None:
@@ -294,14 +314,19 @@ def evaluate_sb3_policy_per_step(
         episode_returns.append(float(np.sum(step_rewards)))
         if render and episode_frames is not None:
             episode_frames.append(frames)
+        if episode_step_probes is not None:
+            episode_step_probes.append(probes)
 
-    return {
+    out: Dict[str, Any] = {
         "episode_step_rewards": episode_step_rewards,
         "episode_timestamps": episode_timestamps,
         "episode_lengths": episode_lengths,
         "episode_returns": episode_returns,
         "episode_frames": episode_frames,
     }
+    if episode_step_probes is not None:
+        out["episode_step_probes"] = episode_step_probes
+    return out
 
 
 def _force_dmc_regular_time(env) -> None:
