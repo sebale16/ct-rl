@@ -60,7 +60,7 @@ Link1: [https://www.swisstransfer.com/d/6579e0c9-ee61-4bba-a010-933d22ff242b](ht
 
 Link2: [https://www.swisstransfer.com/d/146de302-80a7-4b20-920c-e89474e030c2](https://www.swisstransfer.com/d/146de302-80a7-4b20-920c-e89474e030c2)
 
-Password: icml2026
+Password: ctrl_2026
 
 Please download from these SwissTransfer links the following folders `logs`, `saved_models`, and `data/trading/processed_data` in order to get train logs, saved checkpoints, and trading processed features. After that, please proceed to the below steps for reproducing our reports.
 
