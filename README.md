@@ -56,9 +56,9 @@ This repository includes a comprehensive evaluation pipeline to generate plots, 
 
 The `logs`, `saved_models`, and `data/trading/processed_data` asset folders are too large to be included directly in the repository. They are hosted on SwissTransfer via 2 different links. Because these links expire every month due to SwissTransfer's policy, they will be updated here frequently for reproducibility:
 
-Link1: [https://www.swisstransfer.com/d/6579e0c9-ee61-4bba-a010-933d22ff242b](https://www.swisstransfer.com/d/6579e0c9-ee61-4bba-a010-933d22ff242b)
+Link1: [https://www.swisstransfer.com/d/0b481305-7423-4384-b59a-8e0f77d012b9](https://www.swisstransfer.com/d/0b481305-7423-4384-b59a-8e0f77d012b9)
 
-Link2: [https://www.swisstransfer.com/d/146de302-80a7-4b20-920c-e89474e030c2](https://www.swisstransfer.com/d/146de302-80a7-4b20-920c-e89474e030c2)
+Link2: [https://www.swisstransfer.com/d/de5cc542-8c2c-4069-b431-6e2ac84c87a0](https://www.swisstransfer.com/d/de5cc542-8c2c-4069-b431-6e2ac84c87a0)
 
 Password: ctrl_2026
 
