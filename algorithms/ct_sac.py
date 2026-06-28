@@ -53,6 +53,8 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_model: Optional[Any] = None,
         dynamics_source: str = "mujoco",
         human_input_intensity: float = 0.0,
+        dynamics_lr: float = 1e-3,
+        dynamics_warmup: int = 1000,
     ) -> None:
         super().__init__(
             env=env,
@@ -115,6 +117,23 @@ class CTSAC(OffPolicyAlgorithm):
         self.dynamics_model = dynamics_model
         if self.dynamics_model is not None and hasattr(self.dynamics_model, "to"):
             self.dynamics_model.to(self.device)
+
+        # Learned dynamics models (port-Hamiltonian "phast" mode) are fit online from
+        # the replay buffer. Models with no trainable parameters (e.g. the MuJoCo
+        # oracle) skip this and are used from the first step.
+        self.dynamics_warmup = int(dynamics_warmup)
+        self._dynamics_updates = 0
+        self._train_dynamics = False
+        self.dynamics_optimizer = None
+        if self.dynamics_model is not None:
+            dyn_params = [
+                p for p in self.dynamics_model.parameters() if p.requires_grad
+            ]
+            if dyn_params:
+                self._train_dynamics = True
+                self.dynamics_optimizer = th.optim.Adam(
+                    dyn_params, lr=float(dynamics_lr)
+                )
 
         # The learning rate will be updated by the base algorithm class
         self.actor_optimizer = th.optim.Adam(
@@ -186,8 +205,25 @@ class CTSAC(OffPolicyAlgorithm):
                 self.alpha_optimizer.step()
                 self.logger.record("train/alpha_loss", alpha_loss.item())
 
+            ## Dynamics model update (learned port-Hamiltonian, fit from transitions)
+            if self._train_dynamics:
+                dynamics_loss = self.dynamics_model.fit_step(
+                    obs, actions, next_obs, dt, self.dynamics_optimizer
+                )
+                self._dynamics_updates += 1
+                self.logger.record("train/dynamics_loss", dynamics_loss)
+
             ## Critic update (target)
-            if self.use_model_based_q and self.dynamics_model is not None:
+            # Use the model-based generator once the dynamics model is ready:
+            # immediately for a non-trainable oracle, after warmup for a learned model.
+            dynamics_ready = (not self._train_dynamics) or (
+                self._dynamics_updates >= self.dynamics_warmup
+            )
+            if (
+                self.use_model_based_q
+                and self.dynamics_model is not None
+                and dynamics_ready
+            ):
                 q_fast_target = self._model_based_target(
                     obs, actions, rewards, dones, alpha_tensor
                 )
