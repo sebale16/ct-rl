@@ -246,6 +246,40 @@ def run_algorithm(
                 train_env, algo_kwargs
             )
 
+    # Optional: model-based generator (port-Hamiltonian dynamics model) for CT-SAC.
+    if algo == "ct_sac" and str(
+        algo_kwargs.get("use_model_based_q", "")
+    ).strip().lower() in ("1", "true", "yes"):
+        from models.port_hamiltonian import PortHamiltonianModel
+
+        source = str(algo_kwargs.get("dynamics_source", "mujoco"))
+        intensity = float(algo_kwargs.get("human_input_intensity", 0.0) or 0.0)
+        obs_dim = int(np.prod(train_env.observation_space.shape))
+        act_dim = int(np.prod(train_env.action_space.shape))
+        if source == "mujoco":
+            base_env = train_env
+            while not hasattr(base_env, "dynamics_terms") and hasattr(base_env, "env"):
+                base_env = base_env.env
+            if not hasattr(base_env, "dynamics_terms"):
+                raise ValueError(
+                    "dynamics_source='mujoco' requires a single DMC env exposing "
+                    "dynamics_terms()."
+                )
+            algo_kwargs["dynamics_model"] = PortHamiltonianModel(
+                obs_dim,
+                act_dim,
+                mode="mujoco",
+                drift_fn=base_env.dynamics_terms,
+                human_input_intensity=intensity,
+            )
+        elif source == "phast":
+            raise NotImplementedError(
+                "dynamics_source='phast' (learned port-Hamiltonian) is not yet wired "
+                "into the runner (Milestone M1); use dynamics_source='mujoco' for now."
+            )
+        else:
+            raise ValueError(f"Unknown dynamics_source '{source}'.")
+
     # model_kwargs from CSV: q_net_arch, pi_net_arch, n_critics, activation_fn, ...
     # algo_kwargs from CSV: learning_rate, buffer_size, batch_size, gamma, tau, ...
     algorithm = AlgoClass(
