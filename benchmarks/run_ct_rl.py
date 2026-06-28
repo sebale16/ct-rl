@@ -273,9 +273,13 @@ def run_algorithm(
                 human_input_intensity=intensity,
             )
         elif source == "phast":
-            raise NotImplementedError(
-                "dynamics_source='phast' (learned port-Hamiltonian) is not yet wired "
-                "into the runner (Milestone M1); use dynamics_source='mujoco' for now."
+            # Learned port-Hamiltonian; CT-SAC fits it online from the replay buffer
+            # (warmup, then it takes over from the finite-difference target).
+            algo_kwargs["dynamics_model"] = PortHamiltonianModel(
+                obs_dim,
+                act_dim,
+                mode="phast",
+                human_input_intensity=intensity,
             )
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")

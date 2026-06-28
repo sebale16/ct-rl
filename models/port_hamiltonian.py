@@ -94,9 +94,12 @@ class PortHamiltonianModel(nn.Module):
         return d0 * eye + self._L @ self._L.t()
 
     def _grad_H(self, x: th.Tensor) -> th.Tensor:
-        xin = x.clone().requires_grad_(True)
-        H = self.energy(xin).sum()
-        (gH,) = th.autograd.grad(H, xin, create_graph=True)
+        # enable_grad so grad H can be taken even when the caller is under
+        # th.no_grad() (e.g. evaluation, or the critic's target computation).
+        with th.enable_grad():
+            xin = x.clone().requires_grad_(True)
+            H = self.energy(xin).sum()
+            (gH,) = th.autograd.grad(H, xin, create_graph=True)
         return gH
 
     # ------------------------ public API ------------------------

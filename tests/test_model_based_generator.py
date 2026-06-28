@@ -10,13 +10,49 @@ from models.port_hamiltonian import PortHamiltonianModel
 
 
 def _corr_slope(pred: th.Tensor, target: th.Tensor):
-    """Pearson correlation and regression slope of pred onto target (1-D tensors)."""
+    """Pearson correlation and regression slope of pred onto target (flattened)."""
     p, t = pred.reshape(-1), target.reshape(-1)
     pm, tm = p.mean(), t.mean()
     cov = ((p - pm) * (t - tm)).mean()
     corr = (cov / (p.std(unbiased=False) * t.std(unbiased=False) + 1e-12)).item()
     slope = (cov / (t.var(unbiased=False) + 1e-12)).item()
     return corr, slope
+
+
+def _collect_env(env, n: int):
+    """Roll out random actions and return (obs, act, next_obs, dt) tensors."""
+    O, A, NO, DT = [], [], [], []
+    obs, _ = env.reset()
+    for _ in range(n):
+        a = env.action_space.sample()
+        o, t, _, r, no, nt, term, trunc, _ = env.step_dt(a)
+        O.append(o)
+        A.append(a)
+        NO.append(no)
+        DT.append(nt - t)
+        obs = no if not (term or trunc) else env.reset()[0]
+    to = lambda x: th.as_tensor(np.asarray(x, dtype=np.float32))
+    return to(O), to(A), to(NO), to(DT).reshape(-1, 1)
+
+
+def _train_eval_phast(O, A, NO, DT, n_train, steps=1500, hidden=(128, 128)):
+    """Fit a phast PortHamiltonianModel on a train split; return (ratio, corr) on
+    the held-out split. ratio = one-step MSE / no-op MSE (<1 means it beats
+    predicting no motion); corr = correlation of the learned drift with the true
+    increment (x'-x)/dt."""
+    od, ad = O.shape[1], A.shape[1]
+    ph = PortHamiltonianModel(od, ad, mode="phast", hidden=hidden)
+    opt = th.optim.Adam(ph.parameters(), lr=1e-3)
+    for _ in range(steps):
+        idx = th.randint(0, n_train, (128,))
+        ph.fit_step(O[idx], A[idx], NO[idx], DT[idx], opt)
+    with th.no_grad():
+        b = ph.drift(O[n_train:], A[n_train:])
+        mse = ((O[n_train:] + b * DT[n_train:] - NO[n_train:]) ** 2).mean().item()
+        noop = ((O[n_train:] - NO[n_train:]) ** 2).mean().item()
+        fd = (NO[n_train:] - O[n_train:]) / (DT[n_train:] + 1e-12)
+        corr, _ = _corr_slope(b, fd)
+    return ph, mse / noop, corr
 
 
 class TestModelBasedGenerator(unittest.TestCase):
@@ -67,20 +103,17 @@ class TestModelBasedGenerator(unittest.TestCase):
         )
 
     def _collect(self, n: int = 500):
-        obs, _ = self.env.reset()
-        for _ in range(n):
-            a = self.env.action_space.sample()
-            o, t, _, r, no, nt, term, trunc, _ = self.env.step_dt(a)
+        O, A, NO, DT = _collect_env(self.env, n)
+        for i in range(n):
             self.agent.replay_buffer.add(
-                obs=o[None],
-                next_obs=no[None],
-                action=a[None],
-                reward=np.array([r], dtype=np.float32),
-                done=np.array([float(term or trunc)], dtype=np.float32),
-                t=np.array([t], dtype=np.float32),
-                next_t=np.array([nt], dtype=np.float32),
+                obs=O[i : i + 1].numpy(),
+                next_obs=NO[i : i + 1].numpy(),
+                action=A[i : i + 1].numpy(),
+                reward=np.zeros((1,), dtype=np.float32),
+                done=np.zeros((1,), dtype=np.float32),
+                t=np.zeros((1,), dtype=np.float32),
+                next_t=DT[i].numpy(),
             )
-            obs = no if not (term or trunc) else self.env.reset()[0]
 
     def test_dynamics_terms_shape_and_finite(self):
         obs = np.stack([self.env.observation_space.sample() for _ in range(5)])
@@ -173,6 +206,74 @@ class TestPhastLearnedDrift(unittest.TestCase):
         for _ in range(60):
             last = ph.fit_step(x, a, xp, 0.01, opt)
         self.assertLess(last, first)
+
+
+class TestPhastLearnedDynamics(unittest.TestCase):
+    """Milestone M1: the learned (phast) port-Hamiltonian is trained from replay
+    transitions and integrated into CT-SAC (warmup, then it takes over)."""
+
+    def test_learns_smooth_dynamics_cartpole(self):
+        """On a smooth (contact-free) system the learned drift fits well."""
+        th.manual_seed(0)
+        np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform",
+            dt=0.01, physics_dt=0.01, episode_duration=20.0,
+        )
+        O, A, NO, DT = _collect_env(env, 2000)
+        _, ratio, corr = _train_eval_phast(O, A, NO, DT, 1600)
+        print(f"\n[phast-cartpole] ratio={ratio:.3f} drift_corr={corr:.3f}")
+        self.assertLess(ratio, 0.6)
+        self.assertGreater(corr, 0.6)
+
+    def test_partially_fits_contact_rich_cheetah(self):
+        """Cheetah has ground contacts -> stiff, near-discontinuous accelerations
+        that are much harder to regress than smooth systems. The learned drift
+        still beats the no-op baseline. Richer fit (on-policy data, contact
+        features, state-dependent damping, Strang substeps) is future work."""
+        th.manual_seed(0)
+        np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+        O, A, NO, DT = _collect_env(env, 1500)
+        _, ratio, corr = _train_eval_phast(O, A, NO, DT, 1200, steps=1000)
+        print(f"\n[phast-cheetah] ratio={ratio:.3f} drift_corr={corr:.3f}")
+        self.assertLess(ratio, 0.95)
+
+    def test_ct_sac_phast_trains_dynamics_and_runs(self):
+        """CT-SAC fits the learned dynamics online and runs through warmup."""
+        th.manual_seed(0)
+        np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+        od = int(env.observation_space.shape[0])
+        ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            q_net_arch=[32],
+            pi_net_arch=[32],
+            device="cpu",
+        )
+        ph = PortHamiltonianModel(od, ad, mode="phast", hidden=(32, 32))
+        agent = CTSAC(
+            env=env,
+            model=model,
+            device="cpu",
+            learning_starts=10,
+            batch_size=16,
+            buffer_size=500,
+            num_expectation_samples=2,
+            seed=0,
+            use_model_based_q=True,
+            dynamics_model=ph,
+            dynamics_warmup=5,
+        )
+        self.assertTrue(agent._train_dynamics)
+        agent.learn(total_timesteps=80)
+        self.assertGreater(agent._dynamics_updates, 5)
 
 
 if __name__ == "__main__":
