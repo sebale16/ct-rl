@@ -125,6 +125,10 @@ class DMCContinuousEnv(ContinuousEnv):
             else:
                 self._env._step_limit = int(1e9)
 
+        # Domain/task identifiers (used by model-based dynamics helpers)
+        self.domain_name = domain_name
+        self.task_name = task_name
+
         # Keep default dt for algorithm's time conversion
         self.dt_default = self._env.control_timestep()
 
@@ -317,3 +321,72 @@ class DMCContinuousEnv(ContinuousEnv):
     def physics_dt(self) -> float:
         """Physics solver timestep (seconds)."""
         return self._get_physics_dt()
+
+    # --------------------------- Model-based dynamics (drift) ---------------------------
+
+    def dynamics_terms(self, obs: np.ndarray, action: np.ndarray) -> np.ndarray:
+        """Analytic observation-space drift ``b(obs, a) = d(obs)/dt`` from MuJoCo.
+
+        Used by the model-based generator in CT-SAC (``dynamics_source="mujoco"``).
+
+        Currently supports the ``cheetah`` domain, whose observation is
+        ``[qpos[1:] (nq-1), qvel (nv)]`` with index-aligned planar coordinates,
+        so the drift is exact without an observation Jacobian:
+
+            d/dt obs[:nq-1] = qvel[1:nq]   (positions)
+            d/dt obs[nq-1:] = qacc         (velocities; MuJoCo forward dynamics)
+
+        The live physics state is snapshotted and restored, so this is safe to
+        call during training. Computation loops over the batch on CPU.
+        """
+        if self.domain_name != "cheetah":
+            raise NotImplementedError(
+                "dynamics_terms currently supports the 'cheetah' domain only "
+                "(obs = [qpos[1:], qvel]); other domains need their own obs<->state map."
+            )
+
+        if hasattr(obs, "detach"):
+            obs = obs.detach().cpu().numpy()
+        if hasattr(action, "detach"):
+            action = action.detach().cpu().numpy()
+
+        obs_dim = int(self.observation_space.shape[0])
+        obs = np.asarray(obs, dtype=np.float64).reshape(-1, obs_dim)
+        action = np.asarray(action, dtype=np.float64).reshape(obs.shape[0], -1)
+
+        physics = self._env.physics
+        data = physics.data
+        nq = int(physics.model.nq)
+        nv = int(physics.model.nv)
+        assert obs_dim == (nq - 1) + nv, (
+            f"cheetah obs_dim {obs_dim} != (nq-1)+nv = {(nq - 1) + nv}"
+        )
+
+        low = np.asarray(self.action_space.low, dtype=np.float64)
+        high = np.asarray(self.action_space.high, dtype=np.float64)
+
+        saved = (
+            data.qpos.copy(),
+            data.qvel.copy(),
+            data.ctrl.copy(),
+            float(data.time),
+        )
+        out = np.zeros((obs.shape[0], obs_dim), dtype=np.float32)
+        try:
+            for i in range(obs.shape[0]):
+                qpos = np.zeros(nq, dtype=np.float64)
+                qpos[1:] = obs[i, : nq - 1]
+                qvel = obs[i, nq - 1 :].astype(np.float64)
+                data.qpos[:] = qpos
+                data.qvel[:] = qvel
+                data.ctrl[:] = np.clip(action[i], low, high)
+                physics.forward()
+                out[i, : nq - 1] = np.asarray(data.qvel[1:nq])
+                out[i, nq - 1 :] = np.asarray(data.qacc[:nv])
+        finally:
+            data.qpos[:] = saved[0]
+            data.qvel[:] = saved[1]
+            data.ctrl[:] = saved[2]
+            data.time = saved[3]
+            physics.forward()
+        return out

@@ -14,6 +14,15 @@ from models.actor_q_critic import ActorQCriticModel
 class CTSAC(OffPolicyAlgorithm):
     """
     Continuous-time SAC using ActorQCriticModel using our theoretical work.
+
+    The critic target estimates the instantaneous advantage-rate
+        q_V(x,a) = r + (L^a V)(x) - beta V(x)
+    where (L^a V) is the controlled generator. By default this is estimated
+    model-free by a finite difference over the sampled next state (Eq. 166).
+    When ``use_model_based_q=True`` and a ``dynamics_model`` is supplied, the
+    generator is evaluated analytically from a port-Hamiltonian drift b(x,a):
+        (L^a V) = b . grad V + 1/2 Tr(sigma sigma^T Hess V)
+    which removes the dependence on the sampled next state.
     """
 
     def __init__(
@@ -39,6 +48,11 @@ class CTSAC(OffPolicyAlgorithm):
         target_entropy: Union[
             float, str
         ] = "auto",  # Target entropy when learning alpha
+        # Model-based generator (port-Hamiltonian dynamics model)
+        use_model_based_q: bool = False,
+        dynamics_model: Optional[Any] = None,
+        dynamics_source: str = "mujoco",
+        human_input_intensity: float = 0.0,
     ) -> None:
         super().__init__(
             env=env,
@@ -92,6 +106,16 @@ class CTSAC(OffPolicyAlgorithm):
         self.tau = float(tau)
         self.num_expectation_samples = int(num_expectation_samples)
 
+        # Model-based generator configuration
+        if isinstance(use_model_based_q, str):
+            use_model_based_q = use_model_based_q.strip().lower() in ("1", "true", "yes")
+        self.use_model_based_q = bool(use_model_based_q)
+        self.dynamics_source = str(dynamics_source)
+        self.human_input_intensity = float(human_input_intensity)
+        self.dynamics_model = dynamics_model
+        if self.dynamics_model is not None and hasattr(self.dynamics_model, "to"):
+            self.dynamics_model.to(self.device)
+
         # The learning rate will be updated by the base algorithm class
         self.actor_optimizer = th.optim.Adam(
             self.model.actor.parameters(), lr=self.lr_schedule(1.0)
@@ -124,6 +148,7 @@ class CTSAC(OffPolicyAlgorithm):
           Q_fast(s,a) = r + E_a[ Q̃_k(s,a) ]
                         + (γ E_{a'}[Q̃_k(s',a')] - E_a[Q̃_k(s,a)]) / u
 
+        or, when ``use_model_based_q`` is set, the analytic generator target.
         The critic is trained to minimize MSE against Q_fast.
         The target networks are then updated using averaging.
         """
@@ -161,50 +186,20 @@ class CTSAC(OffPolicyAlgorithm):
                 self.alpha_optimizer.step()
                 self.logger.record("train/alpha_loss", alpha_loss.item())
 
-            ## Critic update
-            with th.no_grad():
-                # Compute E[Q̃(s', a')]
-                next_obs_repeat = next_obs.repeat_interleave(
-                    self.num_expectation_samples, dim=0
+            ## Critic update (target)
+            if self.use_model_based_q and self.dynamics_model is not None:
+                q_fast_target = self._model_based_target(
+                    obs, actions, rewards, dones, alpha_tensor
                 )
-                next_actions, next_log_prob = self.model.act(next_obs_repeat)
-
-                # Q̃(s',a') = Q_target(s',a') - alpha * log π(a'|s')
-                target_q_min = self.model.target_min_q(next_obs, next_actions)
-                q_tilde_next = target_q_min - alpha_tensor * next_log_prob
-                q_tilde_next = q_tilde_next.view(
-                    batch_size, self.num_expectation_samples, 1
+            else:
+                q_fast_target = self._finite_difference_target(
+                    obs, next_obs, rewards, dones, dt, alpha_tensor
                 )
-                expectation_q_tilde_next = q_tilde_next.mean(dim=1)
-
-                # Compute E[Q̃(s, a)]
-                obs_repeat = obs.repeat_interleave(self.num_expectation_samples, dim=0)
-                sampled_actions, sampled_log_prob = self.model.act(obs)
-                target_q_min_current = self.model.target_min_q(
-                    obs_repeat, sampled_actions
-                )
-                q_tilde_current = target_q_min_current - alpha_tensor * sampled_log_prob
-                q_tilde_current = q_tilde_current.view(
-                    batch_size, self.num_expectation_samples, 1
-                )
-                expectation_q_tilde_current = q_tilde_current.mean(dim=1)
-
-                # Construct Q_fast target
-                # Q_fast = r + E[Q̃(s,a)] + (e^(-β*dt) E[Q̃(s',a')] - E[Q̃(s,a)]) / dt
-                dt *= self.time_rescale
-                gamma_dt = th.exp(-self.beta * dt)
-
-                fraction = (
-                    gamma_dt * expectation_q_tilde_next - expectation_q_tilde_current
-                ) / (dt + 1e-8)
-                future_val = expectation_q_tilde_current + fraction
-                q_fast_target = rewards + (1 - dones) * future_val
 
             # Calculate critic loss
-            current_q_list = self.model.q_values(obs, actions)
+            current_q_list = self.model.q_values(obs, actions)  # list of (B, 1)
             critic_loss = sum(F.mse_loss(q, q_fast_target) for q in current_q_list)
 
-            self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
             self.logger.record("train/critic_loss", critic_loss.item())
 
             self.critic_optimizer.zero_grad()
@@ -234,3 +229,94 @@ class CTSAC(OffPolicyAlgorithm):
         # Track number of gradient updates
         # self._n_updates += gradient_steps
         # self.logger.record("train/n_updates", self._n_updates)
+
+    # ------------------------ Critic targets ------------------------
+
+    def _value_expectation(
+        self,
+        obs: th.Tensor,
+        alpha_tensor: th.Tensor,
+        deterministic: bool = False,
+    ) -> th.Tensor:
+        """V(x) = E_{a~pi}[ min-Q_target(x,a) - alpha log pi(a|x) ] via N reparam samples.
+
+        Gradients w.r.t. ``obs`` flow through the (reparameterized) policy and the
+        target critic, so ``autograd.grad(V.sum(), obs)`` gives the value gradient
+        used by the model-based generator.
+        """
+        n = self.num_expectation_samples
+        obs_rep = obs.repeat_interleave(n, dim=0)  # (B*N, O)
+        actions, log_prob = self.model.act(obs_rep, deterministic=deterministic)
+        q_min = self.model.target_min_q(obs_rep, actions)  # (B*N, 1)
+        q_tilde = q_min - alpha_tensor * log_prob  # (B*N, 1)
+        q_tilde = q_tilde.view(obs.shape[0], n, 1).mean(dim=1)  # (B, 1)
+        return q_tilde
+
+    def _finite_difference_target(
+        self, obs, next_obs, rewards, dones, dt, alpha_tensor
+    ) -> th.Tensor:
+        """Model-free target (Eq. 166): generator estimated by a finite difference
+        over the sampled next state.
+
+          Q_fast = r + E[Q̃(s,a)] + (e^(-β*dt) E[Q̃(s',a')] - E[Q̃(s,a)]) / dt
+        """
+        with th.no_grad():
+            expectation_q_tilde_next = self._value_expectation(next_obs, alpha_tensor)
+            expectation_q_tilde_current = self._value_expectation(obs, alpha_tensor)
+
+            dt = dt * self.time_rescale  # (B, 1), rescaled time
+            gamma_dt = th.exp(-self.beta * dt)  # (B, 1)
+
+            fraction = (
+                gamma_dt * expectation_q_tilde_next - expectation_q_tilde_current
+            ) / (dt + 1e-8)  # (B, 1) ~ (L^a V - beta V) in rescaled time
+            future_val = expectation_q_tilde_current + fraction
+            q_fast_target = rewards + (1 - dones) * future_val
+
+            self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
+        return q_fast_target
+
+    def _model_based_target(
+        self, obs, actions, rewards, dones, alpha_tensor
+    ) -> th.Tensor:
+        """Model-based target: the generator is evaluated analytically from the
+        port-Hamiltonian drift b(x,a), so no sampled next state is required.
+
+          (L^a V - beta V) ~ dt_default * b . grad V - beta V   (rescaled-time
+          convention matching the finite-difference target; see
+          docs/port_hamiltonian_ct_sac.md, sec 2.2)
+
+        With sigma != 0 (human input), the diffusion term
+          1/2 Tr(sigma sigma^T Hess V)
+        is added via Hessian-vector products.
+        """
+        sigma = self.dynamics_model.diffusion(obs)
+        need_hessian = sigma is not None
+
+        obs_req = obs.detach().clone().requires_grad_(True)
+        V = self._value_expectation(obs_req, alpha_tensor)  # (B, 1), has graph
+        (gV,) = th.autograd.grad(V.sum(), obs_req, create_graph=need_hessian)  # (B, O)
+
+        V_det = V.detach()
+        b = self.dynamics_model.drift(obs, actions)  # (B, O), physical drift (per second)
+        b = th.as_tensor(b, dtype=V_det.dtype, device=V_det.device).detach()
+
+        drift_term = (b * gV).sum(dim=-1, keepdim=True)  # b . grad V (per second)
+        # Rescaled-time generator to match the finite-difference convention.
+        lf = self.dt_default * drift_term - self.beta * V_det
+
+        if need_hessian:
+            sigma = sigma.to(V_det.device)
+            k = sigma.shape[-1]
+            hess = th.zeros_like(V_det)
+            for j in range(k):
+                sj = sigma[..., j]  # (B, O)
+                (hvp,) = th.autograd.grad(
+                    (gV * sj).sum(), obs_req, retain_graph=(j < k - 1)
+                )  # (B, O) = (Hess V) sj
+                hess = hess + (sj * hvp).sum(dim=-1, keepdim=True)
+            lf = lf + self.dt_default * 0.5 * hess.detach()
+
+        q_fast_target = (rewards + (1 - dones) * (V_det + lf.detach())).detach()
+        self.logger.record("train/fraction", th.max(th.abs(lf)).item())
+        return q_fast_target
