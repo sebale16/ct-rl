@@ -55,6 +55,7 @@ class CTSAC(OffPolicyAlgorithm):
         human_input_intensity: float = 0.0,
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
+        generator_gate_scale: float = 0.0,
     ) -> None:
         super().__init__(
             env=env,
@@ -112,6 +113,10 @@ class CTSAC(OffPolicyAlgorithm):
         if isinstance(use_model_based_q, str):
             use_model_based_q = use_model_based_q.strip().lower() in ("1", "true", "yes")
         self.use_model_based_q = bool(use_model_based_q)
+        # Per-component trust-region blend: where |b_i * dt| <~ generator_gate_scale the
+        # analytic drift is trusted; elsewhere it falls back to the realized drift
+        # (x'_i - x_i)/dt. 0 (default) => pure generator (no gating).
+        self.generator_gate_scale = float(generator_gate_scale)
         self.dynamics_source = str(dynamics_source)
         self.human_input_intensity = float(human_input_intensity)
         self.dynamics_model = dynamics_model
@@ -225,7 +230,7 @@ class CTSAC(OffPolicyAlgorithm):
                 and dynamics_ready
             ):
                 q_fast_target = self._model_based_target(
-                    obs, actions, rewards, dones, alpha_tensor
+                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor
                 )
             else:
                 q_fast_target = self._finite_difference_target(
@@ -313,7 +318,7 @@ class CTSAC(OffPolicyAlgorithm):
         return q_fast_target
 
     def _model_based_target(
-        self, obs, actions, rewards, dones, alpha_tensor
+        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor
     ) -> th.Tensor:
         """Model-based target: the generator is evaluated analytically from the
         port-Hamiltonian drift b(x,a), so no sampled next state is required.
@@ -321,6 +326,14 @@ class CTSAC(OffPolicyAlgorithm):
           (L^a V - beta V) ~ dt_default * b . grad V - beta V   (rescaled-time
           convention matching the finite-difference target; see
           docs/port_hamiltonian_ct_sac.md, sec 2.2)
+
+        When ``generator_gate_scale > 0`` the analytic drift is blended
+        per-component with the realized drift ``(x' - x)/dt``: a gate
+        ``g_i = exp(-|b_i * dt| / generator_gate_scale)`` trusts the analytic
+        drift only where the effective step ``|b_i * dt|`` is small (the regime
+        where the first-order generator is valid), and falls back to the data
+        elsewhere (e.g. stiff contact coordinates). g=1 everywhere recovers the
+        pure generator; g=0 everywhere is a first-order finite difference.
 
         With sigma != 0 (human input), the diffusion term
           1/2 Tr(sigma sigma^T Hess V)
@@ -336,6 +349,16 @@ class CTSAC(OffPolicyAlgorithm):
         V_det = V.detach()
         b = self.dynamics_model.drift(obs, actions)  # (B, O), physical drift (per second)
         b = th.as_tensor(b, dtype=V_det.dtype, device=V_det.device).detach()
+
+        if self.generator_gate_scale > 0.0:
+            dt_phys = th.as_tensor(
+                dt, dtype=V_det.dtype, device=V_det.device
+            ).reshape(-1, 1)  # (B, 1), seconds
+            b_realized = (next_obs - obs) / (dt_phys + 1e-8)  # (B, O), per second
+            b_realized = b_realized.to(V_det.dtype)
+            gate = th.exp(-(b * dt_phys).abs() / self.generator_gate_scale)  # (B, O)
+            b = gate * b + (1.0 - gate) * b_realized
+            self.logger.record("train/gen_gate_mean", gate.mean().item())
 
         drift_term = (b * gV).sum(dim=-1, keepdim=True)  # b . grad V (per second)
         # Rescaled-time generator to match the finite-difference convention.
