@@ -173,11 +173,52 @@ class TestModelBasedGenerator(unittest.TestCase):
         batch = self.agent.replay_buffer.sample(32)
         alpha = th.tensor(float(self.agent.alpha))
         target = self.agent._model_based_target(
-            batch.observations, batch.actions, batch.rewards, batch.dones, alpha
+            batch.observations,
+            batch.actions,
+            batch.next_observations,
+            batch.rewards,
+            batch.dones,
+            batch.dt,
+            alpha,
         )
         self.assertEqual(tuple(target.shape), (32, 1))
         self.assertTrue(th.all(th.isfinite(target)))
         self.assertFalse(target.requires_grad)
+
+    def test_gated_blend_target_finite(self):
+        """The per-component |b*dt|-gated blend produces finite, right-shaped targets,
+        and recovers the pure generator as the gate scale -> infinity."""
+        self._collect(200)
+        batch = self.agent.replay_buffer.sample(32)
+        alpha = th.tensor(float(self.agent.alpha))
+
+        args = (
+            batch.observations,
+            batch.actions,
+            batch.next_observations,
+            batch.rewards,
+            batch.dones,
+            batch.dt,
+            alpha,
+        )
+        # Seed before each call: _value_expectation samples the policy, so V/grad V
+        # are stochastic; fixing the seed isolates the drift as the only difference.
+        th.manual_seed(0)
+        self.agent.generator_gate_scale = 0.0
+        pure = self.agent._model_based_target(*args)
+        th.manual_seed(0)
+        self.agent.generator_gate_scale = 0.3
+        blended = self.agent._model_based_target(*args)
+        th.manual_seed(0)
+        self.agent.generator_gate_scale = 1e9  # gate -> 1 everywhere
+        recovered = self.agent._model_based_target(*args)
+        self.agent.generator_gate_scale = 0.0
+
+        self.assertEqual(tuple(blended.shape), (32, 1))
+        self.assertTrue(th.all(th.isfinite(blended)))
+        self.assertFalse(blended.requires_grad)
+        # large gate scale -> trust analytic drift everywhere -> pure generator
+        self.assertLess((recovered - pure).abs().max().item(), 1e-3)
 
     def test_learn_model_based_runs(self):
         try:
