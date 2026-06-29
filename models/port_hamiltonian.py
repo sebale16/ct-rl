@@ -125,45 +125,14 @@ class PortHamiltonianModel(nn.Module):
         eye = th.eye(self.obs_dim, device=self.device) * scale
         return eye.unsqueeze(0).expand(batch, -1, -1)
 
-    def predict_next(self, obs, action, dt, substeps: int = 2, method: str = "rk4") -> th.Tensor:
-        """Predict x' by integrating dx/dt = drift(x, a) over dt with `substeps`
-        sub-steps (RK4 by default; action held constant over the interval).
-
-        This is the higher-order alternative to the first-order generator term
-        b*grad V*dt: it stays accurate when the effective step |b*dt| is large,
-        which the single first-order term does not. The result is used for a
-        standard soft-Bellman backup r + gamma*V(x'_pred)."""
+    def fit_step(self, obs, action, next_obs, dt, optimizer) -> float:
+        """One supervised PHAST data step: minimize ||(x + b*dt) - x'||^2 (mode='phast')."""
+        assert self.mode == "phast", "fit_step only applies to mode='phast'."
         x = th.as_tensor(obs, dtype=th.float32, device=self.device)
         a = th.as_tensor(action, dtype=th.float32, device=self.device)
-        dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
-        n = max(1, int(substeps))
-        h = dt_t / float(n)
-
-        def f(s):
-            return self.drift(s, a)
-
-        for _ in range(n):
-            if method == "euler":
-                x = x + h * f(x)
-            else:  # rk4
-                k1 = f(x)
-                k2 = f(x + 0.5 * h * k1)
-                k3 = f(x + 0.5 * h * k2)
-                k4 = f(x + h * k3)
-                x = x + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-        return x
-
-    def fit_step(
-        self, obs, action, next_obs, dt, optimizer, substeps: int = 1, method: str = "euler"
-    ) -> float:
-        """One supervised PHAST data step: minimize ||predict_next(x,a,dt) - x'||^2.
-
-        Uses the SAME integrator (method, substeps) that prediction will use, so the
-        learned drift is calibrated to that integrator (with euler/1 this is the
-        original ||(x + b*dt) - x'||^2). (mode='phast')."""
-        assert self.mode == "phast", "fit_step only applies to mode='phast'."
         xp = th.as_tensor(next_obs, dtype=th.float32, device=self.device)
-        pred = self.predict_next(obs, action, dt, substeps=substeps, method=method)
+        dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
+        pred = x + self.drift(x, a) * dt_t
         loss = ((pred - xp) ** 2).mean()
         optimizer.zero_grad()
         loss.backward()
