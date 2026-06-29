@@ -55,6 +55,8 @@ class CTSAC(OffPolicyAlgorithm):
         human_input_intensity: float = 0.0,
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
+        mb_target_mode: str = "generator",  # "generator" (1st-order) or "dyna" (RK4 predict x')
+        mb_substeps: int = 2,
     ) -> None:
         super().__init__(
             env=env,
@@ -134,6 +136,8 @@ class CTSAC(OffPolicyAlgorithm):
                 self.dynamics_optimizer = th.optim.Adam(
                     dyn_params, lr=float(dynamics_lr)
                 )
+        self.mb_target_mode = str(mb_target_mode)
+        self.mb_substeps = int(mb_substeps)
 
         # The learning rate will be updated by the base algorithm class
         self.actor_optimizer = th.optim.Adam(
@@ -207,9 +211,16 @@ class CTSAC(OffPolicyAlgorithm):
 
             ## Dynamics model update (learned port-Hamiltonian, fit from transitions)
             if self._train_dynamics:
-                dynamics_loss = self.dynamics_model.fit_step(
-                    obs, actions, next_obs, dt, self.dynamics_optimizer
-                )
+                if self.mb_target_mode == "dyna":
+                    # train with the same integrator used to predict x' (consistency)
+                    dynamics_loss = self.dynamics_model.fit_step(
+                        obs, actions, next_obs, dt, self.dynamics_optimizer,
+                        substeps=self.mb_substeps, method="rk4",
+                    )
+                else:
+                    dynamics_loss = self.dynamics_model.fit_step(
+                        obs, actions, next_obs, dt, self.dynamics_optimizer
+                    )
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
 
@@ -224,9 +235,14 @@ class CTSAC(OffPolicyAlgorithm):
                 and self.dynamics_model is not None
                 and dynamics_ready
             ):
-                q_fast_target = self._model_based_target(
-                    obs, actions, rewards, dones, alpha_tensor
-                )
+                if self.mb_target_mode == "dyna":
+                    q_fast_target = self._model_based_dyna_target(
+                        obs, actions, rewards, dones, dt, alpha_tensor
+                    )
+                else:
+                    q_fast_target = self._model_based_target(
+                        obs, actions, rewards, dones, alpha_tensor
+                    )
             else:
                 q_fast_target = self._finite_difference_target(
                     obs, next_obs, rewards, dones, dt, alpha_tensor
@@ -311,6 +327,21 @@ class CTSAC(OffPolicyAlgorithm):
 
             self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
         return q_fast_target
+
+    def _model_based_dyna_target(
+        self, obs, actions, rewards, dones, dt, alpha_tensor
+    ) -> th.Tensor:
+        """Higher-order model-based target: roll the dynamics model over the control
+        interval with RK4 to predict x', then apply the standard continuous-time
+        soft-Bellman backup using the *predicted* next state. This avoids the
+        first-order generator's |b*dt| linearization error entirely (no grad V)."""
+        with th.no_grad():
+            next_obs_pred = self.dynamics_model.predict_next(
+                obs, actions, dt, substeps=self.mb_substeps
+            )
+        return self._finite_difference_target(
+            obs, next_obs_pred, rewards, dones, dt, alpha_tensor
+        )
 
     def _model_based_target(
         self, obs, actions, rewards, dones, alpha_tensor
