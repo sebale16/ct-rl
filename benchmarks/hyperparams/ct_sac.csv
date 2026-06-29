@@ -20,4 +20,3 @@ second,trading,irregular,2.0,1.0,1.0,11.0,2100,4000,tail_p=0.99;tail_split=0.9,1
 third,trading,irregular,2.0,1.0,1.0,11.0,2100,4000,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,-3.0,2,False,False,1000000,0.98,300000,0.001,256,1,1,20000,auto,0.005,1,auto,2000,100000,40000,,,,
 mbq_gate,cheetah-run,irregular,0.01,0.002,0.002,0.03,2000,10,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,-3.0,2,False,False,1000000,0.98,300000,0.00073,256,1,1,10000,auto,0.04,1,auto,2000,100000,40000,True,mujoco,0.0,0.3
 mbq_gate_phast,cheetah-run,irregular,0.01,0.002,0.002,0.03,2000,10,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,-3.0,2,False,False,1000000,0.98,300000,0.00073,256,1,1,10000,auto,0.04,1,auto,2000,100000,40000,True,phast,0.0,0.3
-mbq_gate_floor,cheetah-run,uniform,0.002,0.002,0.002,0.002,5000,10,,1,"400,300","400,300",ReLU,-3.0,2,False,False,1000000,0.996,300000,0.00073,256,1,1,10000,auto,0.008,1,auto,2000,100000,40000,True,mujoco,0.0,0.3
