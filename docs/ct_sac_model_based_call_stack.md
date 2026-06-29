@@ -241,6 +241,40 @@ The peaks (~100) stay far below the discrete-time baseline (~850) and are never 
 
 ---
 
+## 8. The per-component gated blend (`generator_gate_scale`)
+
+§6 showed the first-order generator fails because the effective step $\lVert b\,\Delta t\rVert$ is large — but that failure is **concentrated**, not uniform. The drift is dominated by a handful of stiff acceleration coordinates ($\ddot q$ at high velocity / contact), while many coordinates (positions, slow joints) have small $\lvert b_i\,\Delta t\rvert$ and remain first-order valid. The gated blend is a per-coordinate trust region that keeps the analytic drift where it is valid and falls back to the data where it is not.
+
+**The gate.** For each observation coordinate $i$, with scale $s = $ `generator_gate_scale`,
+$$
+g_i \;=\; \exp\!\big(-\,\lvert b_i\,\Delta t\rvert\,/\,s\big)\;\in(0,1],
+\qquad
+b_i^{\text{blend}} \;=\; g_i\,b_i \;+\; (1-g_i)\,\frac{x'_i - x_i}{\Delta t}.
+$$
+The blended drift is fed into the *same* generator target $\Delta t_{\text{default}}\,(b^{\text{blend}}\!\cdot\nabla V) - \beta V$. Coordinates with $\lvert b_i\,\Delta t\rvert \ll s$ keep the analytic drift; coordinates with $\lvert b_i\,\Delta t\rvert \gg s$ use the realized drift $(x'_i - x_i)/\Delta t$ read straight from the buffer.
+
+**Two limits.** The scale $s$ interpolates between the two existing targets:
+
+| $s$ | gate | blended drift | reduces to |
+|---|---|---|---|
+| $\to\infty$ | $g_i \to 1$ | $b^{\text{blend}} = b$ | the pure generator (`mbq` target) |
+| $\to 0$ | $g_i \to 0$ | $b^{\text{blend}} = (x'-x)/\Delta t$ | a first-order finite difference ($\approx$ model-free) |
+| intermediate | per-coord | analytic on smooth coords, data on stiff | the trust region |
+
+**Why per-component, not a global blend.** The value change $\Delta V$ is a single scalar, and the linearization error is dominated by the *largest* $\lvert b_i\,\Delta t\rvert$ coordinate ($\approx \tfrac12 (b_i\,\Delta t)^2\,\partial^2 V/\partial x_i^2$). One stiff coordinate corrupts the whole target, so a scalar weight cannot separate the good contributions from the bad — the gate must act coordinate-by-coordinate, replacing exactly the offending coordinates' contribution with the realized value.
+
+:::info
+This is a bias trade on the *drift used in the rate* — it uses the real next state $x'$ and the real reward, with **no** reward model and **no** predicted-state rollout. It does not free the stiff subspace from needing $x'$; it only lets the analytic generator carry the coordinates where it is trustworthy.
+:::
+
+**Where it is expected to help.** At the **floor** (uniform $\Delta t = \Delta t_{\text{default}}$) the finite difference is already the exact soft-Bellman backup (§7), so the blend collapses back to model-free and adds nothing — this is why no floor mode is shipped. The blend targets the **irregular** regime $\Delta t = 0.01$, where the finite-difference *rate* is biased at large $\Delta t$, the pure oracle was *worst* ($\lVert b\,\Delta t\rVert \approx 6$, §6), and a smooth learned PHAST drift previously beat model-free $\approx 3\times$. The gate is designed to retain that smooth-subspace advantage while stopping the stiff coordinates from poisoning the target.
+
+**What it does not fix.** The blend reduces *target bias*; it does not change the value-iteration's lack of contraction (§7). It is complementary to the stability levers (small flow step, explicit $V$-head, ensembles), not a substitute.
+
+**Modes.** `algo_generator_gate_scale` (default $0$ = off, leaving all existing runs unchanged). Two cheetah-run test modes at irregular $\Delta t = 0.01$, $s = 0.3$: `mbq_gate` (oracle drift) and `mbq_gate_phast` (learned PHAST drift), to be compared against `mbq`, `mbq_phast`, and a model-free irregular baseline.
+
+---
+
 ## Appendix — file/line reference
 
 | Item | Location |
@@ -251,6 +285,8 @@ The peaks (~100) stay far below the discrete-time baseline (~850) and are never 
 | Target selection (generator / finite-difference) | `algorithms/ct_sac.py:223–232` |
 | `_finite_difference_target` | `algorithms/ct_sac.py:291` |
 | `_model_based_target` | `algorithms/ct_sac.py:315` |
+| Per-component gated blend (§8) | `algorithms/ct_sac.py` `_model_based_target`, `generator_gate_scale` |
+| Gated-blend modes (`mbq_gate`, `mbq_gate_phast`) | `benchmarks/hyperparams/ct_sac.csv` |
 | Energy MLP `H_θ` | `models/port_hamiltonian.py:73` |
 | `_grad_H` (autograd `∇H`) | `models/port_hamiltonian.py:96–103` |
 | `drift` (`(J−R)∇H + G_a a`) | `models/port_hamiltonian.py:107–117` |
