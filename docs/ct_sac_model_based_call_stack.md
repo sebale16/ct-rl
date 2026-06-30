@@ -207,15 +207,21 @@ Gentler actions shrink $\lVert b\rVert$, but cheetah-run rewards forward speed, 
 
 **The physics floor is the obstacle.** The CT-RL paper's finest timestep for cheetah is $\Delta t_{\text{physics}} = 0.002$ (the MuJoCo model's native step is $0.01$). The generator's clean regime needs $\Delta t \lesssim 0.001$ — *below* the floor. So across the paper's entire legitimate control range $\Delta t \in [0.002, 0.03]$ the first-order step is biased; $\Delta t = 0.002$ is the borderline. Reaching the clean regime would require sub-physics-step control, which is not a valid configuration.
 
-**Second-order does not rescue it — and the reason is regime-dependent.** Adding $\tfrac12 (b\,\Delta t)^\top \nabla^2 V (b\,\Delta t)$ leaves the correlation essentially unchanged at the floor ($\approx 0.82 \to 0.82$). It is tempting to attribute this to the displacement mismatch $b\,\Delta t \neq x' - x$, but a decomposition (quadratic $V$, where the Taylor expansion is *exact*, vs. the real MLP critic) shows two distinct residuals dominating in two regimes:
+**Second-order does not rescue it — and the reason is regime-dependent.** Adding $\tfrac12 (b\,\Delta t)^\top \nabla^2 V (b\,\Delta t)$ leaves the correlation essentially unchanged at the floor ($\approx 0.82 \to 0.82$). It is tempting to attribute this to the displacement mismatch $b\,\Delta t \neq x' - x$, but a decomposition (quadratic $V$, where the Taylor expansion is *exact*, vs. the real MLP critic) shows two distinct residuals dominating in two regimes. The two estimates compared against the true $\Delta V = V(x') - V(x)$ are
+$$
+g_1 = \nabla V(x)\cdot(b\,\Delta t),
+\qquad
+g_2 = \nabla V(x)\cdot(b\,\Delta t) + \tfrac12 (b\,\Delta t)^\top \nabla^2 V\,(b\,\Delta t),
+$$
+so the "1st-order" column is itself the readout of **$\nabla V$ quality** (how well the value gradient, dotted into the step, predicts $\Delta V$); there is no separate $\nabla V$ column because $g_1$ *is* that measurement.
 
-| value function | $\Delta t$ | $\lVert\Delta x - b\,\Delta t\rVert / \lVert\Delta x\rVert$ | corr(1st-order) | corr(+Hessian) |
+| value function | $\Delta t$ | $\lVert\Delta x - b\,\Delta t\rVert / \lVert\Delta x\rVert$ | corr$(g_1,\Delta V)$ | corr$(g_2,\Delta V)$ |
 |---|---|---|---|---|
 | exact quadratic | 0.002 | 0.05 | 0.996 | **1.000** |
 | exact quadratic | 0.01 | 0.24 | 0.915 | **0.976** |
 | real MLP critic | 0.002 | 0.05 | 0.24$^\dagger$ | **0.24** |
 
-$^\dagger$ a lightly-trained critic; the *level* tracks critic quality, but the **flat** response to the Hessian is the robust point.
+$^\dagger$ a lightly-trained critic; the *level* tracks critic quality, but the **flat** response to the Hessian is the robust point. **Read rows 1 vs 3:** same $\Delta t$, same displacement mismatch (0.05) — only the value function differs, yet corr$(g_1)$ collapses $0.996 \to 0.24$. That collapse is purely $\nabla V$ quality (exact gradient vs. rough MLP gradient plus single-sample $\mathbb{E}_a$ noise).
 
 - **The Taylor term is not useless in principle:** with an exact $V$ it does what theory predicts (0.996 $\to$ 1.000 at the floor). So the second-order math is sound; what kills it is the *value function*.
 - **At the floor, the bottleneck is critic $\nabla V$ quality, not curvature.** With the real MLP critic the first-order term is already only weakly correlated with $\Delta V$ (the gradient of a trained value MLP is rough, and the single-sample $\mathbb{E}_a$ adds noise), and the Hessian correction is both *tiny* (measured $\approx 5\%$ of the first-order term's magnitude) and computed from an even noisier object (the MLP's second derivative). A small, noisy second-order patch cannot lift a first-order term that is itself the limiter — the fix is a cleaner $\nabla V$ (the explicit scalar $V$-head, §9 risk table), not a curvature term.
