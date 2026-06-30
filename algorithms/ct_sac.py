@@ -56,6 +56,7 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
         generator_gate_scale: float = 0.0,
+        value_warmup: int = 0,
     ) -> None:
         super().__init__(
             env=env,
@@ -156,6 +157,12 @@ class CTSAC(OffPolicyAlgorithm):
         # V and grad V (no differentiation through the twin-min / stochastic
         # policy). Trained by regression to the soft value E_a[Q~] (see train()).
         self.use_value_head = bool(getattr(self.model, "has_v_head", False))
+        # The head is trained from the first update, but the generator and the
+        # critic targets read it only after value_warmup regression updates;
+        # before that they use the sampled soft value, so the generator never
+        # bootstraps on an untrained head.
+        self.value_warmup = int(value_warmup)
+        self._value_updates = 0
         self.value_optimizer = None
         if self.use_value_head:
             self.value_optimizer = th.optim.Adam(
@@ -243,6 +250,7 @@ class CTSAC(OffPolicyAlgorithm):
                 self.value_optimizer.zero_grad()
                 value_loss.backward()
                 self.value_optimizer.step()
+                self._value_updates += 1
                 self.logger.record("train/value_loss", value_loss.item())
 
             ## Critic update (target)
@@ -300,13 +308,20 @@ class CTSAC(OffPolicyAlgorithm):
 
     # ------------------------ Critic targets ------------------------
 
+    @property
+    def _value_head_ready(self) -> bool:
+        """The V-head is read by the generator/targets only after it has had
+        ``value_warmup`` regression updates (insurance against bootstrapping on
+        an untrained head). value_warmup=0 reads it immediately."""
+        return self.use_value_head and self._value_updates >= self.value_warmup
+
     def _state_value(
         self, obs: th.Tensor, alpha_tensor: th.Tensor, use_target: bool = True
     ) -> th.Tensor:
         """State value V(x). With the explicit V-head this is a clean,
         sample-free read from the (lagged target) value net; otherwise it is the
         sampled soft expectation E_a[Q~] (``_value_expectation``)."""
-        if self.use_value_head:
+        if self._value_head_ready:
             return (
                 self.model.target_value(obs)
                 if use_target
@@ -384,7 +399,7 @@ class CTSAC(OffPolicyAlgorithm):
         need_hessian = sigma is not None
 
         obs_req = obs.detach().clone().requires_grad_(True)
-        if self.use_value_head:
+        if self._value_head_ready:
             # Clean, sample-free V(x); grad flows to obs_req (not to the frozen
             # target params), giving a smooth value gradient for b . grad V.
             V = self.model.target_value(obs_req)  # (B, 1)
