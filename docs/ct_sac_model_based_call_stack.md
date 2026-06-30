@@ -248,7 +248,7 @@ The final-policy gap is within noise ($p \approx 0.6$; both medians are low, so 
 
 ### 7.1 Target variance favors the generator
 
-**Rescaled time — the floor is $u = 0.2$.** The targets are expressed in $u = \Delta t \cdot \texttt{time\_rescale} = \Delta t / \Delta t_{\text{default}}$, where $\Delta t_{\text{default}}$ is the env's *native control timestep* (`dmc.py:133`, `control_timestep()`; cheetah $= 0.01$), distinct from the per-transition sampling step. So the floor $\Delta t = 0.002$ gives $u = 0.2$, the sub-unit regime where the two targets diverge.
+**Rescaled time — the floor is $u = 0.2$.** Two timesteps appear in the code. $\Delta t_{\text{default}}$ is cheetah's *nominal* control period, fixed at $0.01$, read once at env construction (`dmc.py:133`, `control_timestep()`); it sets $\texttt{time\_rescale} = 1/\Delta t_{\text{default}} = 100$. $\Delta t$ is the *actual* duration of each transition, stored in the buffer — $0.002$ at the floor. The targets are written in rescaled time $u = \Delta t \cdot \texttt{time\_rescale} = \Delta t / \Delta t_{\text{default}}$, the transition's duration measured in nominal control periods. The floor normalizes the actual step $0.002$ by the fixed nominal step $0.01$, giving $u = 0.2$. Because the normalizer is the nominal step $0.01$, the floor sits below unit rescaled time even though it is the smallest sampling step the env takes. This sub-unit $u$ is where the two targets diverge.
 
 **The two targets.** Let $\hat V(x) = \tilde Q(x, a_s)$, $a_s \sim \pi$, be the single-sample value estimate (`num_expectation_samples`$=1$, so $\mathbb{E}[\hat V] = V$, $\operatorname{Var}[\hat V] = \sigma^2$). Regrouping the code's expressions:
 $$
