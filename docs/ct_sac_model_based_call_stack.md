@@ -207,7 +207,19 @@ Gentler actions shrink $\lVert b\rVert$, but cheetah-run rewards forward speed, 
 
 **The physics floor is the obstacle.** The CT-RL paper's finest timestep for cheetah is $\Delta t_{\text{physics}} = 0.002$ (the MuJoCo model's native step is $0.01$). The generator's clean regime needs $\Delta t \lesssim 0.001$ — *below* the floor. So across the paper's entire legitimate control range $\Delta t \in [0.002, 0.03]$ the first-order step is biased; $\Delta t = 0.002$ is the borderline. Reaching the clean regime would require sub-physics-step control, which is not a valid configuration.
 
-**Second-order does not rescue it.** Adding $\tfrac12 (b\,\Delta t)^\top \nabla^2 V (b\,\Delta t)$ leaves the correlation essentially unchanged ($0.818 \to 0.817$ at the floor) — the residual error is the dynamics step ($b\,\Delta t \neq x' - x$), not the curvature of $V$.
+**Second-order does not rescue it — and the reason is regime-dependent.** Adding $\tfrac12 (b\,\Delta t)^\top \nabla^2 V (b\,\Delta t)$ leaves the correlation essentially unchanged at the floor ($\approx 0.82 \to 0.82$). It is tempting to attribute this to the displacement mismatch $b\,\Delta t \neq x' - x$, but a decomposition (quadratic $V$, where the Taylor expansion is *exact*, vs. the real MLP critic) shows two distinct residuals dominating in two regimes:
+
+| value function | $\Delta t$ | $\lVert\Delta x - b\,\Delta t\rVert / \lVert\Delta x\rVert$ | corr(1st-order) | corr(+Hessian) |
+|---|---|---|---|---|
+| exact quadratic | 0.002 | 0.05 | 0.996 | **1.000** |
+| exact quadratic | 0.01 | 0.24 | 0.915 | **0.976** |
+| real MLP critic | 0.002 | 0.05 | 0.24$^\dagger$ | **0.24** |
+
+$^\dagger$ a lightly-trained critic; the *level* tracks critic quality, but the **flat** response to the Hessian is the robust point.
+
+- **The Taylor term is not useless in principle:** with an exact $V$ it does what theory predicts (0.996 $\to$ 1.000 at the floor). So the second-order math is sound; what kills it is the *value function*.
+- **At the floor, the bottleneck is critic $\nabla V$ quality, not curvature.** With the real MLP critic the first-order term is already only weakly correlated with $\Delta V$ (the gradient of a trained value MLP is rough, and the single-sample $\mathbb{E}_a$ adds noise), and the Hessian correction is both *tiny* (measured $\approx 5\%$ of the first-order term's magnitude) and computed from an even noisier object (the MLP's second derivative). A small, noisy second-order patch cannot lift a first-order term that is itself the limiter — the fix is a cleaner $\nabla V$ (the explicit scalar $V$-head, §9 risk table), not a curvature term.
+- **At larger $\Delta t$, the displacement mismatch becomes a genuine ceiling.** It grows with $\Delta t$ (5% at the floor $\to$ 24% at $\Delta t = 0.01$) and enters at *first order* in $\nabla V$ (as $\nabla V\cdot(\Delta x - b\,\Delta t)$), so **no $V$-side term — gradient or Hessian — can remove it** (the exact-$V$ Hessian caps at 0.976, not 1.0, at $\Delta t = 0.01$). Only better integration of the *dynamics* (RK / implicit, i.e. predicting $x'$) addresses this.
 
 **Conclusion.** For cheetah the generator's valid regime ($\lVert b\,\Delta t\rVert \ll 1$) sits *below* the simulation's physics resolution, so it cannot be applied cleanly at legitimate timescales; the method suits genuinely low-drift / fine-timescale systems (e.g. the trading environment). The floor $\Delta t = 0.002$ (first-order corr $\approx 0.82$) was the borderline worth testing — and it was tested at 12 seeds (§7): the generator wins on per-update target variance but is **not** better than model-free end-to-end, because the non-contractive backup dominates the outcome.
 
