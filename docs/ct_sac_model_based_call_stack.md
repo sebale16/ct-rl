@@ -209,13 +209,26 @@ Gentler actions shrink $\lVert b\rVert$, but cheetah-run rewards forward speed, 
 
 **Second-order does not rescue it.** Adding $\tfrac12 (b\,\Delta t)^\top \nabla^2 V (b\,\Delta t)$ leaves the correlation essentially unchanged ($0.818 \to 0.817$ at the floor) — the residual error is the dynamics step ($b\,\Delta t \neq x' - x$), not the curvature of $V$.
 
-**Conclusion.** For cheetah the generator's valid regime ($\lVert b\,\Delta t\rVert \ll 1$) sits *below* the simulation's physics resolution, so it cannot be applied cleanly at legitimate timescales; the method suits genuinely low-drift / fine-timescale systems (e.g. the trading environment). The one legitimate borderline worth an empirical test is the floor $\Delta t = 0.002$, where the first-order correlation is $\approx 0.82$ when the critic is trained at that timescale.
+**Conclusion.** For cheetah the generator's valid regime ($\lVert b\,\Delta t\rVert \ll 1$) sits *below* the simulation's physics resolution, so it cannot be applied cleanly at legitimate timescales; the method suits genuinely low-drift / fine-timescale systems (e.g. the trading environment). The floor $\Delta t = 0.002$ (first-order corr $\approx 0.82$) was the borderline worth testing — and it was tested at 12 seeds (§7): the generator wins on per-update target variance but is **not** better than model-free end-to-end, because the non-contractive backup dominates the outcome.
 
 ---
 
-## 7. Target variance at fine timescales: why the model helps at the floor
+## 7. Target variance vs. outcome: the generator wins the micro, loses the macro
 
-An earlier version of this section argued the generator simply could not train (non-contraction). A 12-seed run at the floor refuted the strong form of that claim: the oracle generator **beat** model-free (eval $826 \pm 760$ vs $430 \pm 500$). The dominant mechanism is **target variance**, and it is controlled by the rescaled timestep — derived below and confirmed in code.
+This section has been revised twice as evidence accumulated; the final 12-seed result is stated first, then the mechanism that does and does not explain it.
+
+**Final result (cheetah-run, floor $\Delta t = 0.002$, 12 seeds, 1M steps).** The oracle generator (`mbq_floor`) is **not** better than model-free (`mf_floor`):
+
+| Metric | `mbq_floor` (oracle generator) | `mf_floor` (model-free) | diff | paired $p$ | Welch $p$ | Wilcoxon $p$ |
+|---|---|---|---|---|---|---|
+| Final policy | $560 \pm 642$, md 280 | $416 \pm 531$, md 200 | $+145$ | 0.61 | 0.55 | 0.85 |
+| Peak / best-model | $1586 \pm 693$, md 1779 | $1965 \pm 375$, md 2091 | $-379$ | 0.096 | 0.11 | 0.077 |
+
+The final-policy gap is noise ($p \approx 0.6$; both medians are low, so *both* arms collapse-prone by 1M). The only near-significant signal is the **peak**, and it favors **model-free** ($-379$, $p \approx 0.08\text{–}0.11$), which also reaches its peak far more reliably (sd $\pm375$ vs $\pm693$). An earlier mid-training snapshot ($826$ vs $430$ at ~752k) did **not** survive: `mbq_floor` degraded $826 \to 560$ as collapse-prone seeds fell off. So the floor is, at best, a wash — and model-free has the cleaner peak.
+
+**The lesson: per-update target variance and end-to-end outcome variance are different axes.** The generator wins the first (derived and measured below) but loses the second. The variance derivation is correct; it simply does not carry the outcome.
+
+### 7.1 Target variance — the micro-property the generator wins
 
 **Rescaled time — the floor is $u = 0.2$, not $1$.** The targets are expressed in $u = \Delta t \cdot \texttt{time\_rescale} = \Delta t / \Delta t_{\text{default}}$, where $\Delta t_{\text{default}}$ is the env's *native control timestep* (`dmc.py:133`, `control_timestep()`; cheetah $= 0.01$) — **not** the sampling step. So the floor $\Delta t = 0.002$ is $u = 0.2$: the sub-unit regime, which is exactly where the two targets diverge.
 
@@ -247,17 +260,26 @@ The finite difference estimates the per-step value change by subtracting two noi
 | 1.0 | 0.01 (benchmark) | 0.19 | $\approx 0.75$ |
 | 2.0 | 0.02 | 0.14 | $\approx 0.75$ |
 
-The $\sim\!1/u$ blow-up of the model-free target is exactly as derived; the generator target is flat in $u$. The two cross near $u \approx 0.25$: **below it (including the floor) the generator target is the lower-variance one; above it the finite difference wins** — and there the $\lVert b\,\Delta t\rVert$ linearization bias of §6 also turns against the generator. At the floor the generator target is $\approx 2\times$ less noisy, which is the mechanism behind the 12-seed result, and is consistent with the model-free arm *degrading* over training ($789 \to 430$ from 510k→1M) as its high-variance targets destabilize the long-horizon ($\gamma = 0.996$) value.
+The $\sim\!1/u$ blow-up of the model-free target is exactly as derived; the generator target is flat in $u$. The two cross near $u \approx 0.25$: **below it (including the floor) the generator target is the lower-variance one; above it the finite difference wins** — and there the $\lVert b\,\Delta t\rVert$ linearization bias of §6 also turns against the generator. So at the floor the per-update generator target is genuinely $\approx 2\times$ less noisy. This is a real, code-confirmed micro-property — it is *not*, however, enough to win the run.
 
-:::info
-**The non-contraction caveat still holds, but it is not the floor story.** $b\cdot\nabla V$ is a differential operator and lacks a sup-norm contraction — the CT-RL paper proves convergence "sidestepping the challenge that generator-based Hamiltonians lack Bellman-style contraction under the sup-norm." This shows up as heavy *seed* variance (both arms span ~2–2000 across 12 seeds), not as the uniform divergence an earlier single-seed run suggested. The dominant effect at the floor is the target-variance advantage above.
-:::
+### 7.2 Why it does not carry the outcome — the macro the generator loses
+
+Lower per-update target variance did **not** produce a better policy (§7 table). At the *outcome* level the model-based arm is in fact the *higher-variance* one — sd $\pm642/\pm693$ vs $\pm531/\pm375$ — with lower, less reliable peaks. The cause is the property an earlier draft demoted to a footnote: the generator backup is **not a sup-norm contraction**.
+
+$b\cdot\nabla V$ is a **differential** operator: $V_1, V_2$ can be sup-norm-close yet have arbitrarily different gradients, so $b\cdot\nabla(V_1-V_2)$ can *amplify* a small value error rather than damp it. The model-free soft-Bellman backup, by contrast, **averages** $V$ over $x'$ and scales by $\gamma<1$ — a $\gamma$-contraction, with a Banach fixed point. The CT-RL paper makes this explicit: it proves convergence "via new probabilistic arguments, sidestepping the challenge that **generator-based Hamiltonians lack Bellman-style contraction under the sup-norm**."
+
+Empirically this shows up not as uniform divergence (the earlier single-seed reading) but as a heavy **collapse tail**: across 12 seeds both arms span ~2–2000, but the generator's lack of a contraction to damp perturbations gives it the larger spread and the lower peaks. So the two effects pull in opposite directions and the contraction one wins the outcome:
+
+| Axis | Favors | Why |
+|---|---|---|
+| Per-update target variance ($u=0.2$) | **generator** ($\approx 2\times$) | no $1/u$ differencing (§7.1) |
+| End-to-end outcome (peak, seed spread) | **model-free** | $\gamma$-contraction damps error; generator amplifies it |
 
 :::warning
-**This is the oracle.** The low-variance term $\Delta t_{\text{default}}(b\cdot\nabla\hat V)$ is clean only because $b$ is *exact*. A learned drift injects model **error** (bias, not just variance) into that term; whether a learned model keeps the variance advantage without too much bias is precisely what the `mbq_phast_floor` run tests.
+**This is the oracle — the favorable case — and it still does not win.** The low-variance term $\Delta t_{\text{default}}(b\cdot\nabla\hat V)$ is clean only because $b$ is *exact*. Since the exact-drift generator already fails to beat model-free at the floor, a *learned* drift (which adds bias on top) has nothing to reach for: the `mbq_phast_floor` test was therefore dropped as moot.
 :::
 
-**Takeaway.** The generator helps in the **fine-timestep regime** ($u \ll 1$), where the model-free finite difference must divide a noisy value difference by a small step — the CT-RL setting's own motivation (continuous-time methods matter most as $\Delta t \to 0$), now visible directly in the target variance. Above $u \approx 0.25$ the finite difference is both lower-variance and unbiased, so model-free is preferred.
+**Takeaway.** The generator has a real low-variance advantage in the fine-timestep regime ($u \ll 1$), exactly where the model-free finite difference must divide a noisy value difference by a small step — the CT-RL setting's own motivation. But on cheetah at the floor that micro-advantage is **outweighed by the macro instability** of the non-contractive backup: 12 seeds show no significant final difference and a model-free edge at peak. The honest conclusion is that the model-based generator is **not better than model-free at the floor**; the variance mechanism is instructive but not decisive. Its remaining best-posed test is the *irregular*-dt gated blend (§8), not the floor.
 
 ---
 
