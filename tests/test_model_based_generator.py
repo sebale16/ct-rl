@@ -416,5 +416,110 @@ class TestValueHead(unittest.TestCase):
         self.assertTrue(all(th.all(th.isfinite(p)) for p in after))
 
 
+class TestSubstepQuadrature(unittest.TestCase):
+    """Sub-step quadrature generator target (generator_substeps = m), on cartpole
+    (a smooth system where the learned drift fits well)."""
+
+    def _cartpole_agent(self, substeps):
+        th.manual_seed(0)
+        np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform",
+            dt=0.01, physics_dt=0.01, episode_duration=10.0, seed=0,
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[64, 64], pi_net_arch=[64, 64], v_net_arch=[64, 64], device="cpu",
+        )
+        ph = PortHamiltonianModel(od, ad, mode="phast", hidden=(64, 64), device="cpu")
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=32,
+            buffer_size=4000, num_expectation_samples=8, seed=0,
+            use_model_based_q=True, dynamics_model=ph, dynamics_source="phast",
+            dynamics_warmup=2, generator_substeps=substeps,
+        )
+        O, A, NO, DT = _collect_env(env, 300)
+        for i in range(300):
+            agent.replay_buffer.add(
+                obs=O[i:i+1].numpy(), next_obs=NO[i:i+1].numpy(), action=A[i:i+1].numpy(),
+                reward=np.zeros((1,), np.float32), done=np.zeros((1,), np.float32),
+                t=np.zeros((1,), np.float32), next_t=DT[i].numpy(),
+            )
+        return env, model, ph, agent
+
+    def test_m1_matches_finite_difference_over_states(self):
+        """m=1 quadrature equals V(x + b*dt_default) - V(x) - beta*V(x)."""
+        _, model, ph, agent = self._cartpole_agent(substeps=1)
+        b = agent.replay_buffer.sample(16); alpha = th.tensor(float(agent.alpha))
+        tq = agent._substep_quadrature_target(
+            b.observations, b.actions, b.rewards, b.dones, alpha
+        )
+        with th.no_grad():
+            drift = th.as_tensor(ph.drift(b.observations, b.actions))
+            x_hat = b.observations + drift * agent.dt_default
+            V_cur = model.target_value(b.observations)
+            V_next = model.target_value(x_hat)
+            manual = b.rewards + (1 - b.dones) * (V_cur + (V_next - V_cur) - agent.beta * V_cur)
+        self.assertLess((tq - manual).abs().max().item(), 1e-6)
+
+    def test_target_finite_and_sample_free(self):
+        """m=4 quadrature target is finite, right-shaped, and sample-free (V-head)."""
+        _, _, _, agent = self._cartpole_agent(substeps=4)
+        b = agent.replay_buffer.sample(16); alpha = th.tensor(float(agent.alpha))
+        args = (b.observations, b.actions, b.rewards, b.dones, alpha)
+        th.manual_seed(1); t1 = agent._substep_quadrature_target(*args)
+        th.manual_seed(2); t2 = agent._substep_quadrature_target(*args)
+        self.assertEqual(tuple(t1.shape), (16, 1))
+        self.assertTrue(th.all(th.isfinite(t1)))
+        self.assertFalse(t1.requires_grad)
+        self.assertLess((t1 - t2).abs().max().item(), 1e-6)
+
+    def test_substeps_reduce_integration_error(self):
+        """More sub-steps roll the model more accurately, so the target converges:
+        target(m=8) is closer to a fine reference target(m=128) than target(m=1)."""
+        env = DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform",
+            dt=0.01, physics_dt=0.01, episode_duration=10.0, seed=0,
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        th.manual_seed(0)
+
+        class MockDynamics(th.nn.Module):
+            """Linear drift b(x) = x A^T scaled so |b*dt_default| ~ O(1)."""
+            def __init__(self, d):
+                super().__init__()
+                self.register_buffer("A", 60.0 * th.randn(d, d) / d**0.5)
+            def drift(self, obs, action):
+                x = th.as_tensor(obs, dtype=th.float32)
+                return x @ self.A.t()
+            def diffusion(self, obs):
+                return None
+            def to(self, device):
+                return self
+
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[64, 64], pi_net_arch=[64, 64], v_net_arch=[64, 64], device="cpu",
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=32,
+            buffer_size=2000, seed=0, use_model_based_q=True,
+            dynamics_model=MockDynamics(od), dynamics_source="phast", generator_substeps=1,
+        )
+        O, A, NO, DT = _collect_env(env, 64)
+        obs, act = O[:32], A[:32]
+        r = th.zeros(32, 1); done = th.zeros(32, 1); alpha = th.tensor(float(agent.alpha))
+
+        def target(m):
+            agent.generator_substeps = m
+            return agent._substep_quadrature_target(obs, act, r, done, alpha)
+
+        ref = target(128)
+        err1 = (target(1) - ref).abs().mean().item()
+        err8 = (target(8) - ref).abs().mean().item()
+        self.assertLess(err8, err1)  # more sub-steps -> closer to the converged target
+
+
 if __name__ == "__main__":
     unittest.main()

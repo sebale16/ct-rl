@@ -57,6 +57,7 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_warmup: int = 1000,
         generator_gate_scale: float = 0.0,
         value_warmup: int = 0,
+        generator_substeps: int = 0,
     ) -> None:
         super().__init__(
             env=env,
@@ -118,6 +119,11 @@ class CTSAC(OffPolicyAlgorithm):
         # analytic drift is trusted; elsewhere it falls back to the realized drift
         # (x'_i - x_i)/dt. 0 (default) => pure generator (no gating).
         self.generator_gate_scale = float(generator_gate_scale)
+        # Sub-step quadrature: roll the model this many Euler sub-steps over the
+        # nominal interval and read the value change from the V-head endpoints,
+        # instead of the first-order autograd term dt_default*(b.grad V).
+        # 0 (default) => first-order autograd generator. >=1 => quadrature.
+        self.generator_substeps = int(generator_substeps)
         self.dynamics_source = str(dynamics_source)
         self.human_input_intensity = float(human_input_intensity)
         self.dynamics_model = dynamics_model
@@ -394,7 +400,19 @@ class CTSAC(OffPolicyAlgorithm):
         With sigma != 0 (human input), the diffusion term
           1/2 Tr(sigma sigma^T Hess V)
         is added via Hessian-vector products.
+
+        When ``generator_substeps >= 1`` the first-order autograd term is replaced
+        by a sub-step quadrature: roll the model m Euler sub-steps over the nominal
+        interval and read the value change directly from the V-head endpoints,
+        lf = (V(x_hat_m) - V(x)) - beta*V(x). This is autograd-free, captures the
+        curvature the first-order term drops, and m=1 is a single-Euler-step finite
+        difference over states. See docs/ct_sac_substep_quadrature.md.
         """
+        if self.generator_substeps >= 1:
+            return self._substep_quadrature_target(
+                obs, actions, rewards, dones, alpha_tensor
+            )
+
         sigma = self.dynamics_model.diffusion(obs)
         need_hessian = sigma is not None
 
@@ -439,4 +457,36 @@ class CTSAC(OffPolicyAlgorithm):
 
         q_fast_target = (rewards + (1 - dones) * (V_det + lf.detach())).detach()
         self.logger.record("train/fraction", th.max(th.abs(lf)).item())
+        return q_fast_target
+
+    def _substep_quadrature_target(
+        self, obs, actions, rewards, dones, alpha_tensor
+    ) -> th.Tensor:
+        """Sub-step quadrature generator target (``generator_substeps = m``).
+
+        The drift-induced value change over the nominal interval is the integral
+        of the rate along the model orbit,
+          V(x') - V(x) = integral_0^dt_default (L^a V)(x(s)) ds,
+        which the first-order term dt_default*(b.grad V) samples at one point. Here
+        the model is rolled m Euler sub-steps of size h = dt_default/m, the V-head
+        is read at the rolled endpoint, and the value change is taken directly:
+          lf = (V(x_hat_m) - V(x)) - beta*V(x),  target = r + V(x) + lf.
+        No autograd / gradient is used; the value gradient and its curvature enter
+        through the finite difference of the (clean) V-head over the predicted
+        states. m=1 is a single-Euler-step finite difference over states; larger m
+        reduces the integration (Euler) error in the rolled endpoint. The discount
+        is kept as the single -beta*V(x) lump, matching the first-order target.
+        """
+        with th.no_grad():
+            x_hat = obs.detach().clone()
+            h = self.dt_default / float(self.generator_substeps)
+            for _ in range(self.generator_substeps):
+                b_k = self.dynamics_model.drift(x_hat, actions)  # (B, O) per second
+                b_k = th.as_tensor(b_k, dtype=x_hat.dtype, device=x_hat.device)
+                x_hat = x_hat + b_k * h
+            V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
+            V_next = self._state_value(x_hat, alpha_tensor)  # (B, 1) at rolled state
+            lf = (V_next - V_cur) - self.beta * V_cur
+            q_fast_target = (rewards + (1 - dones) * (V_cur + lf)).detach()
+            self.logger.record("train/fraction", th.max(th.abs(lf)).item())
         return q_fast_target
