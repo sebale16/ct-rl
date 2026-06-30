@@ -151,6 +151,18 @@ class CTSAC(OffPolicyAlgorithm):
         if self.alpha_optimizer is not None:
             self.optimizers.append(self.alpha_optimizer)
 
+        # Optional explicit scalar value head V(s): present iff the model was
+        # built with one. It gives the model-based generator a clean, sample-free
+        # V and grad V (no differentiation through the twin-min / stochastic
+        # policy). Trained by regression to the soft value E_a[Q~] (see train()).
+        self.use_value_head = bool(getattr(self.model, "has_v_head", False))
+        self.value_optimizer = None
+        if self.use_value_head:
+            self.value_optimizer = th.optim.Adam(
+                self.model.value_parameters, lr=self.lr_schedule(1.0)
+            )
+            self.optimizers.append(self.value_optimizer)
+
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
 
@@ -218,6 +230,21 @@ class CTSAC(OffPolicyAlgorithm):
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
 
+            ## Value head update (optional explicit scalar V(s) head)
+            # Regress V_psi(s) to the soft state-value E_a[Q~(s,a)]. The label's
+            # action expectation is sampled, but averaged over training into a
+            # smooth V_psi; at the generator's point of use V_psi and grad V_psi
+            # need no sampling and have a clean gradient.
+            if self.use_value_head:
+                with th.no_grad():
+                    value_target = self._value_expectation(obs, alpha_tensor)
+                value_pred = self.model.value(obs)
+                value_loss = F.mse_loss(value_pred, value_target)
+                self.value_optimizer.zero_grad()
+                value_loss.backward()
+                self.value_optimizer.step()
+                self.logger.record("train/value_loss", value_loss.item())
+
             ## Critic update (target)
             # Use the model-based generator once the dynamics model is ready:
             # immediately for a non-trainable oracle, after warmup for a learned model.
@@ -273,6 +300,20 @@ class CTSAC(OffPolicyAlgorithm):
 
     # ------------------------ Critic targets ------------------------
 
+    def _state_value(
+        self, obs: th.Tensor, alpha_tensor: th.Tensor, use_target: bool = True
+    ) -> th.Tensor:
+        """State value V(x). With the explicit V-head this is a clean,
+        sample-free read from the (lagged target) value net; otherwise it is the
+        sampled soft expectation E_a[Q~] (``_value_expectation``)."""
+        if self.use_value_head:
+            return (
+                self.model.target_value(obs)
+                if use_target
+                else self.model.value(obs)
+            )
+        return self._value_expectation(obs, alpha_tensor)
+
     def _value_expectation(
         self,
         obs: th.Tensor,
@@ -302,8 +343,8 @@ class CTSAC(OffPolicyAlgorithm):
           Q_fast = r + E[Q̃(s,a)] + (e^(-β*dt) E[Q̃(s',a')] - E[Q̃(s,a)]) / dt
         """
         with th.no_grad():
-            expectation_q_tilde_next = self._value_expectation(next_obs, alpha_tensor)
-            expectation_q_tilde_current = self._value_expectation(obs, alpha_tensor)
+            expectation_q_tilde_next = self._state_value(next_obs, alpha_tensor)
+            expectation_q_tilde_current = self._state_value(obs, alpha_tensor)
 
             dt = dt * self.time_rescale  # (B, 1), rescaled time
             gamma_dt = th.exp(-self.beta * dt)  # (B, 1)
@@ -343,7 +384,12 @@ class CTSAC(OffPolicyAlgorithm):
         need_hessian = sigma is not None
 
         obs_req = obs.detach().clone().requires_grad_(True)
-        V = self._value_expectation(obs_req, alpha_tensor)  # (B, 1), has graph
+        if self.use_value_head:
+            # Clean, sample-free V(x); grad flows to obs_req (not to the frozen
+            # target params), giving a smooth value gradient for b . grad V.
+            V = self.model.target_value(obs_req)  # (B, 1)
+        else:
+            V = self._value_expectation(obs_req, alpha_tensor)  # (B, 1), has graph
         (gV,) = th.autograd.grad(V.sum(), obs_req, create_graph=need_hessian)  # (B, O)
 
         V_det = V.detach()
