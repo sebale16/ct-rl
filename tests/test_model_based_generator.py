@@ -387,6 +387,24 @@ class TestValueHead(unittest.TestCase):
         th.manual_seed(2); s2 = agent._model_based_target(*args)
         self.assertGreater((s1 - s2).abs().max().item(), 1e-4)
 
+    def test_value_warmup_gates_head_read(self):
+        """During warmup the generator uses the sampled path (stochastic); once
+        the head has enough updates it switches to the sample-free head."""
+        _, _, agent = self._make([64, 64])
+        agent.value_warmup = 10
+        agent._value_updates = 0
+        self.assertFalse(agent._value_head_ready)
+        b = agent.replay_buffer.sample(32); alpha = th.tensor(float(agent.alpha))
+        args = (b.observations, b.actions, b.next_observations, b.rewards, b.dones, b.dt, alpha)
+        th.manual_seed(1); w1 = agent._model_based_target(*args)
+        th.manual_seed(2); w2 = agent._model_based_target(*args)
+        self.assertGreater((w1 - w2).abs().max().item(), 1e-4)  # sampled fallback
+        agent._value_updates = 10  # warmup reached
+        self.assertTrue(agent._value_head_ready)
+        th.manual_seed(1); r1 = agent._model_based_target(*args)
+        th.manual_seed(2); r2 = agent._model_based_target(*args)
+        self.assertLess((r1 - r2).abs().max().item(), 1e-6)     # head, sample-free
+
     def test_value_head_trains(self):
         """A few direct train steps move the V-head params and log a finite loss."""
         _, model, agent = self._make([64, 64])
