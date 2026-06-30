@@ -224,7 +224,7 @@ so the "1st-order" column is itself the readout of **$\nabla V$ quality** (how w
 $^\dagger$ a lightly-trained critic; the *level* tracks critic quality, but the **flat** response to the Hessian is the robust point. **Read rows 1 vs 3:** same $\Delta t$, same displacement mismatch (0.05) — only the value function differs, yet corr$(g_1)$ collapses $0.996 \to 0.24$. That collapse is purely $\nabla V$ quality (exact gradient vs. rough MLP gradient plus single-sample $\mathbb{E}_a$ noise).
 
 - **The Taylor term is not useless in principle:** with an exact $V$ it does what theory predicts (0.996 $\to$ 1.000 at the floor). So the second-order math is sound; what kills it is the *value function*.
-- **At the floor, the bottleneck is critic $\nabla V$ quality, not curvature.** With the real MLP critic the first-order term is already only weakly correlated with $\Delta V$ (the gradient of a trained value MLP is rough, and the single-sample $\mathbb{E}_a$ adds noise), and the Hessian correction is both *tiny* (measured $\approx 5\%$ of the first-order term's magnitude) and computed from an even noisier object (the MLP's second derivative). A small, noisy second-order patch cannot lift a first-order term that is itself the limiter — the fix is a cleaner $\nabla V$ (the explicit scalar $V$-head, §9 risk table), not a curvature term.
+- **At the floor, the bottleneck is critic $\nabla V$ quality, not curvature.** With the real MLP critic the first-order term is already only weakly correlated with $\Delta V$ (the gradient of a trained value MLP is rough, and the single-sample $\mathbb{E}_a$ adds noise), and the Hessian correction is both *tiny* (measured $\approx 5\%$ of the first-order term's magnitude) and computed from an even noisier object (the MLP's second derivative). A small, noisy second-order patch cannot lift a first-order term that is itself the limiter — the fix is a cleaner $\nabla V$ (the explicit scalar $V$-head, §9), not a curvature term.
 - **At larger $\Delta t$, the displacement mismatch becomes a genuine ceiling.** It grows with $\Delta t$ (5% at the floor $\to$ 24% at $\Delta t = 0.01$) and enters at *first order* in $\nabla V$ (as $\nabla V\cdot(\Delta x - b\,\Delta t)$), so **no $V$-side term — gradient or Hessian — can remove it** (the exact-$V$ Hessian caps at 0.976, not 1.0, at $\Delta t = 0.01$). Only better integration of the *dynamics* (RK / implicit, i.e. predicting $x'$) addresses this.
 
 **Conclusion.** For cheetah the generator's valid regime ($\lVert b\,\Delta t\rVert \ll 1$) sits *below* the simulation's physics resolution, so it cannot be applied cleanly at legitimate timescales; the method suits genuinely low-drift / fine-timescale systems (e.g. the trading environment). The floor $\Delta t = 0.002$ (first-order corr $\approx 0.82$) was the borderline worth testing — and it was tested at 12 seeds (§7): the generator wins on per-update target variance but is **not** better than model-free end-to-end, because the non-contractive backup dominates the outcome.
@@ -331,7 +331,29 @@ This is a bias trade on the *drift used in the rate* — it uses the real next s
 
 **What it does not fix.** The blend reduces *target bias*; it does not change the value-iteration's lack of contraction (§7). It is complementary to the stability levers (small flow step, explicit $V$-head, ensembles), not a substitute.
 
-**Modes.** `algo_generator_gate_scale` (default $0$ = off, leaving all existing runs unchanged). Two cheetah-run test modes at irregular $\Delta t = 0.01$, $s = 0.3$: `mbq_gate` (oracle drift) and `mbq_gate_phast` (learned PHAST drift), to be compared against `mbq`, `mbq_phast`, and a model-free irregular baseline.
+**Modes.** `algo_generator_gate_scale` (default $0$ = off, leaving all existing runs unchanged). Two cheetah-run test modes at irregular $\Delta t = 0.01$, $s = 3$: `mbq_gate` (oracle drift) and `mbq_gate_phast` (learned PHAST drift), to be compared against `mbq`, `mbq_phast`, and a model-free irregular baseline. The scale $s \approx 3$ is set from §6's validity curve (the generator is useful out to $\lVert b_i\,\Delta t\rVert \approx 1\text{–}3$); $s = 0.3$ would gate away the very coordinates the generator helps on.
+
+---
+
+## 9. The explicit scalar value head (`v_net_arch`)
+
+§6 traced the floor-regime failure of the generator to **$\nabla V$ quality**: with the value read as $V(x) = \mathbb{E}_{a\sim\pi}[\,\min_i Q_i(x,a) - \alpha\log\pi\,]$, the gradient $\nabla_x V$ is differentiated through the twin-minimum *and* the stochastic policy, so it is rough and single-sample-noisy — and that, not curvature, is what caps the first-order generator. The fix is to read $V$ and $\nabla V$ from a dedicated **state-only scalar head** $V_\psi(x)$, the $Q = V + q$ decoupling.
+
+**What it is.** `ActorQCriticModel` gains an optional value head (`v_net_arch`, default `None` = off → exact legacy behavior) plus a lagged target copy $V_{\bar\psi}$. The twin-$Q$ critic and the actor are unchanged — the head is added alongside, not in place of them.
+
+**How it is trained.** Each step, $V_\psi(x)$ is regressed to the soft value:
+$$
+\mathcal{L}_V = \big\lVert V_\psi(x) - \mathbb{E}_{a\sim\pi}[\,\min_i Q_i(x,a) - \alpha\log\pi\,]\big\rVert^2 .
+$$
+The label still samples actions, but that noise is **averaged over training** into a smooth $V_\psi$; the head is a distillation of the soft value, not a new bootstrap.
+
+**How the generator uses it.** The model-based target reads $V$ and $\nabla V$ from the lagged head $V_{\bar\psi}$: the gradient flows to the input $x$ (not to the frozen target params), giving a clean, single-MLP value gradient for $b\cdot\nabla V$. Both critic targets route $V$ through a `_state_value` helper, so the head also de-noises the finite-difference target when on.
+
+**Sample-free at the point of use.** With the head, the model-based target is **deterministic** — verified at $\approx 0$ variance across RNG seeds, versus $\approx 0.64$ for the sampled $\mathbb{E}_a[\tilde Q]$ path. This is the resolution of the "bypass sampling" question: the generator removes *successor-state* ($x'$) sampling; the head additionally removes the *action-expectation* sampling that defines $V$, so $V$ and $\nabla V$ are both sample-free.
+
+**What it does and does not fix.** It targets the $\nabla V$-quality bottleneck (§6 floor regime) and the action-sampling variance (§7.1) — *not* the displacement mismatch at large $\Delta t$ (§6, a first-order error no $V$-side term removes) and *not* the value-iteration's lack of contraction (§7.2). It is a variance/gradient-quality lever, complementary to the stability levers, not a cure for the macro instability.
+
+**Modes.** `model_v_net_arch` (empty default = off). Two cheetah-run test modes: `mbq_vhead_floor` (oracle generator + head at the floor $\Delta t = 0.002$ — the direct test of the gradient-quality hypothesis, against `mbq_floor`) and `mbq_vhead` (oracle + head, irregular $\Delta t = 0.01$, against `mbq`).
 
 ---
 
@@ -347,6 +369,9 @@ This is a bias trade on the *drift used in the rate* — it uses the real next s
 | `_model_based_target` | `algorithms/ct_sac.py:315` |
 | Per-component gated blend (§8) | `algorithms/ct_sac.py` `_model_based_target`, `generator_gate_scale` |
 | Gated-blend modes (`mbq_gate`, `mbq_gate_phast`) | `benchmarks/hyperparams/ct_sac.csv` |
+| Scalar value head $V_\psi$ (§9) | `models/actor_q_critic.py` `value`/`target_value`/`value_parameters` (`v_net_arch`) |
+| V-head training + `_state_value` | `algorithms/ct_sac.py` `train()` value-loss block, `_state_value` |
+| V-head modes (`mbq_vhead_floor`, `mbq_vhead`) | `benchmarks/hyperparams/ct_sac.csv` (`model_v_net_arch`) |
 | Energy MLP `H_θ` | `models/port_hamiltonian.py:73` |
 | `_grad_H` (autograd `∇H`) | `models/port_hamiltonian.py:96–103` |
 | `drift` (`(J−R)∇H + G_a a`) | `models/port_hamiltonian.py:107–117` |
