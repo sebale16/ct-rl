@@ -248,9 +248,11 @@ The final-policy gap is within noise ($p \approx 0.6$; both medians are low, so 
 
 ### 7.1 Target variance favors the generator
 
+**Two variance sources, and which one this is.** The continuous-time RL literature already establishes a variance blow-up as $u \to 0$ from the environment's *Brownian* noise: the discounted value increment splits into an $O(u)$ drift term and an $O(\sqrt u)$ martingale term $\nabla V\cdot\sigma\,dW$, so for small $u$ it is dominated by diffusion variation and naïve TD minimizes that noise in place of the Bellman drift (CT-RL paper §3.1 / Eq. 15, after Jia & Zhou 2023). That source requires a stochastic environment ($\sigma \neq 0$). The analysis below isolates a *complementary* source that persists at $\sigma = 0$: the variance of the single-sample action expectation $\mathbb{E}_a[\tilde Q]$. The floor runs use deterministic MuJoCo ($\sigma = 0$), so the Brownian term is absent and this action-sampling variance is the one in play.
+
 **Rescaled time — the floor is $u = 0.2$.** Two timesteps appear in the code. $\Delta t_{\text{default}}$ is cheetah's *nominal* control period, fixed at $0.01$, read once at env construction (`dmc.py:133`, `control_timestep()`); it sets $\texttt{time\_rescale} = 1/\Delta t_{\text{default}} = 100$. $\Delta t$ is the *actual* duration of each transition, stored in the buffer — $0.002$ at the floor. The targets are written in rescaled time $u = \Delta t \cdot \texttt{time\_rescale} = \Delta t / \Delta t_{\text{default}}$, the transition's duration measured in nominal control periods. The floor normalizes the actual step $0.002$ by the fixed nominal step $0.01$, giving $u = 0.2$. Because the normalizer is the nominal step $0.01$, the floor sits below unit rescaled time even though it is the smallest sampling step the env takes. This sub-unit $u$ is where the two targets diverge.
 
-**The two targets.** Let $\hat V(x) = \tilde Q(x, a_s)$, $a_s \sim \pi$, be the single-sample value estimate (`num_expectation_samples`$=1$, so $\mathbb{E}[\hat V] = V$, $\operatorname{Var}[\hat V] = \sigma^2$). Regrouping the code's expressions:
+**The two targets.** Let $\hat V(x) = \tilde Q(x, a_s)$, $a_s \sim \pi$, be the single-sample value estimate (`num_expectation_samples`$=1$, so $\mathbb{E}[\hat V] = V$, $\operatorname{Var}[\hat V] = \sigma_\pi^2$, where $\sigma_\pi$ is the action-sampling noise — distinct from the SDE diffusion $\sigma$ of §1). Regrouping the code's expressions:
 $$
 T_{\text{MF}} = r + \hat V(x)\Big(1 - \tfrac{1}{u}\Big) + \frac{\gamma^{u}}{u}\,\hat V(x'),
 \qquad
@@ -258,15 +260,15 @@ T_{\text{MB}} = r + (1-\beta)\,\hat V(x) + \Delta t_{\text{default}}\,\big(b\cdo
 $$
 (The model-free form is the code's $r + \hat V(x) + (\gamma^{u}\hat V(x') - \hat V(x))/u$; the generator form is `_model_based_target`.)
 
-**Model-free divides the value *difference* by $u$.** With $\hat V(x), \hat V(x')$ independent of variance $\sigma^2$:
+**Model-free divides the value *difference* by $u$.** With $\hat V(x), \hat V(x')$ independent of variance $\sigma_\pi^2$:
 $$
-\operatorname{Var}[T_{\text{MF}}] = \sigma^2\!\left[\Big(1-\tfrac{1}{u}\Big)^2 + \frac{\gamma^{2u}}{u^2}\right]
-\;\xrightarrow{\,u\to 0\,}\; \frac{2\sigma^2}{u^2},
-\qquad \operatorname{std}[T_{\text{MF}}] \sim \frac{\sqrt{2}\,\sigma}{u}.
+\operatorname{Var}[T_{\text{MF}}] = \sigma_\pi^2\!\left[\Big(1-\tfrac{1}{u}\Big)^2 + \frac{\gamma^{2u}}{u^2}\right]
+\;\xrightarrow{\,u\to 0\,}\; \frac{2\sigma_\pi^2}{u^2},
+\qquad \operatorname{std}[T_{\text{MF}}] \sim \frac{\sqrt{2}\,\sigma_\pi}{u}.
 $$
-The finite difference estimates the per-step value change by subtracting two noisy values and **dividing by the small step $u$**, so its variance blows up as $u \to 0$. It is *minimized* at $u = 1$, where the $\hat V(x)$ term cancels and $\operatorname{std} = \gamma\sigma$.
+The finite difference estimates the per-step value change by subtracting two noisy values and **dividing by the small step $u$**, so its variance blows up as $u \to 0$. It is *minimized* at $u = 1$, where the $\hat V(x)$ term cancels and $\operatorname{std} = \gamma\sigma_\pi$.
 
-**The generator target.** $T_{\text{MB}}$ contains no $1/u$: its variance is $(1-\beta)^2\sigma^2 + \Delta t_{\text{default}}^2\,\lVert b\rVert^2\,\sigma_{\nabla}^2$, **independent of $u$** (and of $\Delta t$). It is bounded by the value- and gradient-noise and stays bounded as the step shrinks.
+**The generator target.** $T_{\text{MB}}$ contains no $1/u$: its variance is $(1-\beta)^2\sigma_\pi^2 + \Delta t_{\text{default}}^2\,\lVert b\rVert^2\,\sigma_{\nabla}^2$, **independent of $u$** (and of $\Delta t$). It is bounded by the value- and gradient-noise and stays bounded as the step shrinks.
 
 **Measured** (cheetah-run, oracle drift, critic trained 4k steps; target std over 200 policy resamples on a fixed batch):
 
