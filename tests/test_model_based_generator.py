@@ -319,5 +319,84 @@ class TestPhastLearnedDynamics(unittest.TestCase):
         self.assertGreater(agent._dynamics_updates, 5)
 
 
+class TestValueHead(unittest.TestCase):
+    """Explicit scalar V(s) head: clean, sample-free V and grad V for the generator."""
+
+    def _make(self, v_net_arch):
+        th.manual_seed(0)
+        np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.001, physics_dt=0.001,
+            episode_duration=5.0,
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            q_net_arch=[64, 64], pi_net_arch=[64, 64], v_net_arch=v_net_arch,
+            device="cpu",
+        )
+        ph = PortHamiltonianModel(od, ad, mode="mujoco", drift_fn=env.dynamics_terms, device="cpu")
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=32,
+            buffer_size=4000, num_expectation_samples=8, seed=0,
+            use_model_based_q=True, dynamics_model=ph,
+        )
+        O, A, NO, DT = _collect_env(env, 300)
+        for i in range(300):
+            agent.replay_buffer.add(
+                obs=O[i:i+1].numpy(), next_obs=NO[i:i+1].numpy(), action=A[i:i+1].numpy(),
+                reward=np.zeros((1,), np.float32), done=np.zeros((1,), np.float32),
+                t=np.zeros((1,), np.float32), next_t=DT[i].numpy(),
+            )
+        return env, model, agent
+
+    def test_head_off_by_default(self):
+        """No v_net_arch -> no head, empty value params, generator unchanged."""
+        _, model, agent = self._make(None)
+        self.assertFalse(model.has_v_head)
+        self.assertEqual(list(model.value_parameters), [])
+        self.assertFalse(agent.use_value_head)
+        self.assertIsNone(agent.value_optimizer)
+
+    def test_head_built_and_wired(self):
+        _, model, agent = self._make([64, 64])
+        self.assertTrue(model.has_v_head)
+        self.assertGreater(len(list(model.value_parameters)), 0)
+        self.assertTrue(agent.use_value_head)
+        self.assertIsNotNone(agent.value_optimizer)
+        obs = th.as_tensor(
+            np.stack([model.observation_space.sample() for _ in range(5)]), dtype=th.float32
+        )
+        self.assertEqual(tuple(model.value(obs).shape), (5, 1))
+        self.assertEqual(tuple(model.target_value(obs).shape), (5, 1))
+
+    def test_generator_target_is_sample_free(self):
+        """With the V-head, the model-based target has no action-sampling noise:
+        identical across different RNG seeds (vs the sampled E_a[Q~] path)."""
+        _, _, agent = self._make([64, 64])
+        b = agent.replay_buffer.sample(32); alpha = th.tensor(float(agent.alpha))
+        args = (b.observations, b.actions, b.next_observations, b.rewards, b.dones, b.dt, alpha)
+        th.manual_seed(1); t1 = agent._model_based_target(*args)
+        th.manual_seed(2); t2 = agent._model_based_target(*args)
+        self.assertTrue(th.all(th.isfinite(t1)))
+        self.assertLess((t1 - t2).abs().max().item(), 1e-6)   # sample-free
+        # contrast: the sampled path is stochastic across seeds
+        agent.use_value_head = False
+        th.manual_seed(1); s1 = agent._model_based_target(*args)
+        th.manual_seed(2); s2 = agent._model_based_target(*args)
+        self.assertGreater((s1 - s2).abs().max().item(), 1e-4)
+
+    def test_value_head_trains(self):
+        """A few direct train steps move the V-head params and log a finite loss."""
+        _, model, agent = self._make([64, 64])
+        before = [p.detach().clone() for p in model.value_parameters]
+        agent.train(gradient_steps=5, batch_size=32)   # direct: no logger dump/clear
+        after = list(model.value_parameters)
+        changed = any((a - b).abs().max().item() > 0 for a, b in zip(after, before))
+        self.assertTrue(changed, "value head parameters did not update")
+        self.assertTrue(all(th.all(th.isfinite(p)) for p in after))
+
+
 if __name__ == "__main__":
     unittest.main()

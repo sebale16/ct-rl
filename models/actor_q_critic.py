@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from itertools import chain
-from typing import Iterable, Sequence, Type, Dict, Any, Union
+from typing import Iterable, Optional, Sequence, Type, Dict, Any, Union
 
 import numpy as np
 import torch as th
@@ -45,6 +45,7 @@ class ActorQCriticModel(Model):
         activation_fn: Type[nn.Module] = nn.ReLU,
         log_std_init: float = -0.5,
         n_critics: int = 2,
+        v_net_arch: Optional[Sequence[int]] = None,
         deterministic_policy: bool = False,
         use_actor_target: bool = False,
         device: str = "auto",
@@ -75,6 +76,23 @@ class ActorQCriticModel(Model):
             q_target = deepcopy(q_net)
             self.q_nets.append(q_net)
             self.q_target_nets.append(q_target)
+
+        # Optional state-only value head V(s). When present, the model-based
+        # generator reads V and grad V from this smooth scalar MLP instead of
+        # differentiating through E_a[min-Q - alpha log pi] (the twin-min and
+        # stochastic policy), giving a clean, sample-free value gradient.
+        # Off by default (v_net_arch=None) -> exact legacy behavior.
+        self.has_v_head = v_net_arch is not None
+        if self.has_v_head:
+            self.v_net = create_mlp(
+                input_dim=obs_dim,
+                output_dim=1,
+                hidden_dims=list(v_net_arch),
+                activation_fn=activation_fn,
+            )
+            self.v_target_net = deepcopy(self.v_net)
+            for p in self.v_target_net.parameters():
+                p.requires_grad = False
 
         # Actor
         if deterministic_policy:
@@ -121,6 +139,9 @@ class ActorQCriticModel(Model):
         }
         if self.actor_target:
             state_dict["actor_target"] = self.actor_target.state_dict()
+        if self.has_v_head:
+            state_dict["v_net"] = self.v_net.state_dict()
+            state_dict["v_target_net"] = self.v_target_net.state_dict()
         th.save(state_dict, path)
 
     def load_state(self, path: str, strict: bool = True) -> None:
@@ -135,6 +156,9 @@ class ActorQCriticModel(Model):
             self.q_target_nets, state_dict["critic_targets"]
         ):
             q_target_net.load_state_dict(q_target_state, strict=strict)
+        if self.has_v_head and "v_net" in state_dict:
+            self.v_net.load_state_dict(state_dict["v_net"], strict=strict)
+            self.v_target_net.load_state_dict(state_dict["v_target_net"], strict=strict)
 
     def to(self, device: Union[str, th.device]) -> None:
         """
@@ -146,6 +170,9 @@ class ActorQCriticModel(Model):
         self.actor.to(self.device)
         if self.actor_target:
             self.actor_target.to(self.device)
+        if getattr(self, "has_v_head", False):
+            self.v_net.to(self.device)
+            self.v_target_net.to(self.device)
 
     # ---- Helpers ----
 
@@ -195,6 +222,17 @@ class ActorQCriticModel(Model):
         stacked = th.stack(qs, dim=0)
         return stacked.min(dim=0).values
 
+    # ------------------------ Value head (optional) ------------------------
+
+    def value(self, obs: Union[th.Tensor, np.ndarray]) -> th.Tensor:
+        """Scalar state value V(s) from the online value head. Requires the
+        model to have been built with ``v_net_arch`` (``has_v_head``)."""
+        return self.v_net(self._process_obs(obs))
+
+    def target_value(self, obs: Union[th.Tensor, np.ndarray]) -> th.Tensor:
+        """Scalar state value V(s) from the lagged target value head."""
+        return self.v_target_net(self._process_obs(obs))
+
     # ------------------------ Actor ------------------------
 
     def act(
@@ -232,6 +270,13 @@ class ActorQCriticModel(Model):
                 target_param.data.mul_(1.0 - tau)
                 target_param.data.add_(tau * param.data)
 
+        if getattr(self, "has_v_head", False):
+            for param, target_param in zip(
+                self.v_net.parameters(), self.v_target_net.parameters()
+            ):
+                target_param.data.mul_(1.0 - tau)
+                target_param.data.add_(tau * param.data)
+
         if update_actor and self.actor_target is not None:
             for param, target_param in zip(
                 self.actor.parameters(), self.actor_target.parameters()
@@ -244,6 +289,10 @@ class ActorQCriticModel(Model):
     @property
     def critic_parameters(self) -> Iterable[th.nn.Parameter]:
         return [p for q in self.q_nets for p in q.parameters()]
+
+    @property
+    def value_parameters(self) -> Iterable[th.nn.Parameter]:
+        return list(self.v_net.parameters()) if getattr(self, "has_v_head", False) else []
 
     @property
     def actor_parameters(self) -> Iterable[th.nn.Parameter]:
