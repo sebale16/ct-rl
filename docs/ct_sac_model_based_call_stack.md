@@ -213,31 +213,51 @@ Gentler actions shrink $\lVert b\rVert$, but cheetah-run rewards forward speed, 
 
 ---
 
-## 7. Training stability: model-free contracts, the generator does not
+## 7. Target variance at fine timescales: why the model helps at the floor
 
-Even at the legitimate floor $\Delta t = 0.002$ — where the first-order target is reasonably accurate (corr $\approx 0.82$, §6) — the model-based generator does **not** train stably. The cause is a property of the critic's value-iteration $V_{k+1} = T(V_k)$ (regress the critic to a bootstrapped target, then Polyak-update the target network): whether the backup operator $T$ is a **contraction**.
+An earlier version of this section argued the generator simply could not train (non-contraction). A 12-seed run at the floor refuted the strong form of that claim: the oracle generator **beat** model-free (eval $826 \pm 760$ vs $430 \pm 500$). The dominant mechanism is **target variance**, and it is controlled by the rescaled timestep — derived below and confirmed in code.
 
-**Model-free — a $\gamma$-contraction.** The backup is the soft-Bellman operator
+**Rescaled time — the floor is $u = 0.2$, not $1$.** The targets are expressed in $u = \Delta t \cdot \texttt{time\_rescale} = \Delta t / \Delta t_{\text{default}}$, where $\Delta t_{\text{default}}$ is the env's *native control timestep* (`dmc.py:133`, `control_timestep()`; cheetah $= 0.01$) — **not** the sampling step. So the floor $\Delta t = 0.002$ is $u = 0.2$: the sub-unit regime, which is exactly where the two targets diverge.
+
+**The two targets.** Let $\hat V(x) = \tilde Q(x, a_s)$, $a_s \sim \pi$, be the single-sample value estimate (`num_expectation_samples`$=1$, so $\mathbb{E}[\hat V] = V$, $\operatorname{Var}[\hat V] = \sigma^2$). Regrouping the code's expressions:
 $$
-(T_{\text{MF}}V)(x) = \mathbb{E}_a\big[\,r - \alpha\log\pi + \gamma\,\mathbb{E}[V(x')]\,\big],
+T_{\text{MF}} = r + \hat V(x)\Big(1 - \tfrac{1}{u}\Big) + \frac{\gamma^{u}}{u}\,\hat V(x'),
+\qquad
+T_{\text{MB}} = r + (1-\beta)\,\hat V(x) + \Delta t_{\text{default}}\,\big(b\cdot\nabla \hat V(x)\big).
 $$
-which satisfies $\lVert T_{\text{MF}}V_1 - T_{\text{MF}}V_2\rVert_\infty \le \gamma\,\lVert V_1 - V_2\rVert_\infty$: it **averages** $V$ over the next state (non-expansive) and scales by $\gamma < 1$. Banach's theorem then gives a unique fixed point and convergence. At the floor (uniform $\Delta t = \Delta t_{\text{default}}$) the finite-difference target reduces exactly to this Bellman backup.
+(The model-free form is the code's $r + \hat V(x) + (\gamma^{u}\hat V(x') - \hat V(x))/u$; the generator form is `_model_based_target`.)
 
-**Generator — not a contraction.** The backup is
+**Model-free divides the value *difference* by $u$.** With $\hat V(x), \hat V(x')$ independent of variance $\sigma^2$:
 $$
-(T_{\text{gen}}V)(x) = V(x) + \tau\big(\,r + b\cdot\nabla V - \beta V\,\big).
+\operatorname{Var}[T_{\text{MF}}] = \sigma^2\!\left[\Big(1-\tfrac{1}{u}\Big)^2 + \frac{\gamma^{2u}}{u^2}\right]
+\;\xrightarrow{\,u\to 0\,}\; \frac{2\sigma^2}{u^2},
+\qquad \operatorname{std}[T_{\text{MF}}] \sim \frac{\sqrt{2}\,\sigma}{u}.
 $$
-The generator $b\cdot\nabla V$ is a **differential** operator (it acts on the *gradient* of $V$), not an expectation. Differential operators are not sup-norm contractions: $V_1$ and $V_2$ can be sup-norm-close yet have arbitrarily large gradient differences, so $b\cdot\nabla(V_1 - V_2)$ can *amplify* the difference — $\lVert T_{\text{gen}}V_1 - T_{\text{gen}}V_2\rVert_\infty$ can exceed $\lVert V_1 - V_2\rVert_\infty$. There is no Banach guarantee, so the iteration can oscillate or diverge. The CT-RL paper makes this explicit: it proves convergence "via new probabilistic arguments, sidestepping the challenge that **generator-based Hamiltonians lack Bellman-style contraction under the sup-norm**."
+The finite difference estimates the per-step value change by subtracting two noisy values and **dividing by the small step $u$**, so its variance blows up as $u \to 0$. It is *minimized* at $u = 1$, where the $\hat V(x)$ term cancels and $\operatorname{std} = \gamma\sigma$.
 
-**Empirical confirmation** (oracle generator, 1M @ floor $\Delta t = 0.002$, eval on a regular 1000-step grid; the model-free arm was intentionally not run). The evaluation return oscillates without converging — repeatedly spiking toward ~100 and collapsing to ~1:
+**The generator does not.** $T_{\text{MB}}$ contains no $1/u$: its variance is $(1-\beta)^2\sigma^2 + \Delta t_{\text{default}}^2\,\lVert b\rVert^2\,\sigma_{\nabla}^2$, **independent of $u$** (and of $\Delta t$). It is bounded by the value- and gradient-noise, not amplified by fine stepping.
 
-| step ($\times 10^3$) | 75 | 225 | 375 | 425 | 700 | 775 | 800 | 875 |
-|---|---|---|---|---|---|---|---|---|
-| eval return | 23 | 46 | 94 | 3 | 90 | 102 | 2 | 1 |
+**Measured** (cheetah-run, oracle drift, critic trained 4k steps; target std over 200 policy resamples on a fixed batch):
 
-The peaks (~100) stay far below the discrete-time baseline (~850) and are never sustained; the final checkpoints collapsed to ~1. This is the non-contraction in action: the gradient-based backup — $\nabla V$ of an MLP, amplified by the large $\lVert b\rVert$ — has no contraction to damp perturbations, so the critic repeatedly enters and is ejected from good regions.
+| $u$ | $\Delta t$ | $\operatorname{std}[T_{\text{MF}}]$ | $\operatorname{std}[T_{\text{MB}}]$ |
+|---|---|---|---|
+| **0.2** | **0.002 (floor)** | **1.72** | **0.86** |
+| 0.25 | 0.0025 | 0.97 | $\approx 0.75$ |
+| 0.5 | 0.005 | 0.43 | $\approx 0.75$ |
+| 1.0 | 0.01 (benchmark) | 0.19 | $\approx 0.75$ |
+| 2.0 | 0.02 | 0.14 | $\approx 0.75$ |
 
-**Takeaway.** On cheetah the generator faces two compounding obstacles: (1) the first-order linearization is valid only *below* the physics floor (§6), and (2) even where the target is accurate, the value-iteration is **non-contractive** and does not converge. Model-free's Bellman backup is a $\gamma$-contraction and trains stably, so its stable, hundreds-scale learning is the known baseline — we did not run it here because the generator's instability is already the conclusive result.
+The $\sim\!1/u$ blow-up of the model-free target is exactly as derived; the generator target is flat in $u$. The two cross near $u \approx 0.25$: **below it (including the floor) the generator target is the lower-variance one; above it the finite difference wins** — and there the $\lVert b\,\Delta t\rVert$ linearization bias of §6 also turns against the generator. At the floor the generator target is $\approx 2\times$ less noisy, which is the mechanism behind the 12-seed result, and is consistent with the model-free arm *degrading* over training ($789 \to 430$ from 510k→1M) as its high-variance targets destabilize the long-horizon ($\gamma = 0.996$) value.
+
+:::info
+**The non-contraction caveat still holds, but it is not the floor story.** $b\cdot\nabla V$ is a differential operator and lacks a sup-norm contraction — the CT-RL paper proves convergence "sidestepping the challenge that generator-based Hamiltonians lack Bellman-style contraction under the sup-norm." This shows up as heavy *seed* variance (both arms span ~2–2000 across 12 seeds), not as the uniform divergence an earlier single-seed run suggested. The dominant effect at the floor is the target-variance advantage above.
+:::
+
+:::warning
+**This is the oracle.** The low-variance term $\Delta t_{\text{default}}(b\cdot\nabla\hat V)$ is clean only because $b$ is *exact*. A learned drift injects model **error** (bias, not just variance) into that term; whether a learned model keeps the variance advantage without too much bias is precisely what the `mbq_phast_floor` run tests.
+:::
+
+**Takeaway.** The generator helps in the **fine-timestep regime** ($u \ll 1$), where the model-free finite difference must divide a noisy value difference by a small step — the CT-RL setting's own motivation (continuous-time methods matter most as $\Delta t \to 0$), now visible directly in the target variance. Above $u \approx 0.25$ the finite difference is both lower-variance and unbiased, so model-free is preferred.
 
 ---
 
@@ -267,7 +287,7 @@ The blended drift is fed into the *same* generator target $\Delta t_{\text{defau
 This is a bias trade on the *drift used in the rate* — it uses the real next state $x'$ and the real reward, with **no** reward model and **no** predicted-state rollout. It does not free the stiff subspace from needing $x'$; it only lets the analytic generator carry the coordinates where it is trustworthy.
 :::
 
-**Where it is expected to help.** At the **floor** (uniform $\Delta t = \Delta t_{\text{default}}$) the finite difference is already the exact soft-Bellman backup (§7), so the blend collapses back to model-free and adds nothing — this is why no floor mode is shipped. The blend targets the **irregular** regime $\Delta t = 0.01$, where the finite-difference *rate* is biased at large $\Delta t$, the pure oracle was *worst* ($\lVert b\,\Delta t\rVert \approx 6$, §6), and a smooth learned PHAST drift previously beat model-free $\approx 3\times$. The gate is designed to retain that smooth-subspace advantage while stopping the stiff coordinates from poisoning the target.
+**Where it is expected to help.** Not at the floor: there $u = 0.2$ and the *pure* generator already wins on target variance (§7), so the gate — which routes the large-$\lvert b_i\Delta t\rvert$ coordinates back to the (high-variance, $1/u$) realized drift — would *re-introduce* the noise the generator was avoiding. The blend instead targets the **irregular** regime $\Delta t = 0.01$ ($u = 1$), where the finite difference is low-variance but the pure oracle was *worst* ($\lVert b\,\Delta t\rVert \approx 6$, §6) and a smooth learned PHAST drift previously beat model-free $\approx 3\times$. The gate is designed to retain that smooth-subspace advantage while stopping the stiff coordinates from poisoning the target. Note the gate scale must be set against §6's validity curve (the generator is useful out to $\lVert b_i\,\Delta t\rVert \approx 1\text{–}3$), so `generator_gate_scale` $\approx 3$, not $0.3$.
 
 **What it does not fix.** The blend reduces *target bias*; it does not change the value-iteration's lack of contraction (§7). It is complementary to the stability levers (small flow step, explicit $V$-head, ensembles), not a substitute.
 
