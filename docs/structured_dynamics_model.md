@@ -58,7 +58,7 @@ $$
 H(q,p) = V(q) + \tfrac12\, p^\top M(q)^{-1} p .
 $$
 
-The inverse $M^{-1}p$ is a dense linear solve (`torch.linalg.solve`).
+The inverse $M^{-1}p$ is a dense linear solve (`torch.linalg.solve`). Appendix C details why this construction is symmetric positive-definite.
 
 ### 2.3 The flow, and passivity
 
@@ -81,7 +81,7 @@ $$
 D = \mathrm{diag}\big(\mathrm{softplus}(\log d)\big) + K\,\mathrm{diag}\big(\mathrm{softplus}(w([q,\mathrm{d}v]))\big)\,K^\top \succeq 0,
 $$
 
-with learned low-rank direction columns $K$ and nonnegative gate weights $w \ge 0$ (distinct from the discount rate $\beta$) driven by the incoming velocity jump $\mathrm{d}v = \dot q_t - \dot q_{t-1}$; the base diagonal is always present and the contact term vanishes as $w\to 0$. Because $D$ acts on momentum and is PSD, the model is passive: $\dot H = -\dot q^\top D\,\dot q \le 0$. The port $G_a$ maps the action to a generalized force — a dense linear map to the config axis by default, or a sparse actuator-to-DOF scatter when a `DOFLayout` supplies one.
+with learned low-rank direction columns $K$ and nonnegative gate weights $w \ge 0$ (distinct from the discount rate $\beta$) driven by the incoming velocity jump $\mathrm{d}v = \dot q_t - \dot q_{t-1}$; the base diagonal is always present and the contact term vanishes as $w\to 0$. Because $D$ acts on momentum and is PSD, the model is passive: $\dot H = -\dot q^\top D\,\dot q \le 0$. The port $G_a$ maps the action to a generalized force — a dense linear map to the config axis by default, or a sparse actuator-to-DOF scatter when a `DOFLayout` supplies one. Appendix C details softplus, the gate $w$, and why $D$ is positive-semidefinite.
 
 ### 2.4 Coriolis emerges from the mass matrix
 
@@ -397,7 +397,43 @@ for the twin-$Q$ targets $Q^{\text{tgt}}$ and the value head $V^{\text{tgt}}$, m
 
 ---
 
-## Appendix C — Symbol and mode reference
+## Appendix C — Parameterizing the learned matrices
+
+The mass matrix and the damping are learned, yet each must meet a structural constraint — $M$ symmetric positive-definite, $D$ symmetric positive-semidefinite. Both are constructed so the constraint holds for any network output, so training is unconstrained and the matrices are always valid.
+
+### C.1 SPD mass matrix $M(q) = L(q)L(q)^\top + \varepsilon I$
+
+$L(q)$ is the learned object: the network emits its entries and $M$ is assembled from it.
+
+**Symmetric.** For any matrix $L$, the product $LL^\top$ is symmetric, since $(LL^\top)^\top = LL^\top$; adding $\varepsilon I$ keeps it symmetric. So $M = M^\top$ for any $L$.
+
+**Positive-definite.** $LL^\top$ is a Gram matrix, hence positive-semidefinite: $v^\top LL^\top v = \lVert L^\top v\rVert^2 \ge 0$ for every $v$. Adding $\varepsilon I$ with $\varepsilon>0$ makes it strictly positive-definite,
+
+$$
+v^\top M v = \lVert L^\top v\rVert^2 + \varepsilon\lVert v\rVert^2 \ge \varepsilon\lVert v\rVert^2 > 0 \qquad (v \ne 0),
+$$
+
+so every eigenvalue of $M$ is at least $\varepsilon$. That floor also keeps $M$ invertible and well-conditioned, which the drift needs for the solve $M^{-1}(\cdots)$.
+
+**Cholesky parameterization.** $L(q)$ is not arbitrary: the network emits the $n_v(n_v+1)/2$ lower-triangular entries, and the diagonal is passed through softplus so it is strictly positive. Lower-triangular matrices with a positive diagonal are in bijection with SPD matrices (the Cholesky factorization), so this form represents every mass matrix and only SPD ones — the unconstrained network outputs are mapped onto the SPD cone by the triangular structure and the positive diagonal. The positive diagonal already makes $LL^\top$ strictly positive-definite; the $\varepsilon I$ is an added conditioning margin.
+
+**Why.** A mechanical mass matrix is SPD: the kinetic energy $\tfrac12\dot q^\top M(q)\dot q$ is positive for any nonzero velocity, $M$ is symmetric, and the acceleration $\ddot q = M^{-1}(\cdots)$ needs $M$ invertible. The construction guarantees all three for any parameters, and $M(q)$ varies with configuration as a physical mass matrix does.
+
+### C.2 PSD damping $D(q,\mathrm{d}v) = \mathrm{diag}\big(\mathrm{softplus}(\log d)\big) + K\,\mathrm{diag}\big(\mathrm{softplus}(w)\big)\,K^\top$
+
+**softplus.** $\mathrm{softplus}(z) = \log(1 + e^{z})$ maps any real number to a strictly positive one — for large $z$ it is $\approx z$, for large negative $z$ it is $\approx e^{z}$ (small but positive). It is a smooth version of $\max(0,z)$, so a parameter or a network output can range over all reals while the quantity it feeds stays positive. That is how each damping coefficient is held nonnegative.
+
+**The gate $w$.** $w = \mathrm{softplus}(\text{net}([q,\mathrm{d}v]))$ is a short vector of nonnegative gate weights, one per column of $K$, produced by a small network of the configuration $q$ and the velocity jump $\mathrm{d}v = \dot q_t - \dot q_{t-1}$ (it is separate from the discount rate $\beta$). Because a contact registers as a velocity jump, $w$ raises the extra damping when $\mathrm{d}v$ signals a contact and shrinks toward zero on smooth motion.
+
+**The two terms.** The base $\mathrm{diag}(\mathrm{softplus}(\log d))$ is a learned, state-independent per-DOF damping that is always present. The second term $K\,\mathrm{diag}(w)\,K^\top = \sum_i w_i\,k_i k_i^\top$ adds a low-rank (rank $\le r$), state-dependent contribution in the learned direction columns $k_i$ of $K$, weighted by the gate.
+
+**Positive-semidefinite.** The base diagonal is PSD (nonnegative entries). The low-rank term is PSD by the Gram argument: $v^\top K\,\mathrm{diag}(w)\,K^\top v = \sum_i w_i\,(K^\top v)_i^2 \ge 0$, since each $w_i \ge 0$. A sum of PSD matrices is PSD, so $D \succeq 0$ for any network output.
+
+**Why.** $D$ is the dissipation, and the passivity certificate is $\dot H = -\dot q^\top D\,\dot q \le 0$ (§2.3) — energy only leaves the system, which requires $D \succeq 0$. Damping is naturally a few contact modes and may be zero in some directions, so it uses this diagonal-plus-low-rank PSD form; the mass matrix, which is inverted, uses the full-rank Cholesky form of C.1.
+
+---
+
+## Appendix D — Symbol and mode reference
 
 | Symbol / mode | Meaning |
 |---|---|
