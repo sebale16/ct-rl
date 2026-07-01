@@ -7,7 +7,7 @@ robots: noindex
 # Structured Port-Hamiltonian Dynamics for Model-Based CT-SAC
 
 :::info
-**Overview.** This document is the overarching view of a line of work that improved the *learned dynamics model* behind CT-SAC's model-based critic target. It records the diagnosis (the estimator is not the limiter; the drift model's accuracy is, and on cheetah that accuracy ceiling is the Coriolis structure rather than contacts), the two levers built in response — a **contact-aware damping** term and a **structured port-Hamiltonian model** with a mass-matrix canonicalizer — and the verification (unit tests plus an adversarial review). The detailed generator/variance mechanics live in `docs/ct_sac_model_based_call_stack.md`; the sub-step quadrature target in `docs/ct_sac_substep_quadrature.md`. This doc ties them together and describes the code that landed.
+**Overview.** This document is the overarching view of a line of work that improved the *learned dynamics model* behind CT-SAC's model-based critic target. It records the diagnosis (the estimator is not the limiter; the drift model's accuracy is, and on cheetah that accuracy ceiling is the Coriolis structure rather than contacts), the two levers built in response — a **contact-aware damping** term and a **structured port-Hamiltonian model** with a mass-matrix canonicalizer — and how the resulting model-based CT-SAC differs from the original model-free version. The detailed generator/variance mechanics live in `docs/ct_sac_model_based_call_stack.md`; the sub-step quadrature target in `docs/ct_sac_substep_quadrature.md`. This doc ties them together and describes the code that landed.
 :::
 
 [TOC]
@@ -158,10 +158,21 @@ flowchart TD
 
 ---
 
-## 6. Verification
+## 6. How this differs from the original CT-SAC
 
-- **Unit tests** (`tests/test_model_based_generator.py`): `DOFLayout` validation; SPD mass; contact-gate uses `prev_obs`; PSD damping (exercised at a scale where the contact term dominates); runs under `no_grad`; `fit_step` reduces loss; custom (non-cheetah) layout; and an end-to-end CT-SAC run. The mode is guarded by an **energy-balance test**: with zero action, $\dot E = -\dot q^\top D\dot q$ exactly, which fails under any Coriolis or $\dot p$ sign error (verified load-bearing: a flipped Coriolis sign gives error $0.06$ against a $10^{-2}$ threshold, versus $3\times10^{-8}$ for the correct code).
-- **Adversarial review** (a fan-out of reviewers per dimension, each finding independently refuted before it survived): confirmed six findings, all in the *generalization* path — the cheetah math was confirmed correct. Fixed: strengthened `DOFLayout` validation (partition + coverage, not just a scalar sum), corrected the sparse actuator map (input dimension and additive `index_add` scatter), and closed the two test gaps above.
+Original CT-SAC is model-free: it estimates the generator by a finite difference over a *sampled* successor state, and reads the value on the fly as an action expectation of the twin-Q. This work changes only how the critic *target* obtains the generator and adds a value head. The actor update, the twin-$Q$ critics with their Polyak targets, the entropy temperature $\alpha$, the rescaled-time discount, and the off-policy replay loop are all unchanged — and the original target is retained as the fallback (used during model/head warmup, or whenever `use_model_based_q` is off).
+
+| aspect | original CT-SAC (model-free) | this (model-based, structured) |
+|---|---|---|
+| generator $\mathcal{L}^a V - \beta V$ | finite difference over the sampled next state $x'$: $\big(\gamma^{u} V(x') - V(x)\big)/u$ (paper Eq. 166) | analytic $b\cdot\nabla V$ from the learned drift, or a sub-step quadrature $V(\hat x) - V(x)$ over the model-rolled endpoint $\hat x$ — no $x'$ |
+| value $V(x)$ | recomputed each use as the sampled $\mathbb{E}_a[\min_i Q^{\text{tgt}}_i - \alpha\log\pi]$ | dedicated scalar V-head ($Q = V + q$), regressed to that soft value; clean, sample-free $V$ and $\nabla V$ |
+| dynamics | none | learned structured port-Hamiltonian $b(x,a)$, fit online in observation space |
+| critic step | one twin-$Q$ update | V-head and twin-$Q$ both updated each step, with acyclic detached targets from Polyak-lagged copies |
+| target variance as $u \to 0$ | $\mathcal{O}(1/u)$ — divides a noisy value difference by $u$ | $u$-independent — no $1/u$ differencing |
+
+The two generator estimates are the same object. By Dynkin's formula the finite difference $\big(\gamma^{u}V(x') - V(x)\big)/u \to \mathcal{L}^a V - \beta V$ as $u\to 0$, which is exactly what $b\cdot\nabla V - \beta V$ evaluates directly once $b$ is known. So this is a drop-in replacement for how the target is formed, not a change to the RL objective. The value head is the original SAC (Haarnoja 2018) structure — a state-value network regressed to $\mathbb{E}_a[Q - \alpha\log\pi]$ with a Polyak target — reintroduced because the generator needs a differentiable, low-noise $V(x)$ and $\nabla V(x)$; SAC's later revision dropped that network in favour of the sampled min-$Q$ form, which is the path the model-free target still takes.
+
+One consequence to keep in view: the analytic generator lowers the per-update *target* variance at small $u$ (its main advantage over the finite difference), but the value iteration's *outcome* is governed by contraction — the model-free backup is a $\gamma$-contraction, while the $b\cdot\nabla V$ backup is a differential operator that is not sup-norm contractive (`docs/ct_sac_model_based_call_stack.md` §7). A more accurate model improves the target, not that contraction property. This is why the comparison in §7 keeps the model-free baseline and the oracle alongside the learned-model variants.
 
 ---
 
