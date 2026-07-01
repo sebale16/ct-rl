@@ -126,9 +126,7 @@ $$
 5. **Policy** — a gradient step maximizing $\min_i Q_i(x,a_\pi) - \alpha\log\pi$.
 6. **Targets** — Polyak update, $V^{\text{tgt}}, Q^{\text{tgt}} \leftarrow (1-\tau)\,(\text{target}) + \tau\,(\text{live})$.
 
-A few points behind these updates. The dynamics fit (step 2) keeps the canonicalizer $p = M(q)\dot q$ inside the forward pass, so the loss is taken against the observed next state $x'$ and no momentum-space target is formed; the mass matrix is anchored to data through the prediction loss alone. The value head (step 3) averages the soft-value action expectation into a smooth scalar network, so the value and gradient $\nabla V_\psi(x)$ it hands the generator are deterministic in $x$ and free of action-sampling noise (its $V_\psi(x)$ is the critic's value function, separate from the model's potential $V(q)$). The critic (step 4) admits two forms of the generator target: the first-order $b\cdot\nabla V^{\text{tgt}}$, and a sub-step quadrature that rolls the model $m$ Euler sub-steps — the first velocity jump against the real predecessor, each later one against the previous rolled state — and reads the value change at the endpoint. The quadrature form is autograd-free and captures the curvature the single-point term drops, with $m=1$ a single-Euler-step finite difference over states.
-
-The one-directional chain is: replay data feeds the dynamics model; the lagged twin-$Q$ feeds the value head; the lagged value head and the dynamics drift feed the twin-$Q$; the twin-$Q$ feeds the policy. Every component steps once per iteration toward a detached target read from another component's Polyak-lagged copy (value and critic targets trail their live networks at the shared rate $\tau$). Gradients stay within each component during a step, and the lagged targets are what keep them mutually consistent.
+The objective for each step — the entropy temperature, the observation-space dynamics fit, the soft-value regression, the generator target and its sub-step quadrature form, the policy, and the Polyak target update — is derived in Appendix B.
 
 **Warmup fallback.** The couplings start in a fallback state and hand over as each component warms up. While the dynamics model is still fitting (`dynamics_warmup`), the critic target uses the model-free finite difference over the sampled next state. While the value head is still fitting (`value_warmup`), the generator reads the value from the sampled soft expectation. Once both are warm, the critic target uses the structured drift and the clean value head. A non-trainable oracle drift skips dynamics warmup and is used from the first step.
 
@@ -232,7 +230,174 @@ The gain shows up under smooth exploration, matching the diagnosis: the $\mathrm
 
 ---
 
-## Appendix B — Symbol and mode reference
+## Appendix B — Math behind the training steps
+
+This appendix derives the objective behind each of the six numbered updates in §3. The step trains four learners — the dynamics model $\phi$ (drift $b_\phi$), the value head $V_\psi$, the twin-$Q$ critic $\theta$, and the policy $\pi$ — plus the temperature $\alpha$. Each is a regression toward a label that is detached within the step, and the dependencies run one way: replay data feeds the dynamics model; the lagged twin-$Q$ $Q^{\text{tgt}}$ feeds the value head; the lagged value head $V^{\text{tgt}}$ and the drift $b_\phi$ feed the twin-$Q$; the live twin-$Q$ feeds the policy. Each label is a detached read of another learner's Polyak-lagged copy, so every component takes a plain supervised step, and the lagged targets are what keep the four mutually consistent.
+
+Throughout, $x=[q_{\text{obs}};\dot q]$ is the observation, $\beta=-\log\gamma$ is the discount rate, and $\Delta t_{\text{default}}$ is the nominal control step (`env.dt_default`). The rescaled time $u=\Delta t/\Delta t_{\text{default}}$ measures a transition's duration in units of that step, so a nominal transition has $u\approx 1$ and $\beta$ is a per-nominal-step rate. The controlled generator of a value $V\in C^2$ under a fixed action $a$ (paper Eq. 6) is
+
+$$
+(\mathcal{L}^a V)(x) = b(x,a)\cdot\nabla V(x) + \tfrac12\,\mathrm{Tr}\!\big(\sigma(x,a)\sigma(x,a)^\top\nabla^2 V(x)\big)
+\;\xrightarrow{\;\sigma=0\;}\; b(x,a)\cdot\nabla V(x),
+$$
+
+and $\sigma=0$ throughout the current setting.
+
+### B.1 Temperature
+
+The temperature $\alpha$ weights the entropy term $-\alpha\log\pi$ in the soft objective (paper Eq. 40). It is fit to hold the policy at a target entropy $\bar H$ ($\bar H=-|\mathcal A|$ by default) by the standard SAC auto-temperature objective
+
+$$
+\min_{\alpha>0}\;\; \mathbb{E}_{a\sim\pi(\cdot\mid x)}\!\big[\,-\alpha\,\big(\log\pi(a\mid x) + \bar H\big)\,\big],
+$$
+
+the Lagrangian of $\max_\pi\mathbb{E}[\text{return}]$ subject to $\mathbb{E}[-\log\pi]\ge\bar H$, with $\alpha$ the multiplier. Parameterizing $\alpha=e^{\lambda}$ and differentiating in $\lambda$ gives the gradient $\mathbb{E}_a[-\alpha(\log\pi+\bar H)]$: when the current entropy $-\mathbb{E}_a[\log\pi]$ exceeds $\bar H$ the bracket is negative in expectation and $\alpha$ decreases, and conversely, driving $-\mathbb{E}_a[\log\pi]\to\bar H$. In `train()` a single reparameterized $a,\log\pi(a\mid x)$ is drawn from the current policy, the target-entropy sum is detached, and the step is taken on $\lambda=\log\alpha$ (`alpha_loss = -(log_alpha * (log_prob_pi + target_entropy).detach()).mean()`). The resulting $\alpha=e^\lambda$ is then held fixed (detached) inside every downstream loss in the same step; a fixed $\alpha$ skips this update.
+
+### B.2 Dynamics model fit
+
+The model supplies the observation-space drift $b_\phi(x,a)$ that the generator (§B.4) evaluates. It is fit by one-step prediction: with the explicit Euler predictor over the observed duration $\Delta t$,
+
+$$
+\hat x' = x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t,
+\qquad
+\mathcal L_{\text{dyn}}(\phi) = \big\lVert\, x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t \;-\; x' \,\big\rVert^2 ,
+$$
+
+matching `fit_step` (`pred = x + drift(x,a)*dt`, `loss = ((pred - x')**2).mean()`). Since $b$ is the instantaneous rate $\dot x$, the target satisfies $x'\approx x+\dot x\,\Delta t$ to first order, and driving the residual to zero fits $b_\phi$ to the realized rate $(x'-x)/\Delta t$. The structured drift assembles $b_\phi$ from the port-Hamiltonian flow (§2.5): with the canonicalizer $p=M(q)\dot q$,
+
+$$
+\dot p = -\Big(\nabla V(q) - \tfrac12\,\dot q^\top\tfrac{\partial M}{\partial q}\,\dot q\Big) - D(q,\mathrm dv)\,\dot q + G_a a,
+\qquad
+b_\phi = [\dot q_{\text{obs}};\ \ddot q],\quad \ddot q = M^{-1}\big(\dot p - \dot M\dot q\big).
+$$
+
+The regression is taken entirely in observation space. The canonicalizer $p=M(q)\dot q$ lives inside the forward pass and the loss never constructs a momentum-space label — the only target is the observed $x'$. Two consequences follow. First, the regression target $x'$ is a fixed datum, independent of $\phi$: there is no momentum coordinate that co-adapts with $M$, so the fit cannot lower its loss by rescaling the momentum. Second, $M(q)$ enters the prediction only through the acceleration $\ddot q=M^{-1}(\dot p-\dot M\dot q)$, so it is identified by how well that reproduces the observed accelerations, which keeps the mass matrix anchored to data through the prediction loss alone. (A momentum-space loss $\lVert\hat p'-p'\rVert^2$ would need labels $p'=M(q')\dot q'$ built from the same learned $M$, coupling the target to the parameters.) A non-trainable oracle drift (`mode="mujoco"`) has no parameters and skips this step.
+
+### B.3 Value head
+
+The generator needs a differentiable state value $V(x)$ and gradient $\nabla V(x)$. The soft state value of $\pi$ at temperature $\alpha$ is the entropy-regularized action aggregate of the state–action value,
+
+$$
+V^\pi(x) = \mathbb{E}_{a\sim\pi(\cdot\mid x)}\big[\,Q(x,a) - \alpha\log\pi(a\mid x)\,\big],
+$$
+
+the soft-value operator $\mathcal Q^{(\alpha)}(q)(x)=\sup_\pi\mathbb E_{a\sim\pi}[q(x,a)-\alpha\log\pi(a\mid x)]$ evaluated at the current policy, whose supremum is attained at the Boltzmann policy $\pi_q$ (paper Eq. 54). With twin critics the min is taken over the two heads for overestimation control, and the target uses the lagged critic $Q^{\text{tgt}}$:
+
+$$
+\min_\psi\;\Big\lVert\, V_\psi(x) - \underbrace{\mathbb{E}_{a'\sim\pi}\big[\,\textstyle\min_i Q^{\text{tgt}}_i(x,a') - \alpha\log\pi(a'\mid x)\,\big]}_{\text{detached label}}\,\Big\rVert^2 .
+$$
+
+The label is a reparameterized $N$-sample Monte-Carlo estimate: `_value_expectation` repeats each state $N$ times, draws $a'=\pi_\psi(\varepsilon;x)$, evaluates $\min_i Q^{\text{tgt}}_i-\alpha\log\pi$, and averages ($N=$ `num_expectation_samples`). Regressing $V_\psi$ onto this expectation folds the action sampling into the fit: at its point of use in §B.4 the generator reads a scalar $V_\psi(x)$ and its gradient $\nabla V_\psi(x)$ that are deterministic in $x$ and carry no action-sampling noise, and it differentiates neither the twin-min nor the stochastic policy. This critic value head $V_\psi(x)$ is distinct from the model potential $V(q)$ of §2.2.
+
+### B.4 Twin-$Q$ critic / generator target
+
+This is the central update. In continuous time the state–action object that survives the small-step limit is the instantaneous advantage rate. For a value $V\in C^2$, a Markov policy $\pi$, and temperature $\alpha$, the paper defines it (Eq. 164) as
+
+$$
+q_V^{(\pi,\alpha)}(x,a) \;=\; r(x,a) - \alpha\log\pi(a\mid x) + (\mathcal L^a V)(x) - \beta V(x),
+\tag{paper Eq. 164}
+$$
+
+with the entropy $-\alpha\log\pi$ folded in. The critic learns $Q = V + q_V$, so the regression target is $y = r + V(x) + (\mathcal L^a V - \beta V)(x)$; with the entropy already accounted for inside the soft value $V$ of §B.3, the term $r-\alpha\log\pi$ separates from the generator part $\mathcal L^a V - \beta V$.
+
+**Why the generator is the right target (Dynkin).** The generator part is the small-time limit of a discounted value increment. Dynkin's formula for the controlled diffusion (paper Lemma C.4, Eq. 44) gives, under the constant action $a$,
+
+$$
+\mathbb{E}\big[V(X_{t+u})\big] = V(x) + \mathbb{E}\!\int_0^{u}(\mathcal L^a V)(X_{t+s})\,\mathrm{d}s .
+$$
+
+Differentiating the discounted expectation at $u=0$,
+
+$$
+\left.\frac{\mathrm d}{\mathrm d u}\Big[e^{-\beta u}\,\mathbb E\,V(X_{t+u})\Big]\right|_{u=0}
+= (\mathcal L^a V)(x) - \beta V(x),
+$$
+
+so the short-horizon estimator over a duration $u$ (paper Eq. 166) converges to exactly this rate:
+
+$$
+q_u^{(\pi,\alpha)}(x,a) = \frac{e^{-\beta u}V(X_{t+u}) - V(x)}{u} + r(x,a) - \alpha\log\pi(a\mid x)
+\;\xrightarrow[u\to0]{}\; q_V^{(\pi,\alpha)}(x,a).
+\tag{paper Eq. 166}
+$$
+
+**Model-free fallback.** The model-free target instantiates Eq. 166 directly on the sampled successor $x'$ over the rescaled duration $u=\Delta t/\Delta t_{\text{default}}$, reading $V$ as the soft value of §B.3:
+
+$$
+y_{\text{fd}} = r + (1-d)\Big[\,V(x) + \tfrac{\gamma^{u}\,V(x') - V(x)}{u}\,\Big],
+\qquad \gamma^{u}=e^{-\beta u},
+$$
+
+which is `_finite_difference_target` (`gamma_dt = exp(-beta*dt)`, `fraction = (gamma_dt*V_next - V_cur)/dt`). Dividing a noisy value difference by $u$ makes this estimator $\mathcal O(1/u)$ in variance as $u\to0$. It is used during dynamics/head warmup and whenever `use_model_based_q` is off.
+
+**Model-based (first-order) target.** Once the drift is available, the generator is evaluated analytically as $b_\phi\cdot\nabla V^{\text{tgt}}$ (with $\sigma=0$), so no sampled $x'$ enters. To match the finite-difference convention — the increment measured over one nominal step of rescaled duration $u=1$ — the rate $\mathcal L^a V$ enters scaled by $\Delta t_{\text{default}}$ while the discount stays a single $\beta V$ lump:
+
+$$
+\boxed{\;y = r + (1-d)\Big[\,V^{\text{tgt}}(x) + \big(\Delta t_{\text{default}}\; b_\phi(x,a)\cdot\nabla V^{\text{tgt}}(x)\; -\; \beta\,V^{\text{tgt}}(x)\big)\Big]\;}
+$$
+
+matching `_model_based_target` (`lf = dt_default * (b·gradV) - beta*V`, `y = r + (1-d)*(V + lf)`, all detached). Here $V^{\text{tgt}}=V_\psi^{\text{tgt}}$ is the lagged value head, $\nabla V^{\text{tgt}}$ is obtained by autograd of $V^{\text{tgt}}(x)$ w.r.t. a leaf copy of $x$ (not w.r.t. the frozen target parameters), and $b_\phi$ is the detached drift of §B.2. The increment is evaluated rather than divided by $u$, so the target is $u$-independent and the $1/u$ variance of the fallback is absent. When $\sigma\neq0$ the dropped trace term $\tfrac12\mathrm{Tr}(\sigma\sigma^\top\nabla^2 V)$ is added back through Hessian–vector products, scaled by the same $\Delta t_{\text{default}}$.
+
+**Sub-step quadrature target.** The first-order term $\Delta t_{\text{default}}\,(b\cdot\nabla V)$ samples the rate at the single point $s=0$; Dynkin's identity is the integral of the rate along the orbit,
+
+$$
+V(x') - V(x) = \int_0^{\Delta t_{\text{default}}} (\mathcal L^a V)\big(x(s)\big)\,\mathrm d s .
+$$
+
+The quadrature form ($m=$ `generator_substeps`) approximates the integral by rolling the model $m$ explicit Euler sub-steps of size $h=\Delta t_{\text{default}}/m$,
+
+$$
+\hat x_0 = x,\qquad \hat x_{k+1} = \hat x_k + b_\phi(\hat x_k,a;\,\hat x_{k-1})\,h,\qquad k=0,\dots,m-1,
+$$
+
+with the first velocity jump taken against the real predecessor $x_{\text{prev}}$ and each later one against the previous rolled state (so the contact-gate input $\mathrm dv$ is well defined along the roll), then reads the value change directly off the clean value head at the endpoint:
+
+$$
+\ell_f = \big(V^{\text{tgt}}(\hat x_m) - V^{\text{tgt}}(x)\big) - \beta\,V^{\text{tgt}}(x),
+\qquad y = r + (1-d)\big(V^{\text{tgt}}(x) + \ell_f\big),
+$$
+
+which is `_substep_quadrature_target`. It uses no autograd: the value gradient and its curvature enter through the finite difference of $V^{\text{tgt}}$ over the predicted states, so it captures the curvature the single-point term drops. $m=1$ is a single-Euler-step finite difference over states, $\hat x_1 = x + b_\phi\,\Delta t_{\text{default}}$; larger $m$ shrinks the Euler integration error in $\hat x_m$. The discount is kept as the single $-\beta V^{\text{tgt}}(x)$ lump, matching the first-order target.
+
+**Loss.** Whichever target $y$ is formed is detached, and both twin heads regress to it:
+
+$$
+\mathcal L_{\text{crit}}(\theta) = \sum_i \big\lVert Q_i(x,a) - y \big\rVert^2 ,
+$$
+
+matching `sum(F.mse_loss(q, y) for q in q_values(obs, actions))`.
+
+### B.5 Policy
+
+The policy maximizes the soft value of §B.3 at the current state — the entropy-regularized aggregate whose supremum defines $\mathcal Q^{(\alpha)}$ (paper Eq. 54) — using the live twin-$Q$:
+
+$$
+\max_\pi\;\; \mathbb{E}_{a\sim\pi(\cdot\mid x)}\big[\,\textstyle\min_i Q_i(x,a) - \alpha\log\pi(a\mid x)\,\big].
+$$
+
+With the reparameterization $a_\pi=\pi(\varepsilon;x)$, the gradient flows through both $\min_i Q_i$ and $\log\pi$, and minimizing the negative gives the actor loss
+
+$$
+\mathcal L_\pi = \mathbb{E}\big[\,\alpha\log\pi(a_\pi\mid x) - \textstyle\min_i Q_i(x,a_\pi)\,\big],
+$$
+
+matching `(alpha * log_prob_pi - min_q(obs, actions_pi)).mean()`. The same $a_\pi,\log\pi$ sampled in §B.1 are reused, the critic parameters are frozen during this step so the gradient updates only the policy, and $\alpha$ is the detached temperature of §B.1.
+
+### B.6 Target networks
+
+The value head and the twin-$Q$ critic supply the detached labels of §B.3–B.4 through lagged copies, held by a Polyak (exponential-moving-average) update applied every step at the shared rate $\tau$:
+
+$$
+\theta^{\text{tgt}} \leftarrow (1-\tau)\,\theta^{\text{tgt}} + \tau\,\theta,
+\qquad
+\psi^{\text{tgt}} \leftarrow (1-\tau)\,\psi^{\text{tgt}} + \tau\,\psi,
+$$
+
+for the twin-$Q$ targets $Q^{\text{tgt}}$ and the value head $V^{\text{tgt}}$, matching `soft_update_targets(tau=self.tau)` (`target.mul_(1-tau).add_(tau*param)`). A hard periodic copy is the limit $\tau\to1$ at intervals; the soft update trails the live parameters continuously with time constant $\sim1/\tau$, giving a slowly moving, low-variance label. This lag, together with detaching the labels within the step, keeps the four one-directionally coupled updates mutually consistent without any within-step feedback.
+
+---
+
+## Appendix C — Symbol and mode reference
 
 | Symbol / mode | Meaning |
 |---|---|
