@@ -166,6 +166,12 @@ class PortHamiltonianModel(nn.Module):
 
         self.to(self.device)
 
+    def to(self, device=None, *args, **kwargs):
+        result = super().to(device, *args, **kwargs)
+        if device is not None:
+            result.device = th.device(device)
+        return result
+
     # ------------------------ structured port-Hamiltonian (DeLaN core) ----------
 
     def _init_structured(
