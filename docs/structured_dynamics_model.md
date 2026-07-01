@@ -111,7 +111,9 @@ The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight position
 
 ## 3. How the models are trained
 
-Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction. The whole step runs these updates in order — all targets detached, with $V^{\text{tgt}}, Q^{\text{tgt}}$ the Polyak-lagged copies and $b_\phi$ the structured drift:
+Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction.
+
+**Input:** a replay minibatch of transitions $(x, a, r, x', d, x_{\text{prev}}, \Delta t)$ — observation, action, reward, next observation, done flag, previous observation (supplying the velocity jump $\mathrm{d}v = \dot q - \dot q_{\text{prev}}$), and transition duration — together with the current parameters (dynamics model $\phi$, value head $\psi$, twin-$Q$ critics $\theta$, policy, temperature $\alpha$) and their Polyak-lagged targets $V^{\text{tgt}}, Q^{\text{tgt}}$. All update targets are detached. The step runs these updates in order, with $b_\phi$ the structured drift:
 
 1. **Temperature** $\alpha$ — a gradient step on the entropy-temperature objective.
 2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$.
