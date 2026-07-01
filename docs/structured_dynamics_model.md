@@ -111,53 +111,20 @@ The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight position
 
 ## 3. How the models are trained
 
-Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction. The whole step, at a glance ($V^{\text{tgt}}, Q^{\text{tgt}}$ are the lagged target networks, $b_\phi$ the structured drift):
+Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction. The whole step runs these updates in order — all targets detached, with $V^{\text{tgt}}, Q^{\text{tgt}}$ the Polyak-lagged copies and $b_\phi$ the structured drift:
 
-```text
-per gradient step, on a replay minibatch (x, a, r, x', prev_obs, u):
-
-  alpha   ← step   entropy-temperature loss
-  phi     ← step   || x + b_phi(x, a; prev_obs) * dt - x' ||^2                       # dynamics model (obs-space)
-  psi     ← step   || V_psi(x) - E_{a'~pi}[ min_i Q_i^tgt(x,a') - alpha*log pi(a'|x) ] ||^2   # value head (label detached)
-  y       = r + V^tgt(x) + ( dt_default * b_phi(x,a;prev_obs) . grad V^tgt(x) - beta*V^tgt(x) )   # generator target, once warm
-            #  quadrature variant:  y = r + V^tgt(x) + ( V^tgt(x_hat) - V^tgt(x) - beta*V^tgt(x) )
-            #  warmup fallback:     y = r + V(x)     + ( gamma^u * V(x') - V(x) ) / u
-  theta   ← step   sum_i || Q_i(x,a) - y ||^2                                         # twin-Q critic (y detached)
-  pi      ← step   E[ alpha*log pi(a_pi|x) - min_i Q_i(x, a_pi) ]                       # policy
-  V^tgt, Q^tgt  ←  (1 - tau)*target + tau*live                                        # Polyak update
-```
-
-**Dynamics model** — $M(q)$, the potential $V(q)$, the damping $D$, and the port $G_a$. Fit by one-step prediction in observation space,
-
+1. **Temperature** $\alpha$ — a gradient step on the entropy-temperature objective.
+2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$.
+3. **Value head** $\psi$ — regress to the soft state value, $\displaystyle\min_\psi \Big\lVert V_\psi(x) - \mathbb{E}_{a'\sim\pi}\big[\min_i Q^{\text{tgt}}_i(x,a') - \alpha\log\pi(a'\mid x)\big] \Big\rVert^2$ (label detached).
+4. **Twin-$Q$ critic** $\theta$ — regress to the generator target, $\displaystyle\min_\theta \sum_i \lVert Q_i(x,a) - y \rVert^2$, with
 $$
-\min\ \lVert\, x + b(x,a)\,\Delta t - x' \,\rVert^2,
+y = r + V^{\text{tgt}}(x) + \big(\Delta t_{\text{default}}\, b_\phi(x,a)\cdot\nabla V^{\text{tgt}}(x) - \beta\,V^{\text{tgt}}(x)\big).
 $$
+   The sub-step quadrature form replaces the drift term with $V^{\text{tgt}}(\hat x) - V^{\text{tgt}}(x)$ at the rolled endpoint $\hat x$; during warmup, $y$ is the model-free finite difference over the sampled $x'$.
+5. **Policy** — a gradient step maximizing $\min_i Q_i(x,a_\pi) - \alpha\log\pi$.
+6. **Targets** — Polyak update, $V^{\text{tgt}}, Q^{\text{tgt}} \leftarrow (1-\tau)\,(\text{target}) + \tau\,(\text{live})$.
 
-over replay transitions. The canonicalizer $p = M(q)\dot q$ stays inside the forward pass, so no momentum-space target is ever formed and the loss is taken against the observed next state $x'$. That keeps the mass matrix anchored to data: $M$ is identified through how well it lets $b$ predict the observed trajectory, and it is supervised by that prediction loss alone. This fit depends on replay data alone.
-
-**Value head** $V_\psi(x)$ — the critic's scalar value function, distinct from the model's potential $V(q)$. Regressed to the soft state value
-
-$$
-\mathbb{E}_{a\sim\pi}\big[\min_i Q^{\text{tgt}}_i(x,a) - \alpha\log\pi(a\mid x)\big],
-$$
-
-read from the lagged twin-$Q$ target over reparameterized action samples. Averaging this action expectation into a smooth scalar network yields a value and a gradient $\nabla V_\psi(x)$ that are deterministic in $x$ and free of action-sampling noise, which is what the generator term $b\cdot\nabla V$ consumes. The value head depends on the twin-$Q$.
-
-**Twin-$Q$ critic.** Regressed to the model-based target
-
-$$
-r + V^{\text{tgt}}_\psi(x) + \big(\Delta t_{\text{default}}\, b\cdot\nabla V^{\text{tgt}}_\psi(x) - \beta V^{\text{tgt}}_\psi(x)\big),
-$$
-
-or the sub-step quadrature form, which rolls the model $m$ Euler sub-steps of size $\Delta t_{\text{default}}/m$ (the first sub-step's velocity jump taken against the real predecessor, each later one against the previous rolled state) and reads the value change at the endpoint $\hat x$ directly:
-
-$$
-r + V^{\text{tgt}}_\psi(x) + \big(V^{\text{tgt}}_\psi(\hat x) - V^{\text{tgt}}_\psi(x) - \beta V^{\text{tgt}}_\psi(x)\big).
-$$
-
-The quadrature form is autograd-free and captures the curvature the single-point first-order term drops; $m=1$ is a single-Euler-step finite difference over states. The critic target uses the lagged value head and the dynamics drift, so it depends on both.
-
-**Policy.** Maximizes $\min_i Q_i(x,a_\pi) - \alpha\log\pi$, so it depends on the twin-$Q$.
+A few points behind these updates. The dynamics fit (step 2) keeps the canonicalizer $p = M(q)\dot q$ inside the forward pass, so the loss is taken against the observed next state $x'$ and no momentum-space target is formed; the mass matrix is anchored to data through the prediction loss alone. The value head (step 3) averages the soft-value action expectation into a smooth scalar network, so the value and gradient $\nabla V_\psi(x)$ it hands the generator are deterministic in $x$ and free of action-sampling noise (its $V_\psi(x)$ is the critic's value function, separate from the model's potential $V(q)$). The critic (step 4) admits two forms of the generator target: the first-order $b\cdot\nabla V^{\text{tgt}}$, and a sub-step quadrature that rolls the model $m$ Euler sub-steps — the first velocity jump against the real predecessor, each later one against the previous rolled state — and reads the value change at the endpoint. The quadrature form is autograd-free and captures the curvature the single-point term drops, with $m=1$ a single-Euler-step finite difference over states.
 
 The one-directional chain is: replay data feeds the dynamics model; the lagged twin-$Q$ feeds the value head; the lagged value head and the dynamics drift feed the twin-$Q$; the twin-$Q$ feeds the policy. Every component steps once per iteration toward a detached target read from another component's Polyak-lagged copy (value and critic targets trail their live networks at the shared rate $\tau$). Gradients stay within each component during a step, and the lagged targets are what keep them mutually consistent.
 
