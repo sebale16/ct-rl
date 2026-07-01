@@ -254,6 +254,9 @@ def run_algorithm(
 
         source = str(algo_kwargs.get("dynamics_source", "mujoco"))
         intensity = float(algo_kwargs.get("human_input_intensity", 0.0) or 0.0)
+        contact_aware = str(
+            algo_kwargs.pop("dynamics_contact_aware", "") or ""
+        ).strip().lower() in ("1", "true", "yes")
         obs_dim = int(np.prod(train_env.observation_space.shape))
         act_dim = int(np.prod(train_env.action_space.shape))
         if source == "mujoco":
@@ -280,6 +283,19 @@ def run_algorithm(
                 act_dim,
                 mode="phast",
                 human_input_intensity=intensity,
+                contact_aware=contact_aware,
+            )
+        elif source == "structured":
+            # Structured port-Hamiltonian (DeLaN core): learned SPD mass M(q) and
+            # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
+            # contact-gated PSD damping D(q,dv) on momentum. DOF layout defaults to
+            # cheetah; pass an explicit dof_layout for other environments.
+            algo_kwargs["dynamics_model"] = PortHamiltonianModel(
+                obs_dim,
+                act_dim,
+                mode="structured",
+                human_input_intensity=intensity,
+                contact_aware=contact_aware,
             )
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")

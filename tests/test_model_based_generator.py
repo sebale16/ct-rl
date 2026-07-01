@@ -2,11 +2,13 @@ import unittest
 
 import numpy as np
 import torch as th
+from gymnasium import spaces
 
 from environment.dmc import DMCContinuousEnv
 from algorithms.ct_sac import CTSAC
+from common.buffers import ReplayBuffer
 from models.actor_q_critic import ActorQCriticModel
-from models.port_hamiltonian import PortHamiltonianModel
+from models.port_hamiltonian import DOFLayout, PortHamiltonianModel
 
 
 def _corr_slope(pred: th.Tensor, target: th.Tensor):
@@ -490,7 +492,7 @@ class TestSubstepQuadrature(unittest.TestCase):
             def __init__(self, d):
                 super().__init__()
                 self.register_buffer("A", 60.0 * th.randn(d, d) / d**0.5)
-            def drift(self, obs, action):
+            def drift(self, obs, action, prev_obs=None):
                 x = th.as_tensor(obs, dtype=th.float32)
                 return x @ self.A.t()
             def diffusion(self, obs):
@@ -519,6 +521,250 @@ class TestSubstepQuadrature(unittest.TestCase):
         err1 = (target(1) - ref).abs().mean().item()
         err8 = (target(8) - ref).abs().mean().item()
         self.assertLess(err8, err1)  # more sub-steps -> closer to the converged target
+
+
+class TestReplayBufferPrevObs(unittest.TestCase):
+    """The replay buffer reconstructs the previous observation (for the contact
+    signal dv = obs - prev_obs), zeroing the jump across episode resets."""
+
+    def test_prev_observation_reconstruction(self):
+        obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+        act_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        buf = ReplayBuffer(10, obs_space, act_space, device="cpu", n_envs=1)
+        dones = [0, 0, 1, 0, 0]  # episode ends at t=2 -> t=3 is a fresh start
+        for i in range(5):
+            buf.add(
+                obs=np.full((1, 3), i, np.float32),
+                action=np.zeros((1, 2), np.float32),
+                reward=np.zeros((1,), np.float32),
+                done=np.array([dones[i]], np.float32),
+                next_obs=np.full((1, 3), i + 1, np.float32),
+                t=np.zeros((1,), np.float32),
+                next_t=np.full((1,), 0.01, np.float32),
+            )
+        np.random.seed(0)
+        batch = buf._get_samples(np.array([0, 1, 3, 4]))
+        prev0 = batch.prev_observations.cpu().numpy()[:, 0]
+        # idx0: no predecessor -> prev=obs(0)=0; idx1: obs(0)=0;
+        # idx3: predecessor ended an episode -> prev=obs(3)=3; idx4: obs(3)=3
+        self.assertEqual(list(prev0), [0.0, 0.0, 3.0, 3.0])
+
+
+class TestContactAwareDynamics(unittest.TestCase):
+    """Contact-aware damping R(x, dv): infer contact from the incoming velocity
+    jump (#2) and route it through the PSD dissipation (#4). No MuJoCo reads."""
+
+    def _model(self, contact_aware):
+        th.manual_seed(0)
+        return PortHamiltonianModel(
+            6, 2, mode="phast", hidden=(32, 32), contact_aware=contact_aware
+        )
+
+    def test_off_has_no_beta_and_ignores_prev(self):
+        m = self._model(False)
+        self.assertFalse(hasattr(m, "beta_net"))
+        x = th.randn(4, 6); a = th.randn(4, 2)
+        with th.no_grad():
+            b0 = m.drift(x, a)
+            b1 = m.drift(x, a, prev_obs=x - 0.5)  # constant R ignores prev
+        self.assertTrue(th.allclose(b0, b1))
+
+    def test_on_builds_and_uses_prev(self):
+        m = self._model(True)
+        self.assertTrue(hasattr(m, "beta_net"))
+        x = th.randn(4, 6); a = th.randn(4, 2)
+        with th.no_grad():
+            b_none = m.drift(x, a)                 # dx = 0
+            b_prev = m.drift(x, a, prev_obs=x - 0.5)  # dx != 0 -> different damping
+        self.assertEqual(tuple(b_prev.shape), (4, 6))
+        self.assertTrue(th.all(th.isfinite(b_prev)))
+        self.assertFalse(th.allclose(b_none, b_prev))
+
+    def test_R_batch_is_psd(self):
+        m = self._model(True)
+        x = th.randn(5, 6); dx = th.randn(5, 6)
+        with th.no_grad():
+            R = m._R_batch(x, dx)
+        self.assertEqual(tuple(R.shape), (5, 6, 6))
+        self.assertLess((R - R.transpose(-1, -2)).abs().max().item(), 1e-5)  # symmetric
+        self.assertGreaterEqual(th.linalg.eigvalsh(R).min().item(), -1e-4)   # PSD
+
+    def test_fit_step_with_prev_reduces_loss(self):
+        m = self._model(True)
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        x = th.randn(16, 6); a = th.randn(16, 2)
+        prev = x - 0.1 * th.randn(16, 6); xp = x + 0.05 * th.randn(16, 6)
+        first = m.fit_step(x, a, xp, 0.01, opt, prev_obs=prev)
+        last = first
+        for _ in range(60):
+            last = m.fit_step(x, a, xp, 0.01, opt, prev_obs=prev)
+        self.assertLess(last, first)
+
+
+class TestContactAwareEndToEnd(unittest.TestCase):
+    """Full path: buffer prev_obs -> fit_step / model-based target -> contact drift."""
+
+    def test_ct_sac_contact_aware_runs(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], device="cpu",
+        )
+        ph = PortHamiltonianModel(od, ad, mode="phast", hidden=(32, 32), contact_aware=True)
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=ph, dynamics_warmup=5,
+        )
+        agent.learn(total_timesteps=80)
+        self.assertGreater(agent._dynamics_updates, 5)
+
+
+class TestDOFLayout(unittest.TestCase):
+    """The DOF layout keeps the structured model domain-agnostic."""
+
+    def test_cheetah_defaults(self):
+        lay = DOFLayout.cheetah()
+        self.assertEqual((lay.npos, lay.nv), (8, 9))
+        self.assertEqual(lay.cyclic_cfg, (0,))
+        self.assertEqual(lay.obs_pos_to_cfg, tuple(range(1, 9)))
+
+    def test_validation_rejects_bad_layout(self):
+        # an observed position mapping onto a cyclic DOF is inconsistent
+        with self.assertRaises(AssertionError):
+            DOFLayout(obs_dim=17, pos_slice=(0, 8), vel_slice=(8, 17),
+                      cyclic_cfg=(0,), obs_pos_to_cfg=tuple(range(0, 8)))
+        # slices must cover obs_dim
+        with self.assertRaises(AssertionError):
+            DOFLayout(obs_dim=17, pos_slice=(0, 7), vel_slice=(8, 17),
+                      cyclic_cfg=(0,), obs_pos_to_cfg=tuple(range(1, 8)))
+
+
+class TestStructuredDynamics(unittest.TestCase):
+    """Structured port-Hamiltonian (DeLaN core + contact-gated D on momentum)."""
+
+    def _model(self, contact_aware=False, layout=None):
+        th.manual_seed(0)
+        return PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(32, 32),
+            contact_aware=contact_aware, dof_layout=layout,
+        )
+
+    def test_drift_shape_finite_and_exact_position_block(self):
+        m = self._model()
+        x = th.randn(5, 17); a = th.randn(5, 6)
+        b = m.drift(x, a)
+        self.assertEqual(tuple(b.shape), (5, 17))
+        self.assertTrue(th.all(th.isfinite(b)))
+        # position-drift is exactly the velocity of the mapped config DOFs (qd[1:])
+        self.assertTrue(th.allclose(b[:, :8], x[:, 9:17], atol=1e-5))
+
+    def test_mass_matrix_is_spd(self):
+        m = self._model()
+        M = th.vmap(m._mass)(th.randn(6, 8))
+        self.assertTrue(th.allclose(M, M.transpose(-1, -2), atol=1e-5))
+        self.assertGreater(th.linalg.eigvalsh(M).min().item(), 0.0)
+
+    def test_contact_gate_uses_prev_and_damping_psd(self):
+        m = self._model(contact_aware=True)
+        self.assertTrue(hasattr(m, "beta_net"))
+        x = th.randn(5, 17); a = th.randn(5, 6)
+        with th.no_grad():
+            b0 = m.drift(x, a)                        # dv = 0
+            b1 = m.drift(x, a, prev_obs=x - 0.5)      # dv != 0 -> different damping
+            D = m._damping(x[:, :8], th.randn(5, 9))  # (B, nv, nv)
+        self.assertFalse(th.allclose(b0, b1, atol=1e-6))
+        self.assertLess((D - D.transpose(-1, -2)).abs().max().item(), 1e-5)     # symmetric
+        self.assertGreaterEqual(th.linalg.eigvalsh(D).min().item(), -1e-4)      # PSD
+
+    def test_runs_under_no_grad(self):
+        # the CT-SAC quadrature target path calls drift under th.no_grad()
+        m = self._model(contact_aware=True)
+        with th.no_grad():
+            b = m.drift(th.randn(4, 17), th.randn(4, 6), prev_obs=th.randn(4, 17))
+        self.assertTrue(th.all(th.isfinite(b)))
+
+    def test_fit_step_reduces_loss(self):
+        m = self._model(contact_aware=True)
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        x = th.randn(16, 17); a = th.randn(16, 6)
+        prev = x - 0.1 * th.randn(16, 17); xp = x + 0.05 * th.randn(16, 17)
+        first = m.fit_step(x, a, xp, 0.01, opt, prev_obs=prev)
+        last = first
+        for _ in range(60):
+            last = m.fit_step(x, a, xp, 0.01, opt, prev_obs=prev)
+        self.assertLess(last, first)
+
+    def test_energy_balance_matches_damping_power(self):
+        """Independent ground truth for the accel/Coriolis sign: with zero action
+        the energy dissipates exactly at the damping rate, dE/dt = -qd^T D qd (the
+        Coriolis does no net work). A sign flip in the Coriolis or pdot breaks this
+        identity, which the shape/finite tests cannot catch."""
+        m = self._model(contact_aware=False)
+        th.manual_seed(1)
+        x = 0.5 * th.randn(6, 17)
+        a = th.zeros(6, 6)
+        xin = x.clone().requires_grad_(True)
+        M = th.vmap(m._mass)(xin[:, :8])
+        E = m._potential(xin[:, :8]) + 0.5 * th.einsum("na,nab,nb->n", xin[:, 8:], M, xin[:, 8:])
+        (gE,) = th.autograd.grad(E.sum(), xin)          # dE/dobs
+        with th.no_grad():
+            dEdt = (gE * m.drift(x, a)).sum(-1)         # dE/dt along the drift
+            D = m._damping(x[:, :8], th.zeros(6, 9))
+            expected = -th.einsum("na,nab,nb->n", x[:, 8:], D, x[:, 8:])
+        self.assertLess((dEdt - expected).abs().max().item(), 1e-2)
+
+    def test_damping_contact_term_psd_at_scale(self):
+        """The contact damping term must stay PSD even when scaled to dominate the
+        diagonal base -- a dropped softplus on beta would make it indefinite, which
+        the base otherwise masks."""
+        m = self._model(contact_aware=True)
+        th.manual_seed(2)
+        with th.no_grad():
+            m._damp_dirs.mul_(25.0)                     # let the contact term dominate
+            for _ in range(5):
+                D = m._damping(th.randn(8, 8), 3.0 * th.randn(8, 9))
+                self.assertLess((D - D.transpose(-1, -2)).abs().max().item(), 1e-4)
+                self.assertGreaterEqual(th.linalg.eigvalsh(D).min().item(), -1e-3)
+
+    def test_custom_layout_sparse_actuation(self):
+        # a small 2-pos / 3-vel system with one cyclic DOF and sparse actuation
+        lay = DOFLayout(obs_dim=5, pos_slice=(0, 2), vel_slice=(2, 5),
+                        cyclic_cfg=(0,), obs_pos_to_cfg=(1, 2), act_to_cfg=(1, 2))
+        m = PortHamiltonianModel(5, 2, mode="structured", structured_hidden=(16,),
+                                 dof_layout=lay)
+        b = m.drift(th.randn(4, 5), th.randn(4, 2))
+        self.assertEqual(tuple(b.shape), (4, 5))
+        self.assertTrue(th.all(th.isfinite(b)))
+
+
+class TestStructuredEndToEnd(unittest.TestCase):
+    """Full path: buffer prev_obs -> structured drift -> model-based target / fit."""
+
+    def test_ct_sac_structured_contact_runs(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], device="cpu",
+        )
+        ph = PortHamiltonianModel(
+            od, ad, mode="structured", structured_hidden=(32, 32), contact_aware=True
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=ph, dynamics_warmup=5,
+        )
+        agent.learn(total_timesteps=80)
+        self.assertGreater(agent._dynamics_updates, 5)
 
 
 if __name__ == "__main__":
