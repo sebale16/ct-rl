@@ -117,6 +117,10 @@ The model is fit by one-step prediction **in observation space**, $\lVert x + b\
 
 The structured model nearly doubles the one-step fit and, crucially, keeps the multi-step rollout **bounded** where the black box diverges off the data manifold — which is what makes a learned model usable for multi-step prediction on cheetah. It closes most of the gap to the oracle ($\approx 1.0$ accel corr, $\approx 0.35$ flat rollout) while remaining simulator-free.
 
+:::warning
+**The value gradient must be clean.** An accurate drift $b$ only helps if $\nabla V$ is clean: the first-order target is $b\cdot\nabla V$, and the default value gradient — differentiated through the twin-minimum and a single policy sample of $\mathbb{E}_a[\min_i Q - \alpha\log\pi]$ — is rough enough to cap the correlation regardless of $b$ (call-stack doc §6/§9). The cheetah structured modes therefore enable the detached scalar **V-head** (`model_v_net_arch`, `value_warmup`), reading $V$ and $\nabla V$ sample-free from the lagged value net. The `mbq_structured_quad` mode goes further: the sub-step quadrature reads the V-head at the *rolled endpoints* and uses no $\nabla V$ autograd at all — the finite-difference-over-states estimator that, with an accurate drift and a clean $V$, tracks the true value change almost exactly.
+:::
+
 ---
 
 ## 5. Implementation and call stack
@@ -129,7 +133,7 @@ The port is additive: existing `mujoco` and `phast` modes are byte-unchanged, an
 | `common/buffers.py` | `ReplayBatch.prev_observations`, reconstructed from the preceding buffer slot (zeroed across resets / the ring seam). |
 | `algorithms/ct_sac.py` | threads `batch.prev_observations` into `fit_step`, `_model_based_target`, and the quadrature roll. |
 | `benchmarks/run_ct_rl.py` | `dynamics_source` values `structured` and the `phast` contact flag. |
-| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_structured`, `mbq_structured_contact`. |
+| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad` (the structured modes carry the V-head so the target is not gradient-limited). |
 
 ```mermaid
 flowchart TD
@@ -163,7 +167,7 @@ flowchart TD
 
 ## 7. Scope and open work
 
-- **End-to-end on cheetah.** The results above are offline (one-step fit and rollout). The end-to-end test is a seeded comparison `mbq_phast` vs `mbq_structured` vs `mbq_structured_contact` on `cheetah-run`.
+- **End-to-end on cheetah.** The results above are offline (one-step fit and rollout). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head so the target is not gradient-limited: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact`.
 - **Structure-preserving integration.** The CT-SAC multi-step roll currently uses observation-space Euler of the drift, which is bounded and adequate at short horizons; a Strang integrator in $(q,p)$ is the refinement for longer horizons and is enabled by the canonicalizer frame.
 - **Diffusion milestone.** $\sigma\sigma^\top = 2T\,D(q)$ is defined in this momentum frame and reuses the learned $D$; deferred.
 - **Other domains.** `DOFLayout` makes the model domain-agnostic, but the runner currently constructs the cheetah layout only; another environment needs its own layout passed in.
@@ -182,4 +186,4 @@ flowchart TD
 | `phast` | black-box learned port-Hamiltonian (UNKNOWN regime) |
 | `phast` + `contact_aware` | black-box with contact-gated $R$ |
 | `structured` | DeLaN-core port-Hamiltonian (this doc) |
-| `mbq_structured` / `mbq_structured_contact` | cheetah run modes for the structured model |
+| cheetah run modes | `mbq_structured` (V-head, first-order), `mbq_structured_quad` (V-head, sub-step quadrature), `mbq_structured_contact`, `mbq_phast_vhead` (head-matched black box). All read $V,\nabla V$ from the detached V-head. |
