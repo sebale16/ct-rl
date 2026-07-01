@@ -7,7 +7,7 @@ robots: noindex
 # Structured Port-Hamiltonian Dynamics for Model-Based CT-SAC
 
 :::info
-**Overview.** Model-based CT-SAC forms its critic target from a learned dynamics drift $b(x,a)$ evaluated against a value function. This document derives, from that target, the objects the model must supply — a value $V$, its gradient $\nabla V$, and the drift $b$ — and the structured port-Hamiltonian model built to supply $b$: a learned SPD mass matrix $M(q)$, a scalar potential $V(q)$, a contact-gated PSD damping $D$, and an actuator port $G_a$, from which the physics generates the Coriolis term. It then covers how these are trained and coupled, why the design works (with the one-step and rollout numbers), how it relates to the original model-free CT-SAC, and the code that landed.
+**Overview.** Model-based CT-SAC forms its critic target from a learned dynamics drift $b(x,a)$ evaluated against a value function. This document derives, from that target, the objects the model must supply — a value $V$, its gradient $\nabla V$, and the drift $b$ — and the structured port-Hamiltonian model built to supply $b$: a learned SPD mass matrix $M(q)$, a scalar potential $V(q)$, a contact-gated PSD damping $D$, and an actuator port $G_a$, from which the physics generates the Coriolis term. It then covers how these are trained and coupled, how it relates to the original model-free CT-SAC, and the code that landed; an appendix records why the design works, with the one-step and rollout numbers.
 :::
 
 [TOC]
@@ -28,7 +28,7 @@ $$
 (\mathcal{L}^a V)(x) = b(x,a)\cdot\nabla V(x) + \tfrac12\,\mathrm{Tr}\!\big(\sigma\sigma^\top\nabla^2 V\big).
 $$
 
-The drift $b(x,a)$ is the object a dynamics model has to provide. The diffusion $\sigma$ is zero in the current setting (`human_input_intensity = 0`), so the target reduces to the first term. Everything below concerns where $b$ comes from and how it is learned. This section fixes the setting; the diagnosis of why a particular model is needed comes in §4.
+The drift $b(x,a)$ is the object a dynamics model has to provide. The diffusion $\sigma$ is zero in the current setting (`human_input_intensity = 0`), so the target reduces to the first term. Everything below concerns where $b$ comes from and how it is learned. This section fixes the setting; the diagnosis of why a particular model is needed is in Appendix A.
 
 ---
 
@@ -78,10 +78,10 @@ $$
 Two learned objects enter here beyond $M$ and $V$: the **damping** $D$ and the **actuator port** $G_a$ (action to generalized force). The damping is diagonal-plus-low-rank PSD,
 
 $$
-D = \mathrm{diag}\big(\mathrm{softplus}(\log d)\big) + K\,\mathrm{diag}\big(\mathrm{softplus}(\beta([q,\mathrm{d}v]))\big)\,K^\top \succeq 0,
+D = \mathrm{diag}\big(\mathrm{softplus}(\log d)\big) + K\,\mathrm{diag}\big(\mathrm{softplus}(w([q,\mathrm{d}v]))\big)\,K^\top \succeq 0,
 $$
 
-with learned low-rank direction columns $K$ and nonnegative weights $\beta \ge 0$ gated by the incoming velocity jump $\mathrm{d}v = \dot q_t - \dot q_{t-1}$; the base diagonal is always present and the contact term vanishes as $\beta\to 0$. Because $D$ acts on momentum and is PSD, the model is passive: $\dot H = -\dot q^\top D\,\dot q \le 0$. The port $G_a$ maps the action to a generalized force — a dense linear map to the config axis by default, or a sparse actuator-to-DOF scatter when a `DOFLayout` supplies one.
+with learned low-rank direction columns $K$ and nonnegative gate weights $w \ge 0$ (distinct from the discount rate $\beta$) driven by the incoming velocity jump $\mathrm{d}v = \dot q_t - \dot q_{t-1}$; the base diagonal is always present and the contact term vanishes as $w\to 0$. Because $D$ acts on momentum and is PSD, the model is passive: $\dot H = -\dot q^\top D\,\dot q \le 0$. The port $G_a$ maps the action to a generalized force — a dense linear map to the config axis by default, or a sparse actuator-to-DOF scatter when a `DOFLayout` supplies one.
 
 ### 2.4 Coriolis emerges from the mass matrix
 
@@ -111,7 +111,21 @@ The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight position
 
 ## 3. How the models are trained
 
-Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction.
+Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction. The whole step, at a glance ($V^{\text{tgt}}, Q^{\text{tgt}}$ are the lagged target networks, $b_\phi$ the structured drift):
+
+```text
+per gradient step, on a replay minibatch (x, a, r, x', prev_obs, u):
+
+  alpha   ← step   entropy-temperature loss
+  phi     ← step   || x + b_phi(x, a; prev_obs) * dt - x' ||^2                       # dynamics model (obs-space)
+  psi     ← step   || V_psi(x) - E_{a'~pi}[ min_i Q_i^tgt(x,a') - alpha*log pi(a'|x) ] ||^2   # value head (label detached)
+  y       = r + V^tgt(x) + ( dt_default * b_phi(x,a;prev_obs) . grad V^tgt(x) - beta*V^tgt(x) )   # generator target, once warm
+            #  quadrature variant:  y = r + V^tgt(x) + ( V^tgt(x_hat) - V^tgt(x) - beta*V^tgt(x) )
+            #  warmup fallback:     y = r + V(x)     + ( gamma^u * V(x') - V(x) ) / u
+  theta   ← step   sum_i || Q_i(x,a) - y ||^2                                         # twin-Q critic (y detached)
+  pi      ← step   E[ alpha*log pi(a_pi|x) - min_i Q_i(x, a_pi) ]                       # policy
+  V^tgt, Q^tgt  ←  (1 - tau)*target + tau*live                                        # Polyak update
+```
 
 **Dynamics model** — $M(q)$, the potential $V(q)$, the damping $D$, and the port $G_a$. Fit by one-step prediction in observation space,
 
@@ -151,42 +165,7 @@ The one-directional chain is: replay data feeds the dynamics model; the lagged t
 
 ---
 
-## 4. Why this design works
-
-### 4.1 Diagnosis
-
-The drift's accuracy sets the ceiling on the target. With a clean value, the value change over the model-predicted endpoint, $V(x + b\,\Delta t) - V(x)$, correlates with the true $\Delta V$ at $\approx 1.0$ at the physics floor and $\approx 0.9$ at the benchmark step; the only residual is the displacement mismatch $\lVert b\,\Delta t - \Delta x\rVert$. So target quality is governed by how well $b$ matches the true dynamics.
-
-On cheetah the residual is the Coriolis structure. The hard-to-fit accelerations $\ddot q = M^{-1}(\tau - c(q,\dot q) - g)$ are dominated by the centrifugal/Coriolis term $c \propto \dot q^2$, driven by the high velocities the run policy seeks. Contacts were checked and ruled out as the driver: weakening exploration (scaled or smoothed actions) drops $\lVert\ddot q\rVert$ by $13\times$ while the acceleration-fit correlation holds at $\approx 0.45$, and impact-like transitions (large velocity jump) fit as well as smooth ones.
-
-A black-box energy represents that term only at high cost. Coriolis is $\tfrac{\partial}{\partial q}\big(\tfrac12\dot q^\top M(q)\dot q\big)$ — it is produced by differentiating the kinetic energy. A dense MLP gradient pushed through a generic skew matrix has to reconstruct that $\dot q^2$-structure by brute force, the hardest parameterization of the term that dominates the drift. The structured energy in §2 generates Coriolis directly from $\partial M/\partial q$, and the contact-gated damping supplies the dissipation.
-
-The damping earns its place on smooth, on-policy data. Its low-rank weights are gated by the velocity jump $\mathrm{d}v$, and a contact stands out as a jump only when the surrounding motion is smooth — the on-policy regime, since a learning policy produces smooth control. Under white-noise exploration everything jumps and the signal is uninformative.
-
-### 4.2 Results
-
-**Structured energy.**
-
-| system regime | black-box energy | structured |
-|---|---|---|
-| accel-block corr (white) | 0.49 | **0.91** |
-| accel-block corr (OU) | 0.47 | **0.84** |
-| multistep rollout rel-err, $H=8$ | 1.37 (collapse) | **0.46** (flat) |
-
-The structured model nearly doubles the one-step fit and keeps the multi-step rollout bounded where the black box diverges off the data manifold, which is what makes a learned model usable for multi-step prediction on cheetah. It closes most of the gap to the oracle ($\approx 1.0$ accel corr, $\approx 0.35$ flat rollout) while staying simulator-free.
-
-**Contact-aware damping.**
-
-| exploration | baseline accel corr | contact-aware |
-|---|---|---|
-| white-noise (mean $\lvert\mathrm{d}v\rvert$ 5.2) | 0.51 | 0.50 (parity) |
-| OU-smooth (mean $\lvert\mathrm{d}v\rvert$ 2.1) | 0.46 | **0.67** |
-
-The gain shows up under smooth exploration, matching the diagnosis: the $\mathrm{d}v$ gate is informative precisely when contacts are distinguishable from the surrounding motion.
-
----
-
-## 5. Relation to the original CT-SAC
+## 4. Relation to the original CT-SAC
 
 Original CT-SAC is model-free: it estimates the generator by a finite difference over a *sampled* successor state, and reads the value on the fly as an action expectation of the twin-$Q$. This work changes how the critic *target* obtains the generator and adds a value head. The actor update, the twin-$Q$ critics with their Polyak targets, the entropy temperature $\alpha$, the rescaled-time discount, and the off-policy replay loop are unchanged, and the original target is retained as the fallback (during model/head warmup, or whenever `use_model_based_q` is off).
 
@@ -204,7 +183,7 @@ One consequence to keep in view: the analytic generator lowers the per-update *t
 
 ---
 
-## 6. Implementation and call stack
+## 5. Implementation and call stack
 
 The port is additive: the existing `mujoco` and `phast` modes are byte-unchanged, and CT-SAC and the replay buffer carry over as-is — the `drift(obs, action, prev_obs=…)` / `fit_step(…, prev_obs=…)` contract and `prev_observations` already existed from the contact-aware work.
 
@@ -239,17 +218,52 @@ flowchart TD
 
 ---
 
-## 7. Scope and open work
+## 6. Scope and open work
 
 - **Dense Cholesky and Woodbury.** $M(q)$ is a full lower-triangular Cholesky factor $M = L(q)L(q)^\top + \varepsilon I$ and $M^{-1}p$ is a dense `torch.linalg.solve`. At cheetah's $n_v = 9$ this dense factorization is negligible in cost and more expressive. The diagonal-plus-low-rank + Woodbury parameterization of the mass matrix (PHAST's form) is the alternative worth adopting when scaling to high-DOF systems where $n_v$ is large.
-- **End-to-end on cheetah.** The results above are offline (one-step fit and rollout). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact`.
+- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact`.
 - **Structure-preserving integration.** The multi-step roll uses observation-space Euler of the drift, which is bounded and adequate at short horizons; a Strang integrator in $(q,p)$ is the refinement for longer horizons, enabled by the canonicalizer frame.
 - **Diffusion milestone.** $\sigma\sigma^\top = 2T\,D(q)$ is defined in the momentum frame and reuses the learned $D$; deferred.
 - **Other domains.** `DOFLayout` makes the model domain-agnostic, but the runner currently constructs the cheetah layout only; another environment needs its own layout passed in.
 
 ---
 
-## Appendix — symbol and mode reference
+## Appendix A — Why this design works
+
+### Diagnosis
+
+The drift's accuracy sets the ceiling on the target. With a clean value, the value change over the model-predicted endpoint, $V(x + b\,\Delta t) - V(x)$, correlates with the true $\Delta V$ at $\approx 1.0$ at the physics floor and $\approx 0.9$ at the benchmark step; the only residual is the displacement mismatch $\lVert b\,\Delta t - \Delta x\rVert$. So target quality is governed by how well $b$ matches the true dynamics.
+
+On cheetah the residual is the Coriolis structure. The hard-to-fit accelerations $\ddot q = M^{-1}(\tau - c(q,\dot q) - g)$ are dominated by the centrifugal/Coriolis term $c \propto \dot q^2$, driven by the high velocities the run policy seeks. Contacts were checked and ruled out as the driver: weakening exploration (scaled or smoothed actions) drops $\lVert\ddot q\rVert$ by $13\times$ while the acceleration-fit correlation holds at $\approx 0.45$, and impact-like transitions (large velocity jump) fit as well as smooth ones.
+
+A black-box energy represents that term only at high cost. Coriolis is $\tfrac{\partial}{\partial q}\big(\tfrac12\dot q^\top M(q)\dot q\big)$ — it is produced by differentiating the kinetic energy. A dense MLP gradient pushed through a generic skew matrix has to reconstruct that $\dot q^2$-structure by brute force, the hardest parameterization of the term that dominates the drift. The structured energy in §2 generates Coriolis directly from $\partial M/\partial q$, and the contact-gated damping supplies the dissipation.
+
+The damping earns its place on smooth, on-policy data. Its low-rank weights are gated by the velocity jump $\mathrm{d}v$, and a contact stands out as a jump only when the surrounding motion is smooth — the on-policy regime, since a learning policy produces smooth control. Under white-noise exploration everything jumps and the signal is uninformative.
+
+### Results
+
+**Structured energy.**
+
+| system regime | black-box energy | structured |
+|---|---|---|
+| accel-block corr (white) | 0.49 | **0.91** |
+| accel-block corr (OU) | 0.47 | **0.84** |
+| multistep rollout rel-err, $H=8$ | 1.37 (collapse) | **0.46** (flat) |
+
+The structured model nearly doubles the one-step fit and keeps the multi-step rollout bounded where the black box diverges off the data manifold, which is what makes a learned model usable for multi-step prediction on cheetah. It closes most of the gap to the oracle ($\approx 1.0$ accel corr, $\approx 0.35$ flat rollout) while staying simulator-free.
+
+**Contact-aware damping.**
+
+| exploration | baseline accel corr | contact-aware |
+|---|---|---|
+| white-noise (mean $\lvert\mathrm{d}v\rvert$ 5.2) | 0.51 | 0.50 (parity) |
+| OU-smooth (mean $\lvert\mathrm{d}v\rvert$ 2.1) | 0.46 | **0.67** |
+
+The gain shows up under smooth exploration, matching the diagnosis: the $\mathrm{d}v$ gate is informative precisely when contacts are distinguishable from the surrounding motion.
+
+---
+
+## Appendix B — Symbol and mode reference
 
 | Symbol / mode | Meaning |
 |---|---|
