@@ -160,7 +160,7 @@ The port is additive: the existing `mujoco` and `phast` modes are byte-unchanged
 | `common/buffers.py` | `ReplayBatch.prev_observations`, reconstructed from the preceding buffer slot (zeroed across resets and the ring seam). |
 | `algorithms/ct_sac.py` | threads `batch.prev_observations` into `fit_step`, `_model_based_target`, and the quadrature roll. |
 | `benchmarks/run_ct_rl.py` | `dynamics_source` value `structured` and the `phast` contact flag. |
-| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad` (the structured modes carry the V-head so the target is not gradient-limited). |
+| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad`, `mbq_structured_quad_contact` (the structured modes carry the V-head so the target is not gradient-limited). |
 
 ```mermaid
 flowchart TD
@@ -188,7 +188,7 @@ flowchart TD
 ## 6. Scope and open work
 
 - **Dense Cholesky and Woodbury.** $M(q)$ is a full lower-triangular Cholesky factor $M = L(q)L(q)^\top + \varepsilon I$ and $M^{-1}p$ is a dense `torch.linalg.solve`. At cheetah's $n_v = 9$ this dense factorization is negligible in cost and more expressive. The diagonal-plus-low-rank + Woodbury parameterization of the mass matrix (PHAST's form) is the alternative worth adopting when scaling to high-DOF systems where $n_v$ is large.
-- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact`.
+- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact` (contact-gated), and `mbq_structured_quad_contact` (both).
 - **Structure-preserving integration.** The multi-step roll uses observation-space Euler of the drift, which is bounded and adequate at short horizons; a Strang integrator in $(q,p)$ is the refinement for longer horizons, enabled by the canonicalizer frame.
 - **Diffusion milestone.** $\sigma\sigma^\top = 2T\,D(q)$ is defined in the momentum frame and reuses the learned $D$; deferred.
 - **Other domains.** `DOFLayout` makes the model domain-agnostic, but the runner currently constructs the cheetah layout only; another environment needs its own layout passed in.
@@ -448,4 +448,4 @@ so every eigenvalue of $M$ is at least $\varepsilon$. That floor also keeps $M$ 
 | `phast` | black-box learned port-Hamiltonian |
 | `phast` + `contact_aware` | black-box with contact-gated $R$ |
 | `structured` | structured port-Hamiltonian with $M(q)$, $V(q)$ (this doc) |
-| cheetah run modes | `mbq_structured` (V-head, first-order), `mbq_structured_quad` (V-head, sub-step quadrature), `mbq_structured_contact`, `mbq_phast_vhead` (head-matched black box). All read $V,\nabla V$ from the detached V-head. |
+| cheetah run modes | `mbq_structured` (V-head, first-order), `mbq_structured_quad` (V-head, sub-step quadrature), `mbq_structured_contact` (contact-gated damping), `mbq_structured_quad_contact` (quadrature + contact gate), `mbq_phast_vhead` (head-matched black box). All read $V,\nabla V$ from the detached V-head. |
