@@ -1,3 +1,5 @@
+import os
+import pathlib
 from typing import Union, Optional, Dict, Any, Type
 import numpy as np
 import torch as th
@@ -184,6 +186,33 @@ class CTSAC(OffPolicyAlgorithm):
 
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
+
+    # ------------------------ persistence ------------------------
+
+    @staticmethod
+    def _dynamics_sidecar(path: Union[str, pathlib.Path]) -> str:
+        """Sidecar file holding the learned dynamics model next to a checkpoint:
+        ``best_model.pth`` -> ``best_model.dynamics.pth``."""
+        root, ext = os.path.splitext(str(path))
+        return root + ".dynamics" + (ext or ".pth")
+
+    def save(self, path) -> None:
+        """Save the actor-critic checkpoint, plus the learned dynamics model to a
+        sidecar file (so the trained port-Hamiltonian can be inspected later,
+        e.g. by ``evaluations/hamiltonian_recovery.py``)."""
+        super().save(path)
+        if self._train_dynamics and isinstance(path, (str, pathlib.Path)):
+            th.save(self.dynamics_model.state_dict(), self._dynamics_sidecar(path))
+
+    def load(self, path, strict: bool = True) -> "CTSAC":
+        super().load(path, strict=strict)
+        if self._train_dynamics and isinstance(path, (str, pathlib.Path)):
+            sidecar = self._dynamics_sidecar(path)
+            if os.path.exists(sidecar):
+                self.dynamics_model.load_state_dict(
+                    th.load(sidecar, map_location=self.device)
+                )
+        return self
 
     def _policy_act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         obs_t = th.as_tensor(obs, device=self.device).float()
