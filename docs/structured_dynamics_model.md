@@ -113,10 +113,10 @@ The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight position
 
 Four things learn on every gradient step: the dynamics model, the value head, the twin-$Q$ critic, and the policy. Each is fit by its own regression toward a target that is detached within the step and read from a Polyak-lagged copy of another component. The couplings run in one direction.
 
-**Input:** a replay minibatch of transitions $(x, a, r, x', d, x_{\text{prev}}, \Delta t)$ — observation, action, reward, next observation, done flag, previous observation (supplying the velocity jump $\mathrm{d}v = \dot q - \dot q_{\text{prev}}$), and transition duration — together with the current parameters (dynamics model $\phi$, value head $\psi$, twin-$Q$ critics $\theta$, policy, temperature $\alpha$) and their Polyak-lagged targets $V^{\text{tgt}}, Q^{\text{tgt}}$. All update targets are detached. The step runs these updates in order, with $b_\phi$ the structured drift:
+**Input:** a replay minibatch of transitions $(x, a, r, x', d, x_{\text{prev}}, \Delta t)$ — observation, action, reward, next observation, done flag, previous observation (supplying the velocity jump $\mathrm{d}v = \dot q - \dot q_{\text{prev}}$), and transition duration — together with the current parameters (dynamics model $\phi$, value head $\psi$, twin-$Q$ critics $\theta$, policy, temperature $\alpha$) and their Polyak-lagged targets $V^{\text{tgt}}, Q^{\text{tgt}}$. With a fit horizon $H>1$ the dynamics step draws its own minibatch of length-$H$ replay windows (consecutive transitions of one episode, with a validity mask); the other updates keep the transition minibatch. All update targets are detached. The step runs these updates in order, with $b_\phi$ the structured drift:
 
 1. **Temperature** $\alpha$ — a gradient step on the entropy-temperature objective.
-2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$.
+2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$; with `dynamics_fit_horizon` $H>1$, the same regression applied at every step of an $H$-step Euler roll of the model over a replay window (§B.2).
 3. **Value head** $\psi$ — regress to the soft state value, $\displaystyle\min_\psi \Big\lVert V_\psi(x) - \mathbb{E}_{a'\sim\pi}\big[\min_i Q^{\text{tgt}}_i(x,a') - \alpha\log\pi(a'\mid x)\big] \Big\rVert^2$ (label detached).
 4. **Twin-$Q$ critic** $\theta$ — regress to the generator target, $\displaystyle\min_\theta \sum_i \lVert Q_i(x,a) - y \rVert^2$, with
 $$
@@ -156,11 +156,11 @@ The port is additive: the existing `mujoco` and `phast` modes are byte-unchanged
 
 | file | change |
 |---|---|
-| `models/port_hamiltonian.py` | `DOFLayout` dataclass; `mode="structured"` (`_init_structured`, `_mass`, `_potential`, `_damping`, `_structured_drift`); contact-gated $R$ on the existing `contact_aware` flag for `phast`. |
-| `common/buffers.py` | `ReplayBatch.prev_observations`, reconstructed from the preceding buffer slot (zeroed across resets and the ring seam). |
-| `algorithms/ct_sac.py` | threads `batch.prev_observations` into `fit_step`, `_model_based_target`, and the quadrature roll. |
+| `models/port_hamiltonian.py` | `DOFLayout` dataclass; `mode="structured"` (`_init_structured`, `_mass`, `_potential`, `_damping`, `_structured_drift`); contact-gated $R$ on the existing `contact_aware` flag for `phast`; `fit_step_rollout` ($H$-step masked BPTT fit, §B.2). |
+| `common/buffers.py` | `ReplayBatch.prev_observations`, reconstructed from the preceding buffer slot (zeroed across resets and the ring seam); `ReplaySequenceBatch` + `sample_sequences` (length-$H$ windows with a cumulative validity mask that breaks at episode ends and the ring seam). |
+| `algorithms/ct_sac.py` | threads `batch.prev_observations` into `fit_step`, `_model_based_target`, and the quadrature roll; `dynamics_fit_horizon` routes the dynamics update through `sample_sequences` + `fit_step_rollout`. |
 | `benchmarks/run_ct_rl.py` | `dynamics_source` value `structured` and the `phast` contact flag. |
-| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad`, `mbq_structured_quad_contact` (the structured modes carry the V-head so the target is not gradient-limited). |
+| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad`, `mbq_structured_quad_contact` (the structured modes carry the V-head so the target is not gradient-limited); rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, `mbq_structured_quad_contact_roll` (fit horizon 4). |
 
 ```mermaid
 flowchart TD
@@ -179,7 +179,7 @@ flowchart TD
     BD --> GEN["generator / sub-step quadrature target"]
     CR --> GEN
     GEN --> LOSS["critic MSE"]
-    RB -.fit ||x + b dt - x'||^2.-> ST
+    RB -.fit: 1-step or H-step rollout.-> ST
     RB -.fit.-> BB
 ```
 
@@ -188,7 +188,7 @@ flowchart TD
 ## 6. Scope and open work
 
 - **Dense Cholesky and Woodbury.** $M(q)$ is a full lower-triangular Cholesky factor $M = L(q)L(q)^\top + \varepsilon I$ and $M^{-1}p$ is a dense `torch.linalg.solve`. At cheetah's $n_v = 9$ this dense factorization is negligible in cost and more expressive. The diagonal-plus-low-rank + Woodbury parameterization of the mass matrix (PHAST's form) is the alternative worth adopting when scaling to high-DOF systems where $n_v$ is large.
-- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact` (contact-gated), and `mbq_structured_quad_contact` (both).
+- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact` (contact-gated), and `mbq_structured_quad_contact` (both), plus the rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, and `mbq_structured_quad_contact_roll` (`dynamics_fit_horizon` 4).
 - **Structure-preserving integration.** The multi-step roll uses observation-space Euler of the drift, which is bounded and adequate at short horizons; a Strang integrator in $(q,p)$ is the refinement for longer horizons, enabled by the canonicalizer frame.
 - **Diffusion milestone.** $\sigma\sigma^\top = 2T\,D(q)$ is defined in the momentum frame and reuses the learned $D$; deferred.
 - **Other domains.** `DOFLayout` makes the model domain-agnostic, but the runner currently constructs the cheetah layout only; another environment needs its own layout passed in.
@@ -227,6 +227,16 @@ The structured model nearly doubles the one-step fit and keeps the multi-step ro
 | OU-smooth (mean $\lvert\mathrm{d}v\rvert$ 2.1) | 0.46 | **0.67** |
 
 The gain shows up under smooth exploration, matching the diagnosis: the $\mathrm{d}v$ gate is informative precisely when contacts are distinguishable from the surrounding motion.
+
+**Multi-step rollout fit.** Offline, matched update counts and batch size, structured + contact model on OU-smooth cheetah data (4k transitions, held-out tail; open-loop error displacement-normalized, so numbers are not comparable across tables). At 8k updates:
+
+| held-out metric | one-step fit | rollout fit $H=2$ | rollout fit $H=4$ |
+|---|---|---|---|
+| accel-block corr | 0.47 | 0.55 | **0.57** |
+| open-loop rel-err, $H=4$ | 1.07 | 0.96 | **0.89** |
+| open-loop rel-err, $H=8$ | 0.83 | 0.83 | **0.77** |
+
+The ordering is monotone in the fit horizon on every metric. The trajectory matters as much as the endpoint: at 2.5k updates the one-step fit is still ahead (accel corr 0.58 vs 0.51 — backprop through the roll optimizes more slowly per update), and between 2.5k and 8k the one-step fit's held-out metrics *degrade* (accel corr 0.58 → 0.47, $H{=}4$ rel-err 0.84 → 1.07) while the rollout fit's improve throughout. Continued one-step training buys train-set residual at the cost of the model-predicted states the quadrature target reads. Benchmark runs take $\sim10^6$ updates, so the long-run regime is the operative one, and it favors the rollout fit.
 
 ---
 
@@ -272,6 +282,22 @@ b_\phi = [\dot q_{\text{obs}};\ \ddot q],\quad \ddot q = M^{-1}\big(\dot p - \do
 $$
 
 The regression is taken entirely in observation space. The canonicalizer $p=M(q)\dot q$ lives inside the forward pass and the loss never constructs a momentum-space label — the only target is the observed $x'$. Two consequences follow. First, the regression target $x'$ is a fixed datum, independent of $\phi$: there is no momentum coordinate that co-adapts with $M$, so the fit cannot lower its loss by rescaling the momentum. Second, $M(q)$ enters the prediction only through the acceleration $\ddot q=M^{-1}(\dot p-\dot M\dot q)$, so it is identified by how well that reproduces the observed accelerations, which keeps the mass matrix anchored to data through the prediction loss alone. (A momentum-space loss $\lVert\hat p'-p'\rVert^2$ would need labels $p'=M(q')\dot q'$ built from the same learned $M$, coupling the target to the parameters.) A non-trainable oracle drift (`mode="mujoco"`) has no parameters and skips this step.
+
+**Multi-step rollout fit** (`dynamics_fit_horizon` $=H>1$). The one-step loss evaluates $b_\phi$ only at buffer states, while the sub-step quadrature target (§B.4) evaluates it along the model's own roll — predicted states the one-step fit never visits, where the error compounds. The rollout fit trains exactly that regime. Sample a window of $H$ consecutive transitions $(x_t, a_t, \dots, x_{t+H})$ of one episode, roll the model open-loop from the window start,
+
+$$
+\hat x_t = x_t,\qquad
+\hat x_{t+k+1} = \hat x_{t+k} + b_\phi\big(\hat x_{t+k}, a_{t+k};\, \hat x_{t+k-1}\big)\,\Delta t_{t+k},
+\qquad k = 0,\dots,H-1,
+$$
+
+and regress every rolled state onto its observed counterpart,
+
+$$
+\mathcal L_{\text{roll}}(\phi) = \frac{\sum_{k} m_k\,\big\lVert \hat x_{t+k+1} - x_{t+k+1} \big\rVert^2}{\dim(x)\,\sum_k m_k},
+$$
+
+with gradients through the whole roll (backprop through time; `fit_step_rollout`). The cumulative mask $m_k\in\{0,1\}$ cuts the window where it crosses an episode end or the replay ring's seam, so no target mixes two episodes; the velocity jump feeding the contact gate uses the real predecessor $x_{t-1}$ at $k=0$ and the rolled states after — the same convention as the quadrature roll. $H=1$ with a full mask recovers the one-step loss exactly. Appendix A's multi-step rollout relative error is the matching evaluation: the rollout fit optimizes that quantity directly instead of only the one-step residual, which is what keeps the model accurate at the model-predicted states the critic target consumes.
 
 ### B.3 Value head
 
@@ -449,3 +475,4 @@ so every eigenvalue of $M$ is at least $\varepsilon$. That floor also keeps $M$ 
 | `phast` + `contact_aware` | black-box with contact-gated $R$ |
 | `structured` | structured port-Hamiltonian with $M(q)$, $V(q)$ (this doc) |
 | cheetah run modes | `mbq_structured` (V-head, first-order), `mbq_structured_quad` (V-head, sub-step quadrature), `mbq_structured_contact` (contact-gated damping), `mbq_structured_quad_contact` (quadrature + contact gate), `mbq_phast_vhead` (head-matched black box). All read $V,\nabla V$ from the detached V-head. |
+| `*_roll` modes | `mbq_structured_roll`, `mbq_structured_quad_roll`, `mbq_structured_quad_contact_roll` — the same modes with the dynamics model fit by the $H$-step rollout regression (§B.2, `dynamics_fit_horizon` 4) instead of the one-step fit. |

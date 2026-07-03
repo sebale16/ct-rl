@@ -55,6 +55,7 @@ class CTSAC(OffPolicyAlgorithm):
         human_input_intensity: float = 0.0,
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
+        dynamics_fit_horizon: int = 1,
         generator_gate_scale: float = 0.0,
         value_warmup: int = 0,
         generator_substeps: int = 0,
@@ -134,6 +135,7 @@ class CTSAC(OffPolicyAlgorithm):
         # the replay buffer. Models with no trainable parameters (e.g. the MuJoCo
         # oracle) skip this and are used from the first step.
         self.dynamics_warmup = int(dynamics_warmup)
+        self.dynamics_fit_horizon = max(1, int(dynamics_fit_horizon))
         self._dynamics_updates = 0
         self._train_dynamics = False
         self.dynamics_optimizer = None
@@ -237,10 +239,20 @@ class CTSAC(OffPolicyAlgorithm):
 
             ## Dynamics model update (learned port-Hamiltonian, fit from transitions)
             if self._train_dynamics:
-                dynamics_loss = self.dynamics_model.fit_step(
-                    obs, actions, next_obs, dt, self.dynamics_optimizer,
-                    prev_obs=batch.prev_observations,
-                )
+                if self.dynamics_fit_horizon > 1:
+                    seq = self.replay_buffer.sample_sequences(
+                        batch_size, self.dynamics_fit_horizon
+                    )
+                    dynamics_loss = self.dynamics_model.fit_step_rollout(
+                        seq.observations, seq.actions, seq.next_observations,
+                        seq.dt, seq.mask, self.dynamics_optimizer,
+                        prev_obs=seq.prev_observations,
+                    )
+                else:
+                    dynamics_loss = self.dynamics_model.fit_step(
+                        obs, actions, next_obs, dt, self.dynamics_optimizer,
+                        prev_obs=batch.prev_observations,
+                    )
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
 

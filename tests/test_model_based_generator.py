@@ -742,6 +742,113 @@ class TestStructuredDynamics(unittest.TestCase):
         self.assertTrue(th.all(th.isfinite(b)))
 
 
+class TestRolloutFit(unittest.TestCase):
+    """Multi-step rollout fit (fit_step_rollout): backprop through the model's
+    own Euler roll, per-step masked regression onto the stored window."""
+
+    def _structured(self):
+        th.manual_seed(0)
+        return PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(32, 32), contact_aware=True
+        )
+
+    def test_h1_full_mask_matches_fit_step(self):
+        """Horizon 1 with a full mask is exactly the one-step fit."""
+        import copy
+
+        m = self._structured()
+        state = copy.deepcopy(m.state_dict())
+        th.manual_seed(1)
+        x = th.randn(8, 17); a = th.randn(8, 6)
+        xp = x + 0.05 * th.randn(8, 17); prev = x - 0.1 * th.randn(8, 17)
+
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        one = m.fit_step(x, a, xp, 0.01, opt, prev_obs=prev)
+
+        m.load_state_dict(state)
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        roll = m.fit_step_rollout(
+            x, a.unsqueeze(1), xp.unsqueeze(1), th.full((8, 1, 1), 0.01),
+            th.ones(8, 1, 1), opt, prev_obs=prev,
+        )
+        self.assertLess(abs(one - roll), 1e-6)
+
+    def test_mask_zeroes_invalid_tail(self):
+        """A window whose tail is masked fits exactly like the truncated window."""
+        import copy
+
+        m = self._structured()
+        state = copy.deepcopy(m.state_dict())
+        th.manual_seed(2)
+        x = th.randn(8, 17)
+        A = th.randn(8, 3, 6); XP = th.randn(8, 3, 17)
+        dt = th.full((8, 3, 1), 0.01)
+        mask = th.tensor([1.0, 0.0, 0.0]).view(1, 3, 1).expand(8, 3, 1)
+
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        l_masked = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+
+        m.load_state_dict(state)
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        l_short = m.fit_step_rollout(
+            x, A[:, :1], XP[:, :1], dt[:, :1], th.ones(8, 1, 1), opt
+        )
+        self.assertLess(abs(l_masked - l_short), 1e-6)
+
+    def test_rollout_fit_reduces_loss(self):
+        """Repeated rollout fits on consistent 3-step windows reduce the loss
+        (BPTT through drift, mass Jacobian, and contact gate), for both learned
+        modes."""
+        th.manual_seed(3)
+        for mode, kwargs in [
+            ("structured", dict(structured_hidden=(32, 32), contact_aware=True)),
+            ("phast", dict(hidden=(32, 32))),
+        ]:
+            m = PortHamiltonianModel(17, 6, mode=mode, **kwargs)
+            # ground-truth linear dynamics rolled 3 steps from random starts
+            Amat = 0.5 * th.randn(17, 17) / 17**0.5
+            Bmat = 0.5 * th.randn(17, 6) / 6**0.5
+            x0 = th.randn(16, 17); acts = th.randn(16, 3, 6)
+            xs, xk = [], x0
+            for k in range(3):
+                xk = xk + (xk @ Amat.t() + acts[:, k] @ Bmat.t()) * 0.01
+                xs.append(xk)
+            targets = th.stack(xs, dim=1)  # (16, 3, 17)
+            dt = th.full((16, 3, 1), 0.01); mask = th.ones(16, 3, 1)
+
+            opt = th.optim.Adam(m.parameters(), lr=1e-3)
+            first = m.fit_step_rollout(x0, acts, targets, dt, mask, opt)
+            last = first
+            for _ in range(60):
+                last = m.fit_step_rollout(x0, acts, targets, dt, mask, opt)
+            self.assertLess(last, first, f"mode={mode}")
+
+    def test_ct_sac_rollout_fit_runs(self):
+        """End-to-end: dynamics_fit_horizon > 1 routes the dynamics update through
+        sample_sequences + fit_step_rollout inside CT-SAC training."""
+        th.manual_seed(0); np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], device="cpu",
+        )
+        ph = PortHamiltonianModel(
+            od, ad, mode="structured", structured_hidden=(32, 32), contact_aware=True
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=ph, dynamics_warmup=5,
+            dynamics_fit_horizon=3,
+        )
+        self.assertEqual(agent.dynamics_fit_horizon, 3)
+        agent.learn(total_timesteps=80)
+        self.assertGreater(agent._dynamics_updates, 5)
+
+
 class TestStructuredEndToEnd(unittest.TestCase):
     """Full path: buffer prev_obs -> structured drift -> model-based target / fit."""
 

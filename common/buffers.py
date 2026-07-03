@@ -31,6 +31,31 @@ class ReplayBatch:
 
 
 @dataclass
+class ReplaySequenceBatch:
+    """A batch of length-H action-conditioned replay windows for the multi-step
+    (rollout) dynamics fit. Each window starts at a sampled transition x_t and
+    follows the next H stored transitions of the same env:
+
+      observations       (B, O)     window start x_t
+      actions            (B, H, A)  a_t .. a_{t+H-1}
+      next_observations  (B, H, O)  per-step targets x_{t+1} .. x_{t+H}
+      dt                 (B, H, 1)  realized transition durations
+      mask               (B, H, 1)  1 while the window stays inside one episode
+                                    and off the ring seam; 0 from the first
+                                    break onward (cumulative)
+      prev_observations  (B, O)     predecessor of x_t (= x_t where invalid),
+                                    seeding the velocity jump dv at the start
+    """
+
+    observations: th.Tensor
+    actions: th.Tensor
+    next_observations: th.Tensor
+    dt: th.Tensor
+    mask: th.Tensor
+    prev_observations: th.Tensor
+
+
+@dataclass
 class RolloutBatch:
     observations: th.Tensor
     next_observations: th.Tensor
@@ -233,6 +258,55 @@ class ReplayBuffer(BaseBuffer):
             t=self.to_torch(t),
             next_t=self.to_torch(next_t),
             dt=self.to_torch(dt),
+            prev_observations=self.to_torch(prev_obs),
+        )
+
+    def sample_sequences(self, batch_size: int, horizon: int) -> ReplaySequenceBatch:
+        """Sample ``batch_size`` length-``horizon`` transition windows for the
+        multi-step (rollout) dynamics fit. Steps that cross an episode end or
+        the ring seam are masked out (see ``ReplaySequenceBatch``); the first
+        step of every window is always valid, so ``horizon=1`` with the mask
+        applied is equivalent to ``sample``."""
+        upper = self.buffer_size if self.full else self.pos
+        assert upper > 0, "Cannot sample from an empty ReplayBuffer"
+        start_inds = np.random.randint(0, upper, size=batch_size)
+        env_inds = np.random.randint(0, self.n_envs, size=batch_size)
+        return self._get_sequence_samples(start_inds, env_inds, int(horizon))
+
+    def _get_sequence_samples(
+        self, start_inds: np.ndarray, env_inds: np.ndarray, horizon: int
+    ) -> ReplaySequenceBatch:
+        assert horizon >= 1, "sequence horizon must be >= 1"
+        upper = self.buffer_size if self.full else self.pos
+        batch = start_inds.shape[0]
+        seam = self.pos % upper
+        steps = (start_inds[:, None] + np.arange(horizon)[None, :]) % upper  # (B, H)
+        env_cols = env_inds[:, None]
+
+        obs = self.observations[start_inds, env_inds, :]
+        actions = self.actions[steps, env_cols, :]              # (B, H, A)
+        next_obs = self.next_observations[steps, env_cols, :]   # (B, H, O)
+        dt = self.dt[steps, env_cols]                           # (B, H)
+
+        valid = np.ones((batch, horizon), dtype=np.float32)
+        if horizon > 1:
+            cont = (
+                (self.dones[steps[:, :-1], env_cols] <= 0.5)
+                & (steps[:, 1:] != seam)
+            ).astype(np.float32)  # (B, H-1)
+            valid[:, 1:] = np.cumprod(cont, axis=1)
+
+        prev_inds = (start_inds - 1) % upper
+        prev_obs = self.observations[prev_inds, env_inds, :]
+        invalid = (self.dones[prev_inds, env_inds] > 0.5) | (start_inds == seam)
+        prev_obs = np.where(invalid[:, None], obs, prev_obs)
+
+        return ReplaySequenceBatch(
+            observations=self.to_torch(obs),
+            actions=self.to_torch(actions),
+            next_observations=self.to_torch(next_obs),
+            dt=self.to_torch(dt.reshape(batch, horizon, 1)),
+            mask=self.to_torch(valid.reshape(batch, horizon, 1)),
             prev_observations=self.to_torch(prev_obs),
         )
 
