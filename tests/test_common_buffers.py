@@ -111,5 +111,79 @@ class TestBuffers(unittest.TestCase):
         self.assertEqual(batch0.t.shape[-1], 1)  # flattened (N, 1) after to_torch
 
 
+class TestReplaySequenceSampling(unittest.TestCase):
+    """sample_sequences returns contiguous action-conditioned windows with a
+    cumulative validity mask that breaks at episode ends and the ring seam."""
+
+    obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+    act_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def _fill(self, buf, n, dones=None, offset=0.0):
+        dones = dones if dones is not None else [0] * n
+        for i in range(n):
+            buf.add(
+                obs=np.full((buf.n_envs, 3), offset + i, np.float32),
+                action=np.full((buf.n_envs, 2), offset + i, np.float32),
+                reward=np.zeros((buf.n_envs,), np.float32),
+                done=np.full((buf.n_envs,), dones[i], np.float32),
+                next_obs=np.full((buf.n_envs, 3), offset + i + 1, np.float32),
+                t=np.full((buf.n_envs,), 0.01 * i, np.float32),
+                next_t=np.full((buf.n_envs,), 0.01 * (i + 1), np.float32),
+            )
+
+    def test_windows_chain_and_shapes(self):
+        buf = ReplayBuffer(10, self.obs_space, self.act_space, device="cpu", n_envs=1)
+        self._fill(buf, 6)
+        seq = buf._get_sequence_samples(np.array([0, 2]), np.array([0, 0]), 3)
+        self.assertEqual(tuple(seq.observations.shape), (2, 3))
+        self.assertEqual(tuple(seq.actions.shape), (2, 3, 2))
+        self.assertEqual(tuple(seq.next_observations.shape), (2, 3, 3))
+        self.assertEqual(tuple(seq.dt.shape), (2, 3, 1))
+        self.assertEqual(tuple(seq.mask.shape), (2, 3, 1))
+        # start=0 -> targets obs 1,2,3; start=2 -> targets 3,4,5; all valid
+        self.assertEqual(seq.next_observations[0, :, 0].tolist(), [1.0, 2.0, 3.0])
+        self.assertEqual(seq.next_observations[1, :, 0].tolist(), [3.0, 4.0, 5.0])
+        self.assertEqual(seq.actions[1, :, 0].tolist(), [2.0, 3.0, 4.0])
+        self.assertTrue((seq.mask == 1).all())
+
+    def test_mask_breaks_after_done(self):
+        # done at index 2: that transition is still a valid target, later steps not
+        buf = ReplayBuffer(10, self.obs_space, self.act_space, device="cpu", n_envs=1)
+        self._fill(buf, 6, dones=[0, 0, 1, 0, 0, 0])
+        seq = buf._get_sequence_samples(np.array([1]), np.array([0]), 4)
+        self.assertEqual(seq.mask[0, :, 0].tolist(), [1.0, 1.0, 0.0, 0.0])
+
+    def test_mask_breaks_at_ring_seam(self):
+        # size-5 buffer with 7 adds: slots hold obs [5, 6, 2, 3, 4], pos=2 (seam)
+        buf = ReplayBuffer(5, self.obs_space, self.act_space, device="cpu", n_envs=1)
+        self._fill(buf, 7)
+        # window 0,1,2 hits the seam slot (oldest sample) at k=2
+        seq = buf._get_sequence_samples(np.array([0]), np.array([0]), 3)
+        self.assertEqual(seq.mask[0, :, 0].tolist(), [1.0, 1.0, 0.0])
+        # window 3,4,0 wraps the array end but stays chronological: fully valid
+        seq = buf._get_sequence_samples(np.array([3]), np.array([0]), 3)
+        self.assertEqual(seq.mask[0, :, 0].tolist(), [1.0, 1.0, 1.0])
+        self.assertEqual(seq.next_observations[0, :, 0].tolist(), [4.0, 5.0, 6.0])
+
+    def test_prev_obs_matches_get_samples_rule(self):
+        buf = ReplayBuffer(5, self.obs_space, self.act_space, device="cpu", n_envs=1)
+        self._fill(buf, 7)
+        # start at the seam slot (pos=2): no valid predecessor -> prev = obs
+        seq = buf._get_sequence_samples(np.array([2, 3]), np.array([0, 0]), 2)
+        self.assertEqual(seq.prev_observations[0, 0].item(), seq.observations[0, 0].item())
+        # start=3 (obs 3): predecessor is slot 2 (obs 2)
+        self.assertEqual(seq.prev_observations[1, 0].item(), 2.0)
+
+    def test_windows_stay_within_env(self):
+        buf = ReplayBuffer(10, self.obs_space, self.act_space, device="cpu", n_envs=2)
+        # both envs written in lockstep with identical values; overwrite env 1
+        # with offset values to make cross-env leakage visible
+        self._fill(buf, 6)
+        buf.observations[:6, 1, :] += 100.0
+        buf.next_observations[:6, 1, :] += 100.0
+        seq = buf._get_sequence_samples(np.array([1]), np.array([1]), 3)
+        self.assertEqual(seq.next_observations[0, :, 0].tolist(), [102.0, 103.0, 104.0])
+
+
 if __name__ == "__main__":
     unittest.main()

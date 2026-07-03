@@ -377,3 +377,54 @@ class PortHamiltonianModel(nn.Module):
         loss.backward()
         optimizer.step()
         return float(loss.detach())
+
+    def fit_step_rollout(
+        self, obs, actions, next_obs, dt, mask, optimizer, prev_obs=None
+    ) -> float:
+        """Multi-step (rollout) data step: roll the model H explicit Euler steps
+        from x_t along the recorded actions and regress every rolled state onto
+        the observed sequence,
+
+          x_hat_0 = x_t,   x_hat_{k+1} = x_hat_k + b(x_hat_k, a_{t+k}; x_hat_{k-1}) dt_{t+k},
+          loss = sum_k m_k ||x_hat_{k+1} - x_{t+k+1}||^2 / (obs_dim * sum_k m_k).
+
+        Gradients flow through the whole roll (backprop through time), so the
+        model is trained where the generator/quadrature targets consume it: on
+        its own predictions, not only on buffer states. The velocity jump for
+        the contact gate uses the real predecessor at k=0 and the rolled states
+        after, the convention of the sub-step quadrature roll. ``mask`` (1 valid,
+        0 invalid, cumulative) zeroes the steps of a window that crosses an
+        episode end or the ring seam; ``horizon=1`` with a full mask is exactly
+        ``fit_step``.
+
+        Shapes: obs (B, O); actions (B, H, A); next_obs (B, H, O);
+        dt, mask (B, H, 1); prev_obs (B, O) or None."""
+        assert self.mode in ("phast", "structured"), (
+            "fit_step_rollout only applies to learned modes ('phast', 'structured')."
+        )
+        x_hat = th.as_tensor(obs, dtype=th.float32, device=self.device)
+        a = th.as_tensor(actions, dtype=th.float32, device=self.device)
+        xp = th.as_tensor(next_obs, dtype=th.float32, device=self.device)
+        batch = x_hat.shape[0]
+        dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(
+            batch, -1, 1
+        )
+        m = th.as_tensor(mask, dtype=th.float32, device=self.device).reshape(
+            batch, -1, 1
+        )
+        horizon = a.shape[1]
+
+        prev = prev_obs
+        loss = x_hat.new_zeros(())
+        for k in range(horizon):
+            b = self.drift(x_hat, a[:, k], prev_obs=prev)
+            prev = x_hat
+            # The update is gated by the mask so an invalid tail cannot run the
+            # state off to non-finite values (0 * inf would poison the masked loss).
+            x_hat = x_hat + b * (dt_t[:, k] * m[:, k])
+            loss = loss + (m[:, k] * (x_hat - xp[:, k]) ** 2).sum()
+        loss = loss / (m.sum() * self.obs_dim + 1e-8)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        return float(loss.detach())
