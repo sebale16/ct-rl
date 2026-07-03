@@ -360,6 +360,30 @@ class PortHamiltonianModel(nn.Module):
         eye = th.eye(self.obs_dim, device=self.device) * scale
         return eye.unsqueeze(0).expand(batch, -1, -1)
 
+    # Fit gradients are clipped to this global norm. The one-step fit rarely
+    # needs it, but the rollout fit backpropagates through a chained Euler roll
+    # whose forward pass can transiently explode (the Coriolis term is
+    # quadratic in velocity), and one unclipped step is enough to NaN the
+    # parameters and, through the critic target, the whole agent.
+    fit_max_grad_norm: float = 10.0
+
+    def _fit_optimizer_step(self, loss: th.Tensor, optimizer) -> float:
+        """backward + clipped step, skipping the update (not the report) when
+        the loss or the gradient norm is non-finite, so a pathological batch
+        cannot write NaN into the parameters."""
+        optimizer.zero_grad()
+        if not th.isfinite(loss):
+            return float(loss.detach())
+        loss.backward()
+        total_norm = th.nn.utils.clip_grad_norm_(
+            [p for g in optimizer.param_groups for p in g["params"]],
+            self.fit_max_grad_norm,
+        )
+        if th.isfinite(total_norm):
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        return float(loss.detach())
+
     def fit_step(self, obs, action, next_obs, dt, optimizer, prev_obs=None) -> float:
         """One supervised PHAST data step: minimize ||(x + b*dt) - x'||^2 (mode='phast').
 
@@ -373,10 +397,7 @@ class PortHamiltonianModel(nn.Module):
         dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
         pred = x + self.drift(x, a, prev_obs=prev_obs) * dt_t
         loss = ((pred - xp) ** 2).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        return float(loss.detach())
+        return self._fit_optimizer_step(loss, optimizer)
 
     def fit_step_rollout(
         self, obs, actions, next_obs, dt, mask, optimizer, prev_obs=None
@@ -397,6 +418,18 @@ class PortHamiltonianModel(nn.Module):
         episode end or the ring seam; ``horizon=1`` with a full mask is exactly
         ``fit_step``.
 
+        The compounding steps (k >= 1) evaluate the drift at the model's own
+        predictions, where nothing bounds it — the Coriolis term is quadratic
+        in velocity, so one bad prediction can blow up the rest of the roll,
+        overflow the loss, and NaN the parameters through BPTT. Each such
+        increment is therefore clamped elementwise to a generous multiple of
+        the window's own observed increments; healthy rolls never touch the
+        bound, and a run-away roll saturates instead of compounding (saturated
+        entries also stop back-propagating). The first step is taken from a
+        real buffer state and is left unclamped, so horizon=1 remains exactly
+        ``fit_step``. The optimizer step itself is clipped and skipped on a
+        non-finite loss (``_fit_optimizer_step``).
+
         Shapes: obs (B, O); actions (B, H, A); next_obs (B, H, O);
         dt, mask (B, H, 1); prev_obs (B, O) or None."""
         assert self.mode in ("phast", "structured"), (
@@ -414,6 +447,11 @@ class PortHamiltonianModel(nn.Module):
         )
         horizon = a.shape[1]
 
+        # Per-sample, per-dimension bound on a compounding Euler increment:
+        # 5x the largest observed one-step change in this window.
+        obs_steps = xp - th.cat([x_hat.unsqueeze(1), xp[:, :-1]], dim=1)  # (B, H, O)
+        step_limit = 5.0 * obs_steps.abs().amax(dim=1) + 1e-3            # (B, O)
+
         prev = prev_obs
         loss = x_hat.new_zeros(())
         for k in range(horizon):
@@ -421,10 +459,10 @@ class PortHamiltonianModel(nn.Module):
             prev = x_hat
             # The update is gated by the mask so an invalid tail cannot run the
             # state off to non-finite values (0 * inf would poison the masked loss).
-            x_hat = x_hat + b * (dt_t[:, k] * m[:, k])
+            step = b * (dt_t[:, k] * m[:, k])
+            if k > 0:
+                step = th.clamp(step, -step_limit, step_limit)
+            x_hat = x_hat + step
             loss = loss + (m[:, k] * (x_hat - xp[:, k]) ** 2).sum()
         loss = loss / (m.sum() * self.obs_dim + 1e-8)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        return float(loss.detach())
+        return self._fit_optimizer_step(loss, optimizer)

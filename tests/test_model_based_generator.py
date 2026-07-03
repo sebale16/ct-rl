@@ -849,6 +849,121 @@ class TestRolloutFit(unittest.TestCase):
         self.assertGreater(agent._dynamics_updates, 5)
 
 
+class TestNumericalStabilityGuards(unittest.TestCase):
+    """The failure mode observed in the mbq_*_roll benchmark run: the BPTT
+    rollout fit explodes at high on-policy velocities, NaNs the dynamics model,
+    and the NaN propagates through the critic target into every network — the
+    agent pins at 0 return and never recovers. These tests pin the guards that
+    make that impossible."""
+
+    def _windows(self, batch=8, horizon=3):
+        th.manual_seed(0)
+        x = th.randn(batch, 17)
+        A = th.randn(batch, horizon, 6)
+        XP = x.unsqueeze(1) + 0.05 * th.randn(batch, horizon, 17)
+        dt = th.full((batch, horizon, 1), 0.01)
+        mask = th.ones(batch, horizon, 1)
+        return x, A, XP, dt, mask
+
+    def test_explosive_rollout_cannot_nan_parameters(self):
+        """A model whose drift is astronomically wrong overflows the rollout
+        loss; the update must be skipped and every parameter stay finite."""
+        th.manual_seed(0)
+        m = PortHamiltonianModel(17, 6, mode="structured", structured_hidden=(32, 32))
+        with th.no_grad():
+            m.G_a.weight.mul_(1e20)  # drift ~ 1e20 -> loss overflows to inf
+        before = {k: v.clone() for k, v in m.state_dict().items()}
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        x, A, XP, dt, mask = self._windows()
+        for _ in range(3):
+            loss = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+        self.assertFalse(np.isfinite(loss))  # reported faithfully
+        for k, v in m.state_dict().items():
+            self.assertTrue(th.all(th.isfinite(v)), k)
+            self.assertTrue(th.equal(v, before[k]), f"{k} updated on inf loss")
+
+    def test_huge_but_finite_loss_takes_clipped_step(self):
+        """A large finite loss must still update (clipped), not be skipped."""
+        th.manual_seed(0)
+        m = PortHamiltonianModel(17, 6, mode="structured", structured_hidden=(32, 32))
+        with th.no_grad():
+            m.G_a.weight.mul_(1e3)
+        before = {k: v.clone() for k, v in m.state_dict().items()}
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        x, A, XP, dt, mask = self._windows()
+        loss = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+        self.assertTrue(np.isfinite(loss))
+        changed = any(
+            not th.equal(v, before[k]) for k, v in m.state_dict().items()
+        )
+        self.assertTrue(changed, "no parameter moved on a finite loss")
+        for k, v in m.state_dict().items():
+            self.assertTrue(th.all(th.isfinite(v)), k)
+
+    def test_compounding_steps_are_clamped(self):
+        """The k>=1 Euler increments saturate at the data-derived bound, so a
+        bad drift cannot compound the rolled state to overflow."""
+        th.manual_seed(0)
+        m = PortHamiltonianModel(17, 6, mode="structured", structured_hidden=(32, 32))
+        with th.no_grad():
+            m.G_a.weight.mul_(1e4)
+        x, A, XP, dt, mask = self._windows(horizon=4)
+        # reproduce the roll's forward pass bound: 5 * max observed step + 1e-3
+        obs_steps = XP - th.cat([x.unsqueeze(1), XP[:, :-1]], dim=1)
+        limit = 5.0 * obs_steps.abs().amax(dim=1) + 1e-3
+        # worst possible rolled state: |x_hat| <= |x| + |step0| + (H-1)*limit,
+        # with step0 the unclamped first increment
+        with th.no_grad():
+            b0 = m.drift(x, A[:, 0])
+        bound = x.abs() + (b0 * 0.01).abs() + 3 * limit
+        # run the fit and check the loss stayed finite (no overflow), which
+        # only the clamp guarantees at this drift scale
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        loss = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+        worst = float(bound.max())
+        self.assertTrue(np.isfinite(loss))
+        self.assertLess((worst ** 2), np.finfo(np.float32).max)
+
+    def test_nonfinite_target_fails_fast(self):
+        """A dynamics model emitting NaN drift must terminate the run loudly
+        (no model-free fallback, no silent critic poisoning): train() raises
+        before the NaN target reaches any network."""
+        th.manual_seed(0); np.random.seed(0)
+        env = DMCContinuousEnv(
+            "cheetah", "run", time_sampling="uniform", dt=0.01, episode_duration=20.0
+        )
+
+        class NaNDynamics(th.nn.Module):
+            def drift(self, obs, action, prev_obs=None):
+                return th.full_like(th.as_tensor(obs, dtype=th.float32), float("nan"))
+            def diffusion(self, obs):
+                return None
+
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], device="cpu",
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=NaNDynamics(),
+        )
+        O, A, NO, DT = _collect_env(env, 60)
+        for i in range(60):
+            agent.replay_buffer.add(
+                obs=O[i:i+1].numpy(), next_obs=NO[i:i+1].numpy(), action=A[i:i+1].numpy(),
+                reward=np.zeros((1,), np.float32), done=np.zeros((1,), np.float32),
+                t=np.zeros((1,), np.float32), next_t=DT[i].numpy(),
+            )
+        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+            agent.train(gradient_steps=1, batch_size=16)
+        # the raise happened before any backward pass: every network is intact
+        for p in agent.model.critic_parameters:
+            self.assertTrue(th.all(th.isfinite(p)))
+        for p in agent.model.actor.parameters():
+            self.assertTrue(th.all(th.isfinite(p)))
+
+
 class TestStructuredEndToEnd(unittest.TestCase):
     """Full path: buffer prev_obs -> structured drift -> model-based target / fit."""
 

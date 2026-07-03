@@ -322,6 +322,20 @@ class CTSAC(OffPolicyAlgorithm):
                     obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
                     prev_obs=batch.prev_observations,
                 )
+                # A non-finite target means the model-based method has failed;
+                # without this check it would silently NaN the critic, then the
+                # value head and the policy, and the run would keep producing
+                # 0-return evals with dead parameters. Fail loudly instead —
+                # no model-free fallback, so the benchmark comparison stays a
+                # pure model-based run or an explicit failure.
+                if not bool(th.all(th.isfinite(q_fast_target))):
+                    raise RuntimeError(
+                        "Model-based critic target is non-finite (the learned "
+                        "dynamics model has diverged). Terminating the run: "
+                        "recovery is impossible once NaN reaches the critic, "
+                        "and falling back to the model-free target would "
+                        "contaminate the model-based benchmark."
+                    )
             else:
                 q_fast_target = self._finite_difference_target(
                     obs, next_obs, rewards, dones, dt, alpha_tensor
