@@ -125,7 +125,7 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
             # with velocity: energy, mass matrix, full bias force
             data.qpos[:] = qpos; data.qvel[:] = qvel
             physics.forward()
-            mujoco.mj_fullM(model.ptr, M[i], data.qM)
+            mujoco.mj_fullM(model.ptr, data.ptr, M[i])
             e_pot[i], e_kin[i] = data.energy[0], data.energy[1]
             bias_v = data.qfrc_bias[:nv].copy()
             # at zero velocity: qfrc_bias = gravity, qfrc_passive = spring
