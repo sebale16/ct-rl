@@ -742,6 +742,116 @@ class TestStructuredDynamics(unittest.TestCase):
         self.assertTrue(th.all(th.isfinite(b)))
 
 
+class TestContactForcePort(unittest.TestCase):
+    """Explicit contact-force port (contact_force > 0): learned gap functions
+    with unilateral Hunt-Crossley normal forces and regularized Coulomb
+    friction, plus the translation-invariance restriction on M."""
+
+    def _model(self, contact_force=2, **kw):
+        th.manual_seed(0)
+        return PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(32, 32),
+            contact_force=contact_force, **kw,
+        )
+
+    def test_requires_structured_mode(self):
+        with self.assertRaises(ValueError):
+            PortHamiltonianModel(6, 2, mode="phast", contact_force=2)
+
+    def test_drift_shape_finite(self):
+        m = self._model()
+        b = m.drift(th.randn(5, 17), th.randn(5, 6))
+        self.assertEqual(tuple(b.shape), (5, 17))
+        self.assertTrue(th.all(th.isfinite(b)))
+
+    def test_mass_is_translation_invariant_only_with_port(self):
+        # with the port, M must ignore root z (observed position 0); without it
+        # the architecture is unchanged and M keeps its z-dependence.
+        x = th.randn(6, 8)
+        x_shift = x.clone(); x_shift[:, 0] += 3.0
+        m = self._model()
+        self.assertTrue(th.allclose(th.vmap(m._mass)(x), th.vmap(m._mass)(x_shift)))
+        m0 = self._model(contact_force=0)
+        self.assertFalse(th.allclose(th.vmap(m0._mass)(x), th.vmap(m0._mass)(x_shift)))
+
+    def test_unilateral_and_dissipative(self):
+        # lam >= 0 always (ground pushes, never pulls); friction power <= 0.
+        m = self._model()
+        th.manual_seed(3)
+        pos, qd = th.randn(32, 8), 3.0 * th.randn(32, 9)
+        g, gdot, v_t, lam, f_t, J_n, J_t = m._contact_parts(pos, qd)
+        self.assertGreaterEqual(lam.min().item(), 0.0)
+        self.assertLessEqual((f_t * v_t).max().item(), 1e-8)
+
+    def test_jacobian_structure(self):
+        # the normal force has no generalized component along the cyclic root x
+        # (a vertical foot force cannot propel), while the tangential direction
+        # carries the unit root-x column (friction is what propels).
+        m = self._model()
+        pos, qd = th.randn(4, 8), th.randn(4, 9)
+        _, _, _, _, _, J_n, J_t = m._contact_parts(pos, qd)
+        self.assertTrue(th.all(J_n[:, :, 0] == 0))
+        self.assertTrue(th.allclose(J_t[:, :, 0], th.ones(4, 2)))
+
+    def test_port_silent_out_of_contact(self):
+        # positive gaps => (numerically) zero force; the init biases gaps to +0.5
+        # so a fresh model must be silent.
+        m = self._model()
+        F = m._contact_force_gen(th.randn(8, 8), th.randn(8, 9))
+        self.assertLess(F.abs().max().item(), 1e-6)
+
+    def test_energy_balance_includes_contact_power(self):
+        """With zero action, dE/dt = -qd^T D qd + qd^T F_c, and the port's power
+        must equal sum_i (lam_i gdot_i + f_t,i v_t,i) -- this ties the force
+        directions (J^T) to the velocity projections (J qd) and catches any
+        scatter/einsum mismatch in the port wiring."""
+        m = self._model()
+        with th.no_grad():
+            # pull the gaps into contact so the port actually transmits power
+            m.gap_net[-1].bias.fill_(-0.1)
+        th.manual_seed(1)
+        x = 0.5 * th.randn(6, 17)
+        xin = x.clone().requires_grad_(True)
+        M = th.vmap(m._mass)(xin[:, :8])
+        E = m._potential(xin[:, :8]) + 0.5 * th.einsum(
+            "na,nab,nb->n", xin[:, 8:], M, xin[:, 8:])
+        (gE,) = th.autograd.grad(E.sum(), xin)
+        with th.no_grad():
+            dEdt = (gE * m.drift(x, th.zeros(6, 6))).sum(-1)
+            D = m._damping(x[:, :8], th.zeros(6, 9))
+            _, gdot, v_t, lam, f_t, _, _ = m._contact_parts(x[:, :8], x[:, 8:])
+            expected = (
+                -th.einsum("na,nab,nb->n", x[:, 8:], D, x[:, 8:])
+                + (lam * gdot + f_t * v_t).sum(-1)
+            )
+        self.assertLess((dEdt - expected).abs().max().item(), 1e-2)
+
+    def test_fit_step_and_rollout_fit_train_the_port(self):
+        m = self._model()
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        th.manual_seed(2)
+        x = th.randn(16, 17); a = th.randn(16, 6)
+        xp = x + 0.05 * th.randn(16, 17)
+        first = m.fit_step(x, a, xp, 0.01, opt)
+        last = first
+        for _ in range(60):
+            last = m.fit_step(x, a, xp, 0.01, opt)
+        self.assertLess(last, first)
+        seq_a = th.randn(16, 3, 6); seq_xp = th.randn(16, 3, 17)
+        loss = m.fit_step_rollout(x, seq_a, seq_xp, th.full((16, 3, 1), 0.01),
+                                  th.ones(16, 3, 1), opt)
+        self.assertTrue(np.isfinite(loss))
+
+    def test_state_dict_roundtrip(self):
+        m = self._model()
+        m2 = self._model()
+        with th.no_grad():
+            m.gap_net[-1].bias.fill_(-0.2)  # differ from init so the test bites
+        m2.load_state_dict(m.state_dict())
+        x = th.randn(4, 17); a = th.randn(4, 6)
+        self.assertTrue(th.allclose(m.drift(x, a), m2.drift(x, a)))
+
+
 class TestRolloutFit(unittest.TestCase):
     """Multi-step rollout fit (fit_step_rollout): backprop through the model's
     own Euler roll, per-step masked regression onto the stored window."""
