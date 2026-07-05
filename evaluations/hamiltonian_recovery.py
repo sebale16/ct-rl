@@ -183,11 +183,36 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
         # per-position-coordinate mean |dM/dq| (z-independence probe)
         dM_mag = dM_pos.abs().mean(dim=(0, 1, 2))                 # (npos,)
 
-    return dict(
-        M=M.numpy(), V=V.numpy(), e_kin=e_kin.numpy(), g_pot=gV.numpy(),
-        coriolis=c_hat.numpy(), d_base=d_base.numpy(), G=G.numpy(),
-        dM_mag=dM_mag.numpy(),
-    )
+        out = dict(
+            M=M.numpy(), V=V.numpy(), e_kin=e_kin.numpy(), g_pot=gV.numpy(),
+            coriolis=c_hat.numpy(), d_base=d_base.numpy(), G=G.numpy(),
+            dM_mag=dM_mag.numpy(),
+        )
+
+        # Contact port: the gap springs k_i phi(g_i) grad g_i are themselves a
+        # conservative field, and on always-in-contact data they are nearly
+        # degenerate with grad V (gravity migrates into the port). Report the
+        # combined conservative gradient grad V - sum_i k_i phi(g_i) J_n,i (a
+        # force is minus a gradient) so the potential comparison sees the whole
+        # field, plus per-contact diagnostics of the split.
+        if getattr(m, "contact_force", 0) > 0:
+            g = m.gap_net(pos)                                    # (B, K)
+            dg = vmap(jacfwd(m._gaps))(pos)                       # (B, K, npos)
+            J_n = th.zeros(B, m.contact_force, nv).index_copy(
+                2, m._pos_to_cfg, dg
+            )
+            k_i, _, _ = th.nn.functional.softplus(m._contact_raw)  # (K,)
+            w = m._contact_gap_width
+            phi = th.nn.functional.softplus(-g / w) * w
+            F_spring = th.einsum("nkv,nk->nv", J_n, phi * k_i)    # (B, nv)
+            out["g_pot_combined"] = (gV - F_spring).numpy()
+            out["contact_gap"] = g.numpy()
+            out["contact_in_frac"] = float((g < 0).float().mean())
+            out["contact_spring_ratio"] = float(
+                F_spring.norm(dim=1).mean() / (gV.norm(dim=1).mean() + 1e-12)
+            )
+
+    return out
 
 
 # --------------------------- metrics ---------------------------
@@ -250,6 +275,15 @@ def recovery_report(truth: dict, learned: dict) -> dict:
     # forces
     rep["gradV_force_corr"] = pearson(c * learned["g_pot"], truth["g_pot"])
     rep["coriolis_force_corr"] = pearson(c * learned["coriolis"], truth["coriolis"])
+    # with the contact port, V alone is not the whole learned conservative
+    # field: compare the combined gradient too, and record how much of the
+    # field lives in the port springs (the gravity-migration diagnostic).
+    if "g_pot_combined" in learned:
+        rep["gradV_combined_corr"] = pearson(
+            c * learned["g_pot_combined"], truth["g_pot"]
+        )
+        rep["contact_in_frac"] = learned["contact_in_frac"]
+        rep["contact_spring_ratio"] = learned["contact_spring_ratio"]
 
     # damping (PHAST identifiability axis): base diagonal vs dof_damping
     dh, dt_ = c * learned["d_base"], truth["dof_damping"]
@@ -286,11 +320,13 @@ def sanity_check_truth(truth: dict, obs: np.ndarray, nq: int):
 
 
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
-              contact_aware=True, hidden=(128, 128), seed=1, log_every=1000):
+              contact_aware=True, contact_force=0, hidden=(128, 128), seed=1,
+              log_every=1000):
     th.manual_seed(seed)
     od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
     m = PortHamiltonianModel(od, ad, mode="structured",
-                             structured_hidden=hidden, contact_aware=contact_aware)
+                             structured_hidden=hidden, contact_aware=contact_aware,
+                             contact_force=contact_force)
     buf = ReplayBuffer(len(O), env.observation_space, env.action_space,
                        device="cpu", n_envs=1)
     for i in range(len(O)):
@@ -332,6 +368,9 @@ def main():
     p.add_argument("--contact_aware", action="store_true",
                    help="build the model with the contact-gated damping "
                         "(must match --dynamics_path if given)")
+    p.add_argument("--contact_force", type=int, default=0,
+                   help="number of learned contact points for the explicit "
+                        "contact-force port (must match --dynamics_path if given)")
     p.add_argument("--checkpoint", default=None,
                    help="RL checkpoint (*.pth) whose policy collects the data")
     p.add_argument("--mode", default="mbq_structured_quad_contact_roll",
@@ -364,12 +403,14 @@ def main():
         ad = int(env.action_space.shape[0])
         m = PortHamiltonianModel(od, ad, mode="structured",
                                  structured_hidden=(128, 128),
-                                 contact_aware=args.contact_aware)
+                                 contact_aware=args.contact_aware,
+                                 contact_force=args.contact_force)
         m.load_state_dict(th.load(args.dynamics_path, map_location="cpu"))
         print(f"loaded dynamics model from {args.dynamics_path}")
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
-                      contact_aware=args.contact_aware, seed=args.seed + 1)
+                      contact_aware=args.contact_aware,
+                      contact_force=args.contact_force, seed=args.seed + 1)
 
     eval_obs = O[-args.n_eval:]
     truth = ground_truth(env, eval_obs)
@@ -388,6 +429,10 @@ def main():
     print(f"kinetic R^2 (scale c*)        : {rep['kinetic_R2']:.3f}")
     print(f"total H affine R^2            : {rep['total_H_affine_R2']:.3f}")
     print(f"grad-V force corr             : {rep['gradV_force_corr']:.3f}")
+    if "gradV_combined_corr" in rep:
+        print(f"grad-(V+port springs) corr    : {rep['gradV_combined_corr']:.3f}"
+              f"  (in-contact frac {rep['contact_in_frac']:.2f},"
+              f" spring/gradV ratio {rep['contact_spring_ratio']:.2f})")
     print(f"Coriolis force corr           : {rep['coriolis_force_corr']:.3f}")
     print(f"damping affine R^2 (per DOF)  : {rep['damping_affine_R2']:.3f}")
     print(f"  learned c*.softplus(log_d)  : {rep['damping_learned']}")

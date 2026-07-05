@@ -51,6 +51,15 @@ class DOFLayout:
     on them, so their config-gradient slot is held at zero. obs_pos_to_cfg[i] is the
     config-DOF index of the i-th observed position. act_to_cfg (if given) maps each
     actuator to the config DOF it forces; None means a dense action->force map.
+
+    Contact-port fields (used only when the model is built with contact_force > 0):
+    m_invariant_pos lists observed-position indices the mass matrix must not
+    depend on (translation-invariant coordinates, e.g. the root height: rigid-body
+    inertia is invariant under translating the whole mechanism vertically). They
+    are excluded from the mass network's input, so dM/dq is exactly zero there and
+    ground reaction cannot be absorbed into M as a contact proxy.
+    contact_tangent_cfg is the config-DOF index of the horizontal translation that
+    contact friction pushes against (cheetah: the cyclic root x).
     """
 
     obs_dim: int
@@ -59,6 +68,8 @@ class DOFLayout:
     cyclic_cfg: Tuple[int, ...]
     obs_pos_to_cfg: Tuple[int, ...]
     act_to_cfg: Optional[Tuple[int, ...]] = None
+    m_invariant_pos: Tuple[int, ...] = ()
+    contact_tangent_cfg: Optional[int] = None
 
     @property
     def npos(self) -> int:
@@ -85,6 +96,11 @@ class DOFLayout:
         )
         if self.act_to_cfg is not None:
             assert all(0 <= c < self.nv for c in self.act_to_cfg), "actuator index out of range"
+        assert all(0 <= i < self.npos for i in self.m_invariant_pos), (
+            "m_invariant_pos indexes observed positions, so entries must be in [0, npos)"
+        )
+        if self.contact_tangent_cfg is not None:
+            assert 0 <= self.contact_tangent_cfg < self.nv, "contact_tangent_cfg out of range"
 
     @classmethod
     def cheetah(cls, obs_dim: int = 17, action_dim: int = 6) -> "DOFLayout":
@@ -101,6 +117,8 @@ class DOFLayout:
             cyclic_cfg=(0,),
             obs_pos_to_cfg=tuple(range(1, 9)),
             act_to_cfg=None,
+            m_invariant_pos=(0,),   # root z: M is invariant to vertical translation
+            contact_tangent_cfg=0,  # friction acts along the cyclic root x
         )
 
 
@@ -116,6 +134,7 @@ class PortHamiltonianModel(nn.Module):
         dissipation_rank: int = 4,
         human_input_intensity: float = 0.0,
         contact_aware: bool = False,
+        contact_force: int = 0,
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
         structured_hidden: Sequence[int] = (128, 128),
@@ -126,8 +145,13 @@ class PortHamiltonianModel(nn.Module):
         self.action_dim = int(action_dim)
         self.human_input_intensity = float(human_input_intensity)
         self.contact_aware = bool(contact_aware)
+        self.contact_force = int(contact_force)
         self.device = th.device(device)
         self._drift_fn = drift_fn
+        if self.contact_force > 0 and self.mode != "structured":
+            raise ValueError(
+                "contact_force > 0 (the explicit contact port) requires mode='structured'."
+            )
 
         if self.mode == "mujoco":
             if drift_fn is None:
@@ -189,16 +213,29 @@ class PortHamiltonianModel(nn.Module):
         self.layout = layout
         nv, npos = layout.nv, layout.npos
 
-        def mlp(out: int) -> nn.Sequential:
+        def mlp(out: int, inp: int = npos) -> nn.Sequential:
             layers: list[nn.Module] = []
-            last = npos
+            last = inp
             for h in hidden:
                 layers += [nn.Linear(last, h), nn.SiLU()]
                 last = h
             layers += [nn.Linear(last, out)]
             return nn.Sequential(*layers)
 
-        self.mass_net = mlp(nv * (nv + 1) // 2)  # lower-triangular Cholesky entries of M(q)
+        # With the explicit contact port active, translation-invariant coordinates
+        # (layout.m_invariant_pos, e.g. root height) are excluded from the mass
+        # input: dM/dq is then exactly zero along them, so ground reaction cannot
+        # be absorbed into M — and through dM/dq into the generated Coriolis
+        # terms — as a contact proxy. Without the port the input is left intact
+        # so existing checkpoints keep their architecture.
+        if self.contact_force > 0 and layout.m_invariant_pos:
+            keep = [i for i in range(npos) if i not in layout.m_invariant_pos]
+            self.register_buffer("_mass_in_idx", th.tensor(keep, dtype=th.long))
+            mass_in = len(keep)
+        else:
+            self.register_buffer("_mass_in_idx", None)
+            mass_in = npos
+        self.mass_net = mlp(nv * (nv + 1) // 2, inp=mass_in)  # Cholesky entries of M(q)
         self.potential_net = mlp(1)              # scalar potential V(q)
         # G_a maps the action (action_dim) to a generalized force. Dense: one force
         # per config DOF (nv). Sparse: one force per (actuator -> DOF) target in
@@ -222,6 +259,30 @@ class PortHamiltonianModel(nn.Module):
             self.beta_net = nn.Sequential(
                 nn.Linear(npos + nv, 64), nn.SiLU(), nn.Linear(64, rank)
             )
+
+        if self.contact_force > 0:
+            # Explicit contact-force port: K learned point contacts against the
+            # ground. Each has a gap function g_i(q) and a horizontal foot offset
+            # h_i(q); the generalized force directions are their gradients (J^T
+            # for a point contact), the normal magnitude is a unilateral
+            # Hunt-Crossley law and the tangential one regularized Coulomb
+            # friction. See _contact_parts for the force law.
+            assert layout.contact_tangent_cfg is not None, (
+                "contact_force > 0 requires dof_layout.contact_tangent_cfg (the "
+                "config DOF of the horizontal translation friction acts along)."
+            )
+            self.gap_net = mlp(self.contact_force)      # g_i(q): signed gap heights
+            self.tangent_net = mlp(self.contact_force)  # h_i(q): horizontal offsets
+            with th.no_grad():
+                # Positive initial gaps keep the port silent until the fit pulls
+                # a contact in; random contact forces would corrupt early fitting.
+                self.gap_net[-1].bias.fill_(0.5)
+            # Per-contact stiffness k, compression damping c, friction mu, all
+            # positive via softplus; raw 0.5413 => softplus ~= 1.
+            self._contact_raw = nn.Parameter(th.full((3, self.contact_force), 0.5413))
+            onehot = th.zeros(nv)
+            onehot[layout.contact_tangent_cfg] = 1.0
+            self.register_buffer("_tangent_onehot", onehot)
 
     # ------------------------ structure helpers (phast) ------------------------
 
@@ -257,9 +318,11 @@ class PortHamiltonianModel(nn.Module):
 
     def _mass(self, pos: th.Tensor) -> th.Tensor:
         """SPD mass matrix M(q) = L L^T + eps I from a Cholesky factor with a
-        softplus-positive diagonal. Single-sample (pos: (npos,)) for vmap."""
+        softplus-positive diagonal. Single-sample (pos: (npos,)) for vmap.
+        Translation-invariant coordinates are dropped from the input when the
+        contact port is active (see _init_structured)."""
         nv = self.layout.nv
-        l = self.mass_net(pos)
+        l = self.mass_net(pos if self._mass_in_idx is None else pos[self._mass_in_idx])
         L = th.zeros(nv * nv, dtype=pos.dtype, device=pos.device).scatter(
             0, self._tri_flat, l
         ).reshape(nv, nv)
@@ -282,13 +345,65 @@ class PortHamiltonianModel(nn.Module):
         Kb = self._damp_dirs.unsqueeze(0) * beta.unsqueeze(1)  # (B, nv, r)
         return base + th.bmm(Kb, self._damp_dirs.t().unsqueeze(0).expand(B, -1, -1))
 
+    def _gaps(self, pos: th.Tensor) -> th.Tensor:
+        return self.gap_net(pos)
+
+    def _tangents(self, pos: th.Tensor) -> th.Tensor:
+        return self.tangent_net(pos)
+
+    # Gap-force smoothing width (the learned g absorbs any rescaling of it) and
+    # the velocity scale of the regularized Coulomb friction.
+    _contact_gap_width: float = 0.02
+    _contact_stick_vel: float = 0.1
+
+    def _contact_parts(self, pos: th.Tensor, qd: th.Tensor):
+        """Contact-port quantities for a batch. For each learned contact point i:
+
+          g_i(q)      signed gap; J_n,i = dg_i/dq is the normal generalized
+                      direction (a vertical point force has zero generalized
+                      component along horizontal translation, so the cyclic
+                      slot correctly stays zero),
+          h_i(q)      horizontal foot offset relative to the root; the foot's
+                      horizontal position is x_root + h_i(q), so the tangential
+                      direction is J_t,i = e_tangent + dh_i/dq,
+          lam_i       = phi(g_i) (k_i + c_i relu(-gdot_i)) >= 0: unilateral
+                      Hunt-Crossley normal magnitude with smooth penetration
+                      phi(g) = w softplus(-g/w); the spring part is a gradient
+                      field (conservative) and the c-part only dissipates,
+          f_t,i       = -mu_i lam_i tanh(v_t,i / v_stick): regularized Coulomb
+                      friction, power f_t v_t <= 0 by construction.
+
+        Returns (g, gdot, v_t, lam, f_t, J_n, J_t) with shapes (B,K)x5, (B,K,nv)x2."""
+        B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
+        g = self.gap_net(pos)                             # (B, K)
+        dg = vmap(jacfwd(self._gaps))(pos)                # (B, K, npos)
+        dh = vmap(jacfwd(self._tangents))(pos)            # (B, K, npos)
+        zeros = pos.new_zeros(B, K, nv)
+        J_n = zeros.index_copy(2, self._pos_to_cfg, dg)
+        J_t = zeros.index_copy(2, self._pos_to_cfg, dh) + self._tangent_onehot
+        gdot = th.einsum("nkv,nv->nk", J_n, qd)
+        v_t = th.einsum("nkv,nv->nk", J_t, qd)
+        k, c, mu = th.nn.functional.softplus(self._contact_raw)  # each (K,)
+        w = self._contact_gap_width
+        phi = th.nn.functional.softplus(-g / w) * w       # smooth max(0, -g)
+        lam = phi * (k + c * th.relu(-gdot))              # (B, K) >= 0
+        f_t = -mu * lam * th.tanh(v_t / self._contact_stick_vel)
+        return g, gdot, v_t, lam, f_t, J_n, J_t
+
+    def _contact_force_gen(self, pos: th.Tensor, qd: th.Tensor) -> th.Tensor:
+        """Generalized contact force sum_i (J_n,i lam_i + J_t,i f_t,i), (B, nv)."""
+        _, _, _, lam, f_t, J_n, J_t = self._contact_parts(pos, qd)
+        return th.einsum("nkv,nk->nv", J_n, lam) + th.einsum("nkv,nk->nv", J_t, f_t)
+
     def _structured_drift(self, x: th.Tensor, a: th.Tensor, prev_obs) -> th.Tensor:
         """Port-Hamiltonian drift with the canonicalizer p = M(q) qd:
           dH/dq = grad V - 1/2 qd^T (dM/dq) qd,   qd = M^-1 p (= observed velocity)
-          pdot  = -dH/dq - D(q,dv) qd + G_a a     (R on momentum -> dH/dt <= 0)
+          pdot  = -dH/dq - D(q,dv) qd + G_a a [+ F_contact(q, qd)]
           qddot = M^-1 (pdot - Mdot qd)           (obs-space acceleration)
-        The Coriolis terms come from dM/dq (autodiff), not a learned head. Returns
-        the observation-space drift [d/dt positions ; qddot]."""
+        The Coriolis terms come from dM/dq (autodiff), not a learned head; the
+        optional contact port (contact_force > 0) adds unilateral normal forces
+        and Coulomb friction through learned gap functions (_contact_parts).
+        Returns the observation-space drift [d/dt positions ; qddot]."""
         layout = self.layout
         nv = layout.nv
         B = x.shape[0]
@@ -321,6 +436,8 @@ class PortHamiltonianModel(nn.Module):
                 1, self._act_to_cfg, self.G_a(a)
             )
         pdot = -dHdq - D_qd + Ga
+        if self.contact_force > 0:
+            pdot = pdot + self._contact_force_gen(pos, qd)
         Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
         qddot = th.linalg.solve(M, (pdot - Mdot_qd).unsqueeze(-1)).squeeze(-1)  # (B, nv)
         b_pos = qd[:, self._pos_to_cfg]                 # d/dt of each observed position

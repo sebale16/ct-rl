@@ -191,6 +191,34 @@ class TestRecoveryEndToEnd(unittest.TestCase):
             arr = np.asarray(v, dtype=np.float64)
             self.assertTrue(np.all(np.isfinite(arr)), k)
 
+    def test_contact_port_combined_potential(self):
+        """With the port active the report gains the combined-conservative-force
+        metrics; on a fresh model the gaps are positive (+0.5 init), so the port
+        is silent, the combined gradient equals grad V, and both correlations
+        coincide."""
+        th.manual_seed(0); np.random.seed(0)
+        env = _cheetah()
+        O, A, NO, DT, DN = collect(env, 300, seed=0)
+        m = fit_model(env, O, A, NO, DT, DN, steps=5, horizon=1,
+                      contact_force=2, hidden=(32, 32), log_every=0)
+        obs = O[-50:]
+        learned = learned_terms(m, obs)
+        for key in ("g_pot_combined", "contact_gap", "contact_in_frac",
+                    "contact_spring_ratio"):
+            self.assertIn(key, learned)
+        rep = recovery_report(ground_truth(env, obs), learned)
+        self.assertIn("gradV_combined_corr", rep)
+        # 5 fit steps leave the +0.5 gap-bias intact: silent port, tiny ratio,
+        # and the combined field is just grad V.
+        if float(learned["contact_gap"].min()) > 0.1:
+            self.assertLess(rep["contact_spring_ratio"], 1e-3)
+            self.assertAlmostEqual(rep["gradV_combined_corr"],
+                                   rep["gradV_force_corr"], places=3)
+        # no-port models must not grow the new keys
+        m0 = fit_model(env, O, A, NO, DT, DN, steps=1, horizon=1,
+                       hidden=(32, 32), log_every=0)
+        self.assertNotIn("g_pot_combined", learned_terms(m0, obs))
+
 
 if __name__ == "__main__":
     unittest.main()

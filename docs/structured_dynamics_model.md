@@ -107,6 +107,37 @@ The mass rate $\dot M$ reuses the same Jacobian $\partial M/\partial q$ as the C
 
 The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight positions but nine velocities, because the root $x$ is dropped for translation invariance while its velocity is kept. That makes $x$ a **cyclic** coordinate: both $M$ and $V$ are independent of it. So its configuration-gradient slot in $\partial M/\partial q$ and $\partial V/\partial q$ is held at zero, while all nine velocities still enter $\dot q$. Concretely, the eight observed position-gradients are scattered into the nine-wide config axis by the observed-position-to-config map (config DOFs $1..8$); the cyclic index (config DOF 0) is absent from that map, so its slot stays zero. A `DOFLayout` dataclass carries this mapping — the position and velocity slices, the cyclic config DOFs, the observed-position-to-config map, and an optional sparse actuator map — so the model applies to other manipulators through a supplied layout. The position-drift block is then exactly the slice of observed velocities that correspond to observed positions.
 
+### 2.7 Explicit contact port (`contact_force` $= K > 0$)
+
+Cheetah is contact-driven, and the flow of §2.3 has no term for ground reaction: the momentum balance is closed by $\nabla V$, $D\dot q$, and $G_a a$ alone. The fit must still explain accelerations dominated by contact, so least squares routes them through whichever remaining channels can switch with the contact state. The identifiability audit of the 2M rollout-fit run showed where they land: the fitted $M(q)$ acquired a root-height dependence **six times** its joint-angle dependence, although the true mass matrix has none (inertia is invariant under translating the mechanism vertically). The mechanism is that a $z$-switched $M$ modulates every force through $M^{-1}$, and its gradient $\partial M/\partial q$ generates Coriolis-like $\dot q^2$ forces that fire exactly at touchdown — a serviceable approximation of impact deceleration. The price is severe: the *generated* Coriolis force is read from the same $\partial M/\partial q$, so contact contamination destroys it (correlation $0.106$ against the truth in that audit), and Coriolis $\propto\dot q^2$ is precisely the term that governs fast motion. The model class could predict slow gaits well and fast gaits not at all.
+
+The contact port gives ground reaction its own term so $M$ does not have to fake it. $K$ learned point contacts each carry two scalar functions of the observed configuration: a signed **gap** $g_i(q)$ (height above ground, so $g_i$ *does* see the root height) and a **horizontal offset** $h_i(q)$ (the contact point's $x$ relative to the root, whose absolute position is $x_{\text{root}} + h_i(q)$). For a point contact the generalized force enters through the transpose contact Jacobian, and both of its rows are gradients of these functions:
+
+$$
+J_{n,i} = \frac{\partial g_i}{\partial q}\quad(\text{cyclic root-}x\text{ slot} \equiv 0),\qquad
+J_{t,i} = e_x + \frac{\partial h_i}{\partial q},
+$$
+
+with the correct physics built in: a vertical foot force has zero generalized component along horizontal translation (it cannot propel), while the tangential row carries the unit root-$x$ entry — propulsion comes from friction. The magnitudes are a unilateral Hunt–Crossley normal force and regularized Coulomb friction,
+
+$$
+\lambda_i = \varphi(g_i)\,\big(k_i + c_i\,\mathrm{relu}(-\dot g_i)\big),\qquad
+\varphi(g) = w\,\mathrm{softplus}(-g/w),\qquad
+f_{t,i} = -\mu_i\,\lambda_i\,\tanh(v_{t,i}/v_s),
+$$
+
+with $\dot g_i = J_{n,i}\cdot\dot q$, $v_{t,i} = J_{t,i}\cdot\dot q$, per-contact stiffness $k_i$, compression damping $c_i$, and friction coefficient $\mu_i$ all positive via softplus. The momentum balance of §2.3 gains
+
+$$
+\dot p \mathrel{+}= \sum_{i=1}^{K} J_{n,i}\,\lambda_i + J_{t,i}\,f_{t,i}.
+$$
+
+The port is passive in the port-Hamiltonian sense: the spring part is the gradient of a penalty potential (conservative storage), the $c_i$ part fires only during compression (its power $\le 0$), and friction dissipates by construction ($f_t v_t \le 0$; Appendix C.3). Gaps are initialized positive ($+0.5$) so a fresh port is silent and cannot corrupt early fitting.
+
+**Closing the leak.** Adding the port alone would leave the degeneracy in place — the fit could still prefer the $M$-route it has already found. So when the port is active, translation-invariant coordinates (the root height; `DOFLayout.m_invariant_pos`) are removed from the mass network's *input*: $\partial M/\partial z \equiv 0$ by construction, ground reaction has nowhere to go but the port, and the generated Coriolis is freed to be physical. Without the port the mass input is untouched, so existing checkpoints keep their architecture.
+
+**A residual gauge the audit must respect.** The port's springs are themselves a conservative field, so on data where the feet are nearly always in contact, $V(q)$ and the gap potentials $\sum_i k_i\Phi(g_i(q))$ are close to degenerate — the offline validation shows gravity migrating into the port ($\nabla V$-vs-truth correlation collapses while the dynamics are unaffected). Only the sum is identified. The recovery audit therefore also reports the combined conservative gradient $\nabla V - \sum_i k_i\varphi(g_i)\,J_{n,i}$ (`gradV_combined_corr`), with the in-contact fraction and the spring-to-$\nabla V$ magnitude ratio as migration diagnostics.
+
 ---
 
 ## 3. How the models are trained
@@ -116,7 +147,7 @@ Four things learn on every gradient step: the dynamics model, the value head, th
 **Input:** a replay minibatch of transitions $(x, a, r, x', d, x_{\text{prev}}, \Delta t)$ — observation, action, reward, next observation, done flag, previous observation (supplying the velocity jump $\mathrm{d}v = \dot q - \dot q_{\text{prev}}$), and transition duration — together with the current parameters (dynamics model $\phi$, value head $\psi$, twin-$Q$ critics $\theta$, policy, temperature $\alpha$) and their Polyak-lagged targets $V^{\text{tgt}}, Q^{\text{tgt}}$. With a fit horizon $H>1$ the dynamics step draws its own minibatch of length-$H$ replay windows (consecutive transitions of one episode, with a validity mask); the other updates keep the transition minibatch. All update targets are detached. The step runs these updates in order, with $b_\phi$ the structured drift:
 
 1. **Temperature** $\alpha$ — a gradient step on the entropy-temperature objective.
-2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$; with `dynamics_fit_horizon` $H>1$, the same regression applied at every step of an $H$-step Euler roll of the model over a replay window (§B.2).
+2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$, and the contact port $g_i, h_i, k_i, c_i, \mu_i$ when enabled) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$; with `dynamics_fit_horizon` $H>1$, the same regression applied at every step of an $H$-step Euler roll of the model over a replay window (§B.2).
 3. **Value head** $\psi$ — regress to the soft state value, $\displaystyle\min_\psi \Big\lVert V_\psi(x) - \mathbb{E}_{a'\sim\pi}\big[\min_i Q^{\text{tgt}}_i(x,a') - \alpha\log\pi(a'\mid x)\big] \Big\rVert^2$ (label detached).
 4. **Twin-$Q$ critic** $\theta$ — regress to the generator target, $\displaystyle\min_\theta \sum_i \lVert Q_i(x,a) - y \rVert^2$, with
 $$
@@ -156,11 +187,11 @@ The port is additive: the existing `mujoco` and `phast` modes are byte-unchanged
 
 | file | change |
 |---|---|
-| `models/port_hamiltonian.py` | `DOFLayout` dataclass; `mode="structured"` (`_init_structured`, `_mass`, `_potential`, `_damping`, `_structured_drift`); contact-gated $R$ on the existing `contact_aware` flag for `phast`; `fit_step_rollout` ($H$-step masked BPTT fit, §B.2). |
+| `models/port_hamiltonian.py` | `DOFLayout` dataclass; `mode="structured"` (`_init_structured`, `_mass`, `_potential`, `_damping`, `_structured_drift`); contact-gated $R$ on the existing `contact_aware` flag for `phast`; `fit_step_rollout` ($H$-step masked BPTT fit, §B.2); explicit contact port (`contact_force` $=K$: `_contact_parts`, `_contact_force_gen`, §2.7) with the `m_invariant_pos` mass-input restriction. |
 | `common/buffers.py` | `ReplayBatch.prev_observations`, reconstructed from the preceding buffer slot (zeroed across resets and the ring seam); `ReplaySequenceBatch` + `sample_sequences` (length-$H$ windows with a cumulative validity mask that breaks at episode ends and the ring seam). |
 | `algorithms/ct_sac.py` | threads `batch.prev_observations` into `fit_step`, `_model_based_target`, and the quadrature roll; `dynamics_fit_horizon` routes the dynamics update through `sample_sequences` + `fit_step_rollout`. |
-| `benchmarks/run_ct_rl.py` | `dynamics_source` value `structured` and the `phast` contact flag. |
-| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad`, `mbq_structured_quad_contact` (the structured modes carry the V-head so the target is not gradient-limited); rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, `mbq_structured_quad_contact_roll` (fit horizon 4). |
+| `benchmarks/run_ct_rl.py` | `dynamics_source` value `structured`, the `phast` contact flag, and `dynamics_contact_force` (number of learned contact points). |
+| `benchmarks/hyperparams/ct_sac.csv` | modes `mbq_phast_contact`, `mbq_phast_vhead`, `mbq_structured`, `mbq_structured_contact`, `mbq_structured_quad`, `mbq_structured_quad_contact` (the structured modes carry the V-head so the target is not gradient-limited); rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, `mbq_structured_quad_contact_roll` (fit horizon 4); contact-port variants `mbq_structured_quad_cforce` (one-step fit) and `mbq_structured_quad_cforce_roll` (fit horizon 4), both `dynamics_contact_force` 4 with the gated damping off. |
 
 ```mermaid
 flowchart TD
@@ -171,8 +202,10 @@ flowchart TD
     DR -->|"structured"| ST["M(q), V(q) -> H(q,p), p = M(q) qd"]
     ST --> COR["Coriolis from dM/dq (forward-mode Jacobian)"]
     ST --> DMP["contact-gated D(q,dv) on momentum"]
+    ST --> CFP["contact port: J_n lam + J_t f_t from gap nets g_i, h_i"]
     COR --> QD["qddot = M^-1(pdot - Mdot qd)"]
     DMP --> QD
+    CFP --> QD
     QD --> BD["drift b = [qd_obs ; qddot]"]
     BB --> BD
     OR --> BD
@@ -188,7 +221,7 @@ flowchart TD
 ## 6. Scope and open work
 
 - **Dense Cholesky and Woodbury.** $M(q)$ is a full lower-triangular Cholesky factor $M = L(q)L(q)^\top + \varepsilon I$ and $M^{-1}p$ is a dense `torch.linalg.solve`. At cheetah's $n_v = 9$ this dense factorization is negligible in cost and more expressive. The diagonal-plus-low-rank + Woodbury parameterization of the mass matrix (PHAST's form) is the alternative worth adopting when scaling to high-DOF systems where $n_v$ is large.
-- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact` (contact-gated), and `mbq_structured_quad_contact` (both), plus the rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, and `mbq_structured_quad_contact_roll` (`dynamics_fit_horizon` 4).
+- **End-to-end on cheetah.** The reported results are offline (one-step fit and rollout; Appendix A). The end-to-end test is a seeded comparison against the model-free baseline (`top`) and the oracle ceiling (`mbq_vhead`), with the model-based modes on a clean V-head: `mbq_phast_vhead` (head-matched black box), `mbq_structured` (first-order), `mbq_structured_quad` (sub-step quadrature), `mbq_structured_contact` (contact-gated), and `mbq_structured_quad_contact` (both), plus the rollout-fit variants `mbq_structured_roll`, `mbq_structured_quad_roll`, and `mbq_structured_quad_contact_roll` (`dynamics_fit_horizon` 4), and the contact-port variants `mbq_structured_quad_cforce` / `mbq_structured_quad_cforce_roll` (§2.7).
 - **Structure-preserving integration.** The multi-step roll uses observation-space Euler of the drift, which is bounded and adequate at short horizons; a Strang integrator in $(q,p)$ is the refinement for longer horizons, enabled by the canonicalizer frame.
 - **Diffusion milestone.** $\sigma\sigma^\top = 2T\,D(q)$ is defined in the momentum frame and reuses the learned $D$; deferred.
 - **Other domains.** `DOFLayout` makes the model domain-agnostic, but the runner currently constructs the cheetah layout only; another environment needs its own layout passed in.
@@ -459,6 +492,18 @@ so every eigenvalue of $M$ is at least $\varepsilon$. That floor also keeps $M$ 
 
 **Why.** $D$ is the dissipation, and the passivity certificate is $\dot H = -\dot q^\top D\,\dot q \le 0$ (§2.3) — energy only leaves the system, which requires $D \succeq 0$. Damping is naturally a few contact modes and may be zero in some directions, so it uses this diagonal-plus-low-rank PSD form; the mass matrix, which is inverted, uses the full-rank Cholesky form of C.1.
 
+### C.3 Contact port: unilateral normal force and Coulomb friction
+
+The port of §2.7 must meet three structural constraints, and like C.1/C.2 each holds for *any* network output, so training stays unconstrained.
+
+**The $J^\top$ structure is virtual work, not a choice.** For a point contact, a force $f$ applied at a material point $p(q)$ produces the generalized force $Q = (\partial p/\partial q)^\top f = J^\top f$. The port's contact point has height $g_i(q)$ and horizontal position $x_{\text{root}} + h_i(q)$, so the vertical force row is $\partial g_i/\partial q$ and the horizontal one is $e_x + \partial h_i/\partial q$ — the force directions are *tied by autodiff to the same functions whose rates give the contact velocities* $\dot g_i, v_{t,i}$. This coupling is what the energy-balance test checks: the port's power must equal $\sum_i (\lambda_i\dot g_i + f_{t,i} v_{t,i})$ along the drift.
+
+**Unilateral.** $\lambda_i = \varphi(g_i)(k_i + c_i\,\mathrm{relu}(-\dot g_i))$ is a product of nonnegative factors — $\varphi \ge 0$ (softplus), $k_i, c_i > 0$ (softplus of raw parameters), $\mathrm{relu} \ge 0$ — so $\lambda_i \ge 0$: the ground pushes, never pulls. $\varphi(g) = w\,\mathrm{softplus}(-g/w)$ is a smoothed $\max(0,-g)$ (penetration depth); for positive gaps it decays like $w e^{-g/w}$, so an out-of-contact point transmits (numerically) nothing. The width $w$ is a fixed constant: since $g_i$ is a learned function, any rescaling of $w$ can be absorbed into $g_i$, so $w$ only sets the sharpness of force onset relative to the learned gap scale.
+
+**Passive.** Three parts, three arguments. The spring part $k_i\,\varphi(g_i)\,\nabla g_i$ is the exact gradient of the penalty potential $k_i\,\Phi(g_i)$ with $\Phi' = \varphi$ — a conservative storage term, like $\nabla V$. The compression part transmits power $c_i\,\varphi\,\mathrm{relu}(-\dot g_i)\,\dot g_i \le 0$, since it is nonzero only where $\dot g_i < 0$. The friction power is $f_{t,i}\,v_{t,i} = -\mu_i \lambda_i\, v_{t,i}\tanh(v_{t,i}/v_s) \le 0$, since $z\tanh(z) \ge 0$. So the port adds storage and dissipation, never free energy, and the passivity story of §2.3 survives with the gap potentials counted in the storage.
+
+**Friction is regularized Coulomb.** $f_t = -\mu\lambda\tanh(v_t/v_s)$ saturates at $\pm\mu\lambda$ (the Coulomb cone) and passes smoothly through $v_t = 0$ instead of the discontinuous $\mathrm{sign}$ — the standard smoothing for differentiable simulation; $v_s$ sets the stick–slip velocity scale.
+
 ---
 
 ## Appendix D — Symbol and mode reference
@@ -472,9 +517,12 @@ so every eigenvalue of $M$ is at least $\varepsilon$. That floor also keeps $M$ 
 | $D(q,\mathrm{d}v)$ | contact-gated diagonal-plus-low-rank PSD damping on momentum |
 | $G_a$ | actuator port (action to generalized force) |
 | $\mathrm{d}v$ | incoming velocity jump $\dot q_t - \dot q_{t-1}$, gates the damping |
+| $g_i(q),\,h_i(q)$ | learned contact-point gap and horizontal offset; their gradients are the contact Jacobian rows $J_{n,i}, J_{t,i}$ (§2.7) |
+| $\lambda_i,\,f_{t,i}$ | unilateral Hunt–Crossley normal magnitude and regularized Coulomb friction of contact $i$ |
 | `mujoco` | oracle drift from the simulator (validation only) |
 | `phast` | black-box learned port-Hamiltonian |
 | `phast` + `contact_aware` | black-box with contact-gated $R$ |
 | `structured` | structured port-Hamiltonian with $M(q)$, $V(q)$ (this doc) |
 | cheetah run modes | `mbq_structured` (V-head, first-order), `mbq_structured_quad` (V-head, sub-step quadrature), `mbq_structured_contact` (contact-gated damping), `mbq_structured_quad_contact` (quadrature + contact gate), `mbq_phast_vhead` (head-matched black box). All read $V,\nabla V$ from the detached V-head. |
 | `*_roll` modes | `mbq_structured_roll`, `mbq_structured_quad_roll`, `mbq_structured_quad_contact_roll` — the same modes with the dynamics model fit by the $H$-step rollout regression (§B.2, `dynamics_fit_horizon` 4) instead of the one-step fit. |
+| `*_cforce` modes | `mbq_structured_quad_cforce`, `mbq_structured_quad_cforce_roll` — sub-step quadrature with the explicit contact port (§2.7, `dynamics_contact_force` 4, gated damping off, $M$ translation-invariant). |
