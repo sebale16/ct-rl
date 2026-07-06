@@ -793,12 +793,28 @@ class TestContactForcePort(unittest.TestCase):
         self.assertTrue(th.all(J_n[:, :, 0] == 0))
         self.assertTrue(th.allclose(J_t[:, :, 0], th.ones(4, 2)))
 
-    def test_port_silent_out_of_contact(self):
-        # positive gaps => (numerically) zero force; the init biases gaps to +0.5
-        # so a fresh model must be silent.
+    def test_port_quiet_but_gradient_alive_at_init(self):
+        # a fresh port must be quiet (near-zero force, so it cannot corrupt
+        # early fitting) AND trainable: the gap init must not sit in the
+        # saturated softplus tail, or the gradient vanishes and the port can
+        # never activate (the +0.5-bias bug: gradient ~e^-25, port dead).
         m = self._model()
+        pos, qd = th.randn(16, 8), th.randn(16, 9)
+        F = m._contact_force_gen(pos, qd)
+        self.assertLess(F.abs().max().item(), 5e-2)
+        _, _, _, lam, _, _, _ = m._contact_parts(pos, qd)
+        lam.sum().backward()
+        grad = m.gap_net[-1].bias.grad
+        self.assertIsNotNone(grad)
+        self.assertGreater(grad.abs().max().item(), 1e-2)
+
+    def test_port_truly_silent_when_gaps_large(self):
+        # far out of contact the port transmits nothing at all
+        m = self._model()
+        with th.no_grad():
+            m.gap_net[-1].bias.fill_(10.0)
         F = m._contact_force_gen(th.randn(8, 8), th.randn(8, 9))
-        self.assertLess(F.abs().max().item(), 1e-6)
+        self.assertLess(F.abs().max().item(), 1e-8)
 
     def test_energy_balance_includes_contact_power(self):
         """With zero action, dE/dt = -qd^T D qd + qd^T F_c, and the port's power
