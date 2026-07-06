@@ -274,9 +274,16 @@ class PortHamiltonianModel(nn.Module):
             self.gap_net = mlp(self.contact_force)      # g_i(q): signed gap heights
             self.tangent_net = mlp(self.contact_force)  # h_i(q): horizontal offsets
             with th.no_grad():
-                # Positive initial gaps keep the port silent until the fit pulls
-                # a contact in; random contact forces would corrupt early fitting.
-                self.gap_net[-1].bias.fill_(0.5)
+                # Quiet-but-reachable init. The gaps must start positive (random
+                # contact forces would corrupt early fitting) yet within the
+                # gradient's reach: at g0 = 2.5 smoothing widths the force is
+                # ~1e-3 while the softplus gradient is still ~0.08. A larger
+                # bias lands in the saturated tail where the gradient vanishes
+                # (e.g. +0.5 = 25 widths -> gradient ~e^-25) and the port can
+                # never activate. Shrinking the final weights keeps g(q) near
+                # the bias across states.
+                self.gap_net[-1].weight.mul_(0.1)
+                self.gap_net[-1].bias.fill_(2.5 * self._contact_gap_width)
             # Per-contact stiffness k, compression damping c, friction mu, all
             # positive via softplus; raw 0.5413 => softplus ~= 1.
             self._contact_raw = nn.Parameter(th.full((3, self.contact_force), 0.5413))
