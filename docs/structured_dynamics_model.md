@@ -147,7 +147,7 @@ Four things learn on every gradient step: the dynamics model, the value head, th
 **Input:** a replay minibatch of transitions $(x, a, r, x', d, \Delta t)$ — observation, action, reward, next observation, done flag, and transition duration — together with the current parameters (dynamics model $\phi$, value head $\psi$, twin-$Q$ critics $\theta$, policy, temperature $\alpha$) and their Polyak-lagged targets $V^{\text{tgt}}, Q^{\text{tgt}}$. With a fit horizon $H>1$ the dynamics step draws its own minibatch of length-$H$ replay windows (consecutive transitions of one episode, with a validity mask); the other updates keep the transition minibatch. All update targets are detached. The step runs these updates in order, with $b_\phi$ the structured drift:
 
 1. **Temperature** $\alpha$ — a gradient step on the entropy-temperature objective.
-2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$, and the contact port $g_i, h_i, k_i, c_i, \mu_i$ when enabled) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t - x' \big\rVert^2$; with `dynamics_fit_horizon` $H>1$, the same regression applied at every step of an $H$-step Euler roll of the model over a replay window (§B.2).
+2. **Dynamics model** $\phi$ ($M$, $V$, $D$, $G_a$, and the contact port $g_i, h_i, k_i, c_i, \mu_i$ when enabled) — one-step prediction in observation space, $\displaystyle\min_\phi \big\lVert x + b_\phi(x,a)\,\Delta t - x' \big\rVert^2$; with `dynamics_fit_horizon` $H>1$, the same regression applied at every step of an $H$-step Euler roll of the model over a replay window (§B.2).
 3. **Value head** $\psi$ — regress to the soft state value, $\displaystyle\min_\psi \Big\lVert V_\psi(x) - \mathbb{E}_{a'\sim\pi}\big[\min_i Q^{\text{tgt}}_i(x,a') - \alpha\log\pi(a'\mid x)\big] \Big\rVert^2$ (label detached).
 4. **Twin-$Q$ critic** $\theta$ — regress to the generator target, $\displaystyle\min_\theta \sum_i \lVert Q_i(x,a) - y \rVert^2$, with
 $$
@@ -198,7 +198,7 @@ flowchart TD
     RB["Replay buffer: x, a, r, x', u"] --> CR["V-head: V(x), grad V"]
     RB --> DR{"dynamics mode"}
     DR -->|"mujoco"| OR["oracle drift (validation)"]
-    DR -->|"phast"| BB["black-box: (J - R(x,dv)) grad H + G_a a"]
+    DR -->|"phast"| BB["black-box: (J - R) grad H + G_a a"]
     DR -->|"structured"| ST["M(q), V(q) -> H(q,p), p = M(q) qd"]
     ST --> COR["Coriolis from dM/dq (forward-mode Jacobian)"]
     ST --> DMP["diagonal damping D on momentum"]
@@ -292,15 +292,15 @@ the Lagrangian of $\max_\pi\mathbb{E}[\text{return}]$ subject to $\mathbb{E}[-\l
 The model supplies the observation-space drift $b_\phi(x,a)$ that the generator (§B.4) evaluates. It is fit by one-step prediction: with the explicit Euler predictor over the observed duration $\Delta t$,
 
 $$
-\hat x' = x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t,
+\hat x' = x + b_\phi(x,a)\,\Delta t,
 \qquad
-\mathcal L_{\text{dyn}}(\phi) = \big\lVert\, x + b_\phi(x,a;\,x_{\text{prev}})\,\Delta t \;-\; x' \,\big\rVert^2 ,
+\mathcal L_{\text{dyn}}(\phi) = \big\lVert\, x + b_\phi(x,a)\,\Delta t \;-\; x' \,\big\rVert^2 ,
 $$
 
 matching `fit_step` (`pred = x + drift(x,a)*dt`, `loss = ((pred - x')**2).mean()`). Since $b$ is the instantaneous rate $\dot x$, the target satisfies $x'\approx x+\dot x\,\Delta t$ to first order, and driving the residual to zero fits $b_\phi$ to the realized rate $(x'-x)/\Delta t$. The structured drift assembles $b_\phi$ from the port-Hamiltonian flow (§2.5): with the canonicalizer $p=M(q)\dot q$,
 
 $$
-\dot p = -\Big(\nabla V(q) - \tfrac12\,\dot q^\top\tfrac{\partial M}{\partial q}\,\dot q\Big) - D(q,\mathrm dv)\,\dot q + G_a a,
+\dot p = -\Big(\nabla V(q) - \tfrac12\,\dot q^\top\tfrac{\partial M}{\partial q}\,\dot q\Big) - D\,\dot q + G_a a,
 \qquad
 b_\phi = [\dot q_{\text{obs}};\ \ddot q],\quad \ddot q = M^{-1}\big(\dot p - \dot M\dot q\big).
 $$
