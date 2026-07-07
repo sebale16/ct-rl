@@ -201,16 +201,18 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
             J_n = th.zeros(B, m.contact_force, nv).index_copy(
                 2, m._pos_to_cfg, dg
             )
-            k_i, _, _ = th.nn.functional.softplus(m._contact_raw)  # (K,)
+            k_i, c_i, mu_i = th.nn.functional.softplus(m._contact_raw)  # each (K,)
             w = m._contact_gap_width
             phi = th.nn.functional.softplus(-g / w) * w
             F_spring = th.einsum("nkv,nk->nv", J_n, phi * k_i)    # (B, nv)
             out["g_pot_combined"] = (gV - F_spring).numpy()
             out["contact_gap"] = g.numpy()
             out["contact_in_frac"] = float((g < 0).float().mean())
+            out["contact_in_frac_per"] = (g < 0).float().mean(0).numpy()
             out["contact_spring_ratio"] = float(
                 F_spring.norm(dim=1).mean() / (gV.norm(dim=1).mean() + 1e-12)
             )
+            out["contact_kcm"] = th.stack([k_i, c_i, mu_i]).numpy()  # (3, K)
 
     return out
 
@@ -284,6 +286,21 @@ def recovery_report(truth: dict, learned: dict) -> dict:
         )
         rep["contact_in_frac"] = learned["contact_in_frac"]
         rep["contact_spring_ratio"] = learned["contact_spring_ratio"]
+        # Port parameters. Contact forces share the global gauge, so k and the
+        # compression damping are reported at scale c*; mu is a force ratio and
+        # gauge-free. k also trades against the learned gap scale, so absolute
+        # values are soft — the meaningful read is the trend across checkpoints
+        # of one run (stiffness creep) and the per-contact activity split.
+        k_i, c_i, mu_i = learned["contact_kcm"]
+        rep["contact_k"] = [round(float(v) * c, 4) for v in k_i]
+        rep["contact_c"] = [round(float(v) * c, 4) for v in c_i]
+        rep["contact_mu"] = [round(float(v), 4) for v in mu_i]
+        rep["contact_in_frac_per"] = [
+            round(float(v), 3) for v in learned["contact_in_frac_per"]
+        ]
+        g = learned["contact_gap"]
+        rep["contact_gap_mean"] = float(g.mean())
+        rep["contact_gap_min"] = float(g.min())
 
     # damping (PHAST identifiability axis): base diagonal vs dof_damping
     dh, dt_ = c * learned["d_base"], truth["dof_damping"]
@@ -433,6 +450,11 @@ def main():
         print(f"grad-(V+port springs) corr    : {rep['gradV_combined_corr']:.3f}"
               f"  (in-contact frac {rep['contact_in_frac']:.2f},"
               f" spring/gradV ratio {rep['contact_spring_ratio']:.2f})")
+        print(f"  port c*.k                   : {rep['contact_k']}")
+        print(f"  port c*.c / mu              : {rep['contact_c']} / {rep['contact_mu']}")
+        print(f"  per-contact in-frac         : {rep['contact_in_frac_per']}"
+              f"  (gap mean {rep['contact_gap_mean']:.3f},"
+              f" min {rep['contact_gap_min']:.3f})")
     print(f"Coriolis force corr           : {rep['coriolis_force_corr']:.3f}")
     print(f"damping affine R^2 (per DOF)  : {rep['damping_affine_R2']:.3f}")
     print(f"  learned c*.softplus(log_d)  : {rep['damping_learned']}")

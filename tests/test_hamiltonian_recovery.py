@@ -204,10 +204,20 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         obs = O[-50:]
         learned = learned_terms(m, obs)
         for key in ("g_pot_combined", "contact_gap", "contact_in_frac",
-                    "contact_spring_ratio"):
+                    "contact_in_frac_per", "contact_spring_ratio",
+                    "contact_kcm"):
             self.assertIn(key, learned)
         rep = recovery_report(ground_truth(env, obs), learned)
         self.assertIn("gradV_combined_corr", rep)
+        # port parameters: k/c at gauge scale, mu raw; all positive (softplus),
+        # one entry per contact point; per-contact activity + gap stats present
+        for key in ("contact_k", "contact_c", "contact_mu",
+                    "contact_in_frac_per"):
+            self.assertEqual(len(rep[key]), 2, key)
+        for key in ("contact_k", "contact_c", "contact_mu"):
+            self.assertTrue(all(v > 0 for v in rep[key]), key)
+        self.assertTrue(np.isfinite(rep["contact_gap_mean"]))
+        self.assertGreaterEqual(rep["contact_gap_min"], -1e6)
         # 5 fit steps leave the +0.5 gap-bias intact: silent port, tiny ratio,
         # and the combined field is just grad V.
         if float(learned["contact_gap"].min()) > 0.1:
