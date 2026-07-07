@@ -254,9 +254,6 @@ def run_algorithm(
 
         source = str(algo_kwargs.get("dynamics_source", "mujoco"))
         intensity = float(algo_kwargs.get("human_input_intensity", 0.0) or 0.0)
-        contact_aware = str(
-            algo_kwargs.pop("dynamics_contact_aware", "") or ""
-        ).strip().lower() in ("1", "true", "yes")
         contact_force = int(
             str(algo_kwargs.pop("dynamics_contact_force", "") or "").strip() or 0
         )
@@ -286,21 +283,19 @@ def run_algorithm(
                 act_dim,
                 mode="phast",
                 human_input_intensity=intensity,
-                contact_aware=contact_aware,
             )
         elif source == "structured":
             # Structured port-Hamiltonian (DeLaN core): learned SPD mass M(q) and
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
-            # contact-gated PSD damping D(q,dv) on momentum; optional explicit
-            # contact-force port (dynamics_contact_force = number of learned
-            # contact points, which also makes M translation-invariant). DOF
-            # layout defaults to cheetah; pass an explicit dof_layout otherwise.
+            # constant diagonal damping on momentum; optional explicit contact
+            # port (dynamics_contact_force = number of learned contact points,
+            # which also makes M translation-invariant). DOF layout defaults to
+            # cheetah; pass an explicit dof_layout otherwise.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(
                 obs_dim,
                 act_dim,
                 mode="structured",
                 human_input_intensity=intensity,
-                contact_aware=contact_aware,
                 contact_force=contact_force,
             )
         else:

@@ -133,7 +133,6 @@ class PortHamiltonianModel(nn.Module):
         hidden: Sequence[int] = (256, 256),
         dissipation_rank: int = 4,
         human_input_intensity: float = 0.0,
-        contact_aware: bool = False,
         contact_force: int = 0,
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
@@ -144,7 +143,6 @@ class PortHamiltonianModel(nn.Module):
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
         self.human_input_intensity = float(human_input_intensity)
-        self.contact_aware = bool(contact_aware)
         self.contact_force = int(contact_force)
         self.device = th.device(device)
         self._drift_fn = drift_fn
@@ -175,16 +173,8 @@ class PortHamiltonianModel(nn.Module):
             self._L = nn.Parameter(0.01 * th.randn(d, int(dissipation_rank)))
             # Agent port G_a: action -> state drift
             self.G_a = nn.Linear(self.action_dim, d, bias=False)
-            # Contact-aware damping: the dissipation weights beta_i become a
-            # function of the state and the incoming velocity jump dx = x - x_prev
-            # (a contact shows up as a large dx). R = softplus(d0) I + L diag(beta) L^T
-            # stays PSD (beta >= 0); beta == const recovers the constant-R form.
-            if self.contact_aware:
-                self.beta_net = nn.Sequential(
-                    nn.Linear(2 * d, 64), nn.SiLU(), nn.Linear(64, int(dissipation_rank))
-                )
         elif self.mode == "structured":
-            self._init_structured(dof_layout, structured_hidden, int(dissipation_rank))
+            self._init_structured(dof_layout, structured_hidden)
         else:
             raise ValueError(f"Unknown mode '{self.mode}'.")
 
@@ -193,12 +183,13 @@ class PortHamiltonianModel(nn.Module):
     # ------------------------ structured port-Hamiltonian (DeLaN core) ----------
 
     def _init_structured(
-        self, dof_layout: Optional[DOFLayout], hidden: Sequence[int], rank: int
+        self, dof_layout: Optional[DOFLayout], hidden: Sequence[int]
     ) -> None:
         """Structured model: a learned SPD mass matrix M(q) and potential V(q) give
         the Hamiltonian H = V(q) + 1/2 p^T M(q)^-1 p with the canonicalizer
         p = M(q) qd; the drift is the port-Hamiltonian flow (J - R)grad H + G_a a
-        with R = diag(D(q,dv)) acting on momentum (passivity dH/dt <= 0). The
+        with a constant diagonal damping D on momentum (passivity dH/dt <= 0);
+        contact enters through the explicit port (contact_force > 0). The
         Coriolis terms are generated from M via autodiff, not learned."""
         layout = dof_layout if dof_layout is not None else DOFLayout.cheetah(
             self.obs_dim, self.action_dim
@@ -245,15 +236,6 @@ class PortHamiltonianModel(nn.Module):
         if layout.act_to_cfg is not None:
             self.register_buffer("_act_to_cfg", th.tensor(layout.act_to_cfg, dtype=th.long))
 
-        if self.contact_aware:
-            # Contact-gated dissipation directions (Householder-style, PSD) driven by
-            # the velocity jump dv: D(q,dv) = diag(softplus(log_d)) + K diag(beta) K^T,
-            # beta = softplus(beta_net([q, dv])) >= 0. Off => diagonal base only.
-            self._damp_dirs = nn.Parameter(0.01 * th.randn(nv, rank))
-            self.beta_net = nn.Sequential(
-                nn.Linear(npos + nv, 64), nn.SiLU(), nn.Linear(64, rank)
-            )
-
         if self.contact_force > 0:
             # Explicit contact-force port: K learned point contacts against the
             # ground. Each has a gap function g_i(q) and a horizontal foot offset
@@ -295,17 +277,6 @@ class PortHamiltonianModel(nn.Module):
         eye = th.eye(self.obs_dim, device=self._L.device)
         return d0 * eye + self._L @ self._L.t()
 
-    def _R_batch(self, x: th.Tensor, dx: th.Tensor) -> th.Tensor:
-        """Per-sample PSD dissipation R = softplus(d0) I + L diag(beta) L^T with
-        beta = softplus(beta_net([x, dx])) >= 0 gated by the incoming velocity
-        jump dx (large dx -> contact -> more damping). Shape (B, d, d)."""
-        beta = th.nn.functional.softplus(self.beta_net(th.cat([x, dx], dim=-1)))  # (B, r)
-        d0 = th.nn.functional.softplus(self._d0)
-        eye = th.eye(self.obs_dim, device=x.device)
-        Lb = self._L.unsqueeze(0) * beta.unsqueeze(1)  # (B, d, r): columns scaled by beta
-        R = d0 * eye + th.bmm(Lb, self._L.t().unsqueeze(0).expand(x.shape[0], -1, -1))
-        return R  # (B, d, d)
-
     def _grad_H(self, x: th.Tensor) -> th.Tensor:
         # enable_grad so grad H can be taken even when the caller is under
         # th.no_grad() (e.g. evaluation, or the critic's target computation).
@@ -334,17 +305,11 @@ class PortHamiltonianModel(nn.Module):
     def _potential(self, pos: th.Tensor) -> th.Tensor:
         return self.potential_net(pos).squeeze(-1)
 
-    def _damping(self, pos: th.Tensor, dv: th.Tensor) -> th.Tensor:
-        """Symmetric PSD damping D(q, dv) = diag(softplus(log_d)) [+ contact term].
-        Contact term K diag(softplus(beta([q,dv]))) K^T is added only when
-        contact_aware; it stays PSD and vanishes as beta -> 0. Shape (B, nv, nv)."""
+    def _damping(self, pos: th.Tensor) -> th.Tensor:
+        """Constant diagonal PSD damping D = diag(softplus(log_d)) — passive joint
+        damping. Contact dissipation belongs to the explicit port. (B, nv, nv)."""
         B = pos.shape[0]
-        base = th.diag_embed(th.nn.functional.softplus(self._log_d)).unsqueeze(0).expand(B, -1, -1)
-        if not self.contact_aware:
-            return base
-        beta = th.nn.functional.softplus(self.beta_net(th.cat([pos, dv], dim=-1)))  # (B, r)
-        Kb = self._damp_dirs.unsqueeze(0) * beta.unsqueeze(1)  # (B, nv, r)
-        return base + th.bmm(Kb, self._damp_dirs.t().unsqueeze(0).expand(B, -1, -1))
+        return th.diag_embed(th.nn.functional.softplus(self._log_d)).unsqueeze(0).expand(B, -1, -1)
 
     def _gaps(self, pos: th.Tensor) -> th.Tensor:
         return self.gap_net(pos)
@@ -396,10 +361,10 @@ class PortHamiltonianModel(nn.Module):
         _, _, _, lam, f_t, J_n, J_t = self._contact_parts(pos, qd)
         return th.einsum("nkv,nk->nv", J_n, lam) + th.einsum("nkv,nk->nv", J_t, f_t)
 
-    def _structured_drift(self, x: th.Tensor, a: th.Tensor, prev_obs) -> th.Tensor:
+    def _structured_drift(self, x: th.Tensor, a: th.Tensor) -> th.Tensor:
         """Port-Hamiltonian drift with the canonicalizer p = M(q) qd:
           dH/dq = grad V - 1/2 qd^T (dM/dq) qd,   qd = M^-1 p (= observed velocity)
-          pdot  = -dH/dq - D(q,dv) qd + G_a a [+ F_contact(q, qd)]
+          pdot  = -dH/dq - D qd + G_a a [+ F_contact(q, qd)]
           qddot = M^-1 (pdot - Mdot qd)           (obs-space acceleration)
         The Coriolis terms come from dM/dq (autodiff), not a learned head; the
         optional contact port (contact_force > 0) adds unilateral normal forces
@@ -421,14 +386,8 @@ class PortHamiltonianModel(nn.Module):
         )
         gV = th.zeros(B, nv, dtype=x.dtype, device=x.device).index_copy(1, self._pos_to_cfg, gV_pos)
 
-        if prev_obs is None:
-            dv = th.zeros_like(qd)
-        else:
-            prev = th.as_tensor(prev_obs, dtype=x.dtype, device=x.device)
-            dv = qd - prev[:, layout.vel_slice[0]:layout.vel_slice[1]]
-
         dHdq = gV - 0.5 * th.einsum("nabk,na,nb->nk", dM, qd, qd)
-        D_qd = th.bmm(self._damping(pos, dv), qd.unsqueeze(-1)).squeeze(-1)
+        D_qd = th.bmm(self._damping(pos), qd.unsqueeze(-1)).squeeze(-1)
         if layout.act_to_cfg is None:
             Ga = self.G_a(a)                            # (B, nv)
         else:
@@ -446,13 +405,8 @@ class PortHamiltonianModel(nn.Module):
 
     # ------------------------ public API ------------------------
 
-    def drift(self, obs, action, prev_obs=None) -> th.Tensor:
-        """Return the drift b(obs, action) of shape (B, obs_dim) on ``self.device``.
-
-        ``prev_obs`` (the previous observation) supplies the incoming velocity
-        jump for the contact-aware damping; it is ignored by the mujoco oracle
-        and by the constant-R phast model. When it is None the jump is taken as
-        zero (graceful fallback to a state-only R(x))."""
+    def drift(self, obs, action) -> th.Tensor:
+        """Return the drift b(obs, action) of shape (B, obs_dim) on ``self.device``."""
         if self.mode == "mujoco":
             b = self._drift_fn(obs, action)  # numpy (B, d)
             return th.as_tensor(np.asarray(b), dtype=th.float32, device=self.device)
@@ -461,17 +415,9 @@ class PortHamiltonianModel(nn.Module):
         a = th.as_tensor(action, dtype=th.float32, device=self.device)
 
         if self.mode == "structured":
-            return self._structured_drift(x, a, prev_obs)
+            return self._structured_drift(x, a)
 
         gH = self._grad_H(x)  # (B, d)
-        if self.contact_aware:
-            if prev_obs is None:
-                dx = th.zeros_like(x)
-            else:
-                dx = x - th.as_tensor(prev_obs, dtype=th.float32, device=self.device)
-            JR = self._J().unsqueeze(0) - self._R_batch(x, dx)  # (B, d, d)
-            b = th.bmm(JR, gH.unsqueeze(-1)).squeeze(-1)  # (B, d)
-            return b + self.G_a(a)
         JR = self._J() - self._R()  # (d, d)
         return gH @ JR.t() + self.G_a(a)
 
@@ -508,10 +454,8 @@ class PortHamiltonianModel(nn.Module):
         optimizer.zero_grad(set_to_none=True)
         return float(loss.detach())
 
-    def fit_step(self, obs, action, next_obs, dt, optimizer, prev_obs=None) -> float:
-        """One supervised PHAST data step: minimize ||(x + b*dt) - x'||^2 (mode='phast').
-
-        ``prev_obs`` feeds the contact-aware damping (ignored by the constant-R model)."""
+    def fit_step(self, obs, action, next_obs, dt, optimizer) -> float:
+        """One supervised PHAST data step: minimize ||(x + b*dt) - x'||^2 (mode='phast')."""
         assert self.mode in ("phast", "structured"), (
             "fit_step only applies to learned modes ('phast', 'structured')."
         )
@@ -519,25 +463,23 @@ class PortHamiltonianModel(nn.Module):
         a = th.as_tensor(action, dtype=th.float32, device=self.device)
         xp = th.as_tensor(next_obs, dtype=th.float32, device=self.device)
         dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
-        pred = x + self.drift(x, a, prev_obs=prev_obs) * dt_t
+        pred = x + self.drift(x, a) * dt_t
         loss = ((pred - xp) ** 2).mean()
         return self._fit_optimizer_step(loss, optimizer)
 
     def fit_step_rollout(
-        self, obs, actions, next_obs, dt, mask, optimizer, prev_obs=None
+        self, obs, actions, next_obs, dt, mask, optimizer
     ) -> float:
         """Multi-step (rollout) data step: roll the model H explicit Euler steps
         from x_t along the recorded actions and regress every rolled state onto
         the observed sequence,
 
-          x_hat_0 = x_t,   x_hat_{k+1} = x_hat_k + b(x_hat_k, a_{t+k}; x_hat_{k-1}) dt_{t+k},
+          x_hat_0 = x_t,   x_hat_{k+1} = x_hat_k + b(x_hat_k, a_{t+k}) dt_{t+k},
           loss = sum_k m_k ||x_hat_{k+1} - x_{t+k+1}||^2 / (obs_dim * sum_k m_k).
 
         Gradients flow through the whole roll (backprop through time), so the
         model is trained where the generator/quadrature targets consume it: on
-        its own predictions, not only on buffer states. The velocity jump for
-        the contact gate uses the real predecessor at k=0 and the rolled states
-        after, the convention of the sub-step quadrature roll. ``mask`` (1 valid,
+        its own predictions, not only on buffer states. ``mask`` (1 valid,
         0 invalid, cumulative) zeroes the steps of a window that crosses an
         episode end or the ring seam; ``horizon=1`` with a full mask is exactly
         ``fit_step``.
@@ -555,7 +497,7 @@ class PortHamiltonianModel(nn.Module):
         non-finite loss (``_fit_optimizer_step``).
 
         Shapes: obs (B, O); actions (B, H, A); next_obs (B, H, O);
-        dt, mask (B, H, 1); prev_obs (B, O) or None."""
+        dt, mask (B, H, 1)."""
         assert self.mode in ("phast", "structured"), (
             "fit_step_rollout only applies to learned modes ('phast', 'structured')."
         )
@@ -576,11 +518,9 @@ class PortHamiltonianModel(nn.Module):
         obs_steps = xp - th.cat([x_hat.unsqueeze(1), xp[:, :-1]], dim=1)  # (B, H, O)
         step_limit = 5.0 * obs_steps.abs().amax(dim=1) + 1e-3            # (B, O)
 
-        prev = prev_obs
         loss = x_hat.new_zeros(())
         for k in range(horizon):
-            b = self.drift(x_hat, a[:, k], prev_obs=prev)
-            prev = x_hat
+            b = self.drift(x_hat, a[:, k])
             # The update is gated by the mask so an invalid tail cannot run the
             # state off to non-finite values (0 * inf would poison the masked loss).
             step = b * (dt_t[:, k] * m[:, k])

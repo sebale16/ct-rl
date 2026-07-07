@@ -281,12 +281,10 @@ class CTSAC(OffPolicyAlgorithm):
                     dynamics_loss = self.dynamics_model.fit_step_rollout(
                         seq.observations, seq.actions, seq.next_observations,
                         seq.dt, seq.mask, self.dynamics_optimizer,
-                        prev_obs=seq.prev_observations,
                     )
                 else:
                     dynamics_loss = self.dynamics_model.fit_step(
                         obs, actions, next_obs, dt, self.dynamics_optimizer,
-                        prev_obs=batch.prev_observations,
                     )
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
@@ -319,8 +317,7 @@ class CTSAC(OffPolicyAlgorithm):
                 and dynamics_ready
             ):
                 q_fast_target = self._model_based_target(
-                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
-                    prev_obs=batch.prev_observations,
+                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor
                 )
                 # A non-finite target means the model-based method has failed;
                 # without this check it would silently NaN the critic, then the
@@ -443,7 +440,7 @@ class CTSAC(OffPolicyAlgorithm):
         return q_fast_target
 
     def _model_based_target(
-        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor, prev_obs=None
+        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor
     ) -> th.Tensor:
         """Model-based target: the generator is evaluated analytically from the
         port-Hamiltonian drift b(x,a), so no sampled next state is required.
@@ -473,7 +470,7 @@ class CTSAC(OffPolicyAlgorithm):
         """
         if self.generator_substeps >= 1:
             return self._substep_quadrature_target(
-                obs, actions, rewards, dones, alpha_tensor, prev_obs=prev_obs
+                obs, actions, rewards, dones, alpha_tensor
             )
 
         sigma = self.dynamics_model.diffusion(obs)
@@ -489,7 +486,7 @@ class CTSAC(OffPolicyAlgorithm):
         (gV,) = th.autograd.grad(V.sum(), obs_req, create_graph=need_hessian)  # (B, O)
 
         V_det = V.detach()
-        b = self.dynamics_model.drift(obs, actions, prev_obs=prev_obs)  # (B, O), per second
+        b = self.dynamics_model.drift(obs, actions)  # (B, O), per second
         b = th.as_tensor(b, dtype=V_det.dtype, device=V_det.device).detach()
 
         if self.generator_gate_scale > 0.0:
@@ -523,7 +520,7 @@ class CTSAC(OffPolicyAlgorithm):
         return q_fast_target
 
     def _substep_quadrature_target(
-        self, obs, actions, rewards, dones, alpha_tensor, prev_obs=None
+        self, obs, actions, rewards, dones, alpha_tensor
     ) -> th.Tensor:
         """Sub-step quadrature generator target (``generator_substeps = m``).
 
@@ -542,12 +539,10 @@ class CTSAC(OffPolicyAlgorithm):
         """
         with th.no_grad():
             x_hat = obs.detach().clone()
-            prev = prev_obs  # real predecessor for the first sub-step
             h = self.dt_default / float(self.generator_substeps)
             for _ in range(self.generator_substeps):
-                b_k = self.dynamics_model.drift(x_hat, actions, prev_obs=prev)  # (B, O)
+                b_k = self.dynamics_model.drift(x_hat, actions)  # (B, O)
                 b_k = th.as_tensor(b_k, dtype=x_hat.dtype, device=x_hat.device)
-                prev = x_hat  # next sub-step's jump is measured against this rolled state
                 x_hat = x_hat + b_k * h
             V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
             V_next = self._state_value(x_hat, alpha_tensor)  # (B, 1) at rolled state

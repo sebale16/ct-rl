@@ -165,15 +165,6 @@ class TestReplaySequenceSampling(unittest.TestCase):
         self.assertEqual(seq.mask[0, :, 0].tolist(), [1.0, 1.0, 1.0])
         self.assertEqual(seq.next_observations[0, :, 0].tolist(), [4.0, 5.0, 6.0])
 
-    def test_prev_obs_matches_get_samples_rule(self):
-        buf = ReplayBuffer(5, self.obs_space, self.act_space, device="cpu", n_envs=1)
-        self._fill(buf, 7)
-        # start at the seam slot (pos=2): no valid predecessor -> prev = obs
-        seq = buf._get_sequence_samples(np.array([2, 3]), np.array([0, 0]), 2)
-        self.assertEqual(seq.prev_observations[0, 0].item(), seq.observations[0, 0].item())
-        # start=3 (obs 3): predecessor is slot 2 (obs 2)
-        self.assertEqual(seq.prev_observations[1, 0].item(), 2.0)
-
     def test_windows_stay_within_env(self):
         buf = ReplayBuffer(10, self.obs_space, self.act_space, device="cpu", n_envs=2)
         # both envs written in lockstep with identical values; overwrite env 1

@@ -23,11 +23,6 @@ class ReplayBatch:
     t: th.Tensor
     next_t: th.Tensor
     dt: th.Tensor
-    # Observation of the temporally preceding transition (same env), used to form
-    # the incoming velocity jump dv = obs - prev_obs for the contact-aware
-    # dynamics model. Equals ``observations`` (so dv = 0) at episode starts and
-    # the ring-buffer seam, where no valid predecessor exists.
-    prev_observations: th.Tensor
 
 
 @dataclass
@@ -43,8 +38,6 @@ class ReplaySequenceBatch:
       mask               (B, H, 1)  1 while the window stays inside one episode
                                     and off the ring seam; 0 from the first
                                     break onward (cumulative)
-      prev_observations  (B, O)     predecessor of x_t (= x_t where invalid),
-                                    seeding the velocity jump dv at the start
     """
 
     observations: th.Tensor
@@ -52,7 +45,6 @@ class ReplaySequenceBatch:
     next_observations: th.Tensor
     dt: th.Tensor
     mask: th.Tensor
-    prev_observations: th.Tensor
 
 
 @dataclass
@@ -227,21 +219,6 @@ class ReplayBuffer(BaseBuffer):
         next_t = self.next_t[batch_inds, env_inds]
         dt = self.dt[batch_inds, env_inds]
 
-        # Previous observation (same env) = the transition stored one slot earlier.
-        # Invalid where the predecessor ended an episode (dones[prev]=1), at the
-        # very first slot (before wrap), or at the ring seam (batch_inds == pos,
-        # whose predecessor is the newest, not the oldest, sample). There we set
-        # prev_obs = obs so the downstream jump dv = obs - prev_obs is zero.
-        upper = self.buffer_size if self.full else self.pos
-        prev_inds = (batch_inds - 1) % upper
-        prev_obs = self.observations[prev_inds, env_inds, :]
-        invalid = self.dones[prev_inds, env_inds] > 0.5
-        if self.full:
-            invalid = invalid | (batch_inds == self.pos)
-        else:
-            invalid = invalid | (batch_inds == 0)
-        prev_obs = np.where(invalid[:, None], obs, prev_obs)
-
         # Add singleton dim for rewards/dones/time (batch, 1)
         rewards = rewards.reshape(-1, 1)
         dones = dones.reshape(-1, 1)
@@ -258,7 +235,6 @@ class ReplayBuffer(BaseBuffer):
             t=self.to_torch(t),
             next_t=self.to_torch(next_t),
             dt=self.to_torch(dt),
-            prev_observations=self.to_torch(prev_obs),
         )
 
     def sample_sequences(self, batch_size: int, horizon: int) -> ReplaySequenceBatch:
@@ -303,19 +279,12 @@ class ReplayBuffer(BaseBuffer):
             ).astype(np.float32)  # (B, H-1)
             valid[:, 1:] = np.cumprod(cont, axis=1)
 
-        # Predecessor of the window start: same rule as _get_samples.
-        prev_inds = (start_inds - 1) % upper
-        prev_obs = self.observations[prev_inds, env_inds, :]
-        invalid = (self.dones[prev_inds, env_inds] > 0.5) | (start_inds == seam)
-        prev_obs = np.where(invalid[:, None], obs, prev_obs)
-
         return ReplaySequenceBatch(
             observations=self.to_torch(obs),
             actions=self.to_torch(actions),
             next_observations=self.to_torch(next_obs),
             dt=self.to_torch(dt.reshape(batch, horizon, 1)),
             mask=self.to_torch(valid.reshape(batch, horizon, 1)),
-            prev_observations=self.to_torch(prev_obs),
         )
 
 

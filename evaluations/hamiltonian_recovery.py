@@ -29,8 +29,8 @@ Usage (offline fit, OU exploration data):
 
 Usage (model trained by an RL run, saved by the CTSAC checkpoint sidecar):
     python -m evaluations.hamiltonian_recovery \
-        --dynamics_path saved_models/.../best_model.dynamics.pth --contact_aware \
-        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_contact_roll]
+        --dynamics_path saved_models/.../best_model.dynamics.pth --contact_force 4 \
+        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_cforce_roll]
 
 ``--checkpoint`` rolls the saved policy to collect the evaluation states (the
 on-policy distribution); without it, OU exploration is used.
@@ -337,12 +337,11 @@ def sanity_check_truth(truth: dict, obs: np.ndarray, nq: int):
 
 
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
-              contact_aware=True, contact_force=0, hidden=(128, 128), seed=1,
-              log_every=1000):
+              contact_force=0, hidden=(128, 128), seed=1, log_every=1000):
     th.manual_seed(seed)
     od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
     m = PortHamiltonianModel(od, ad, mode="structured",
-                             structured_hidden=hidden, contact_aware=contact_aware,
+                             structured_hidden=hidden,
                              contact_force=contact_force)
     buf = ReplayBuffer(len(O), env.observation_space, env.action_space,
                        device="cpu", n_envs=1)
@@ -355,11 +354,11 @@ def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
             seq = buf.sample_sequences(batch, horizon)
             loss = m.fit_step_rollout(seq.observations, seq.actions,
                                       seq.next_observations, seq.dt, seq.mask,
-                                      opt, prev_obs=seq.prev_observations)
+                                      opt)
         else:
             bt = buf.sample(batch)
             loss = m.fit_step(bt.observations, bt.actions, bt.next_observations,
-                              bt.dt, opt, prev_obs=bt.prev_observations)
+                              bt.dt, opt)
         if log_every and (s + 1) % log_every == 0:
             print(f"[fit] step {s+1}/{steps}: loss {loss:.5f}", flush=True)
     return m
@@ -382,9 +381,6 @@ def main():
                         "otherwise a model is fit offline on the collected data")
     p.add_argument("--fit_steps", type=int, default=8000)
     p.add_argument("--fit_horizon", type=int, default=4)
-    p.add_argument("--contact_aware", action="store_true",
-                   help="build the model with the contact-gated damping "
-                        "(must match --dynamics_path if given)")
     p.add_argument("--contact_force", type=int, default=0,
                    help="number of learned contact points for the explicit "
                         "contact-force port (must match --dynamics_path if given)")
@@ -420,13 +416,11 @@ def main():
         ad = int(env.action_space.shape[0])
         m = PortHamiltonianModel(od, ad, mode="structured",
                                  structured_hidden=(128, 128),
-                                 contact_aware=args.contact_aware,
                                  contact_force=args.contact_force)
         m.load_state_dict(th.load(args.dynamics_path, map_location="cpu"))
         print(f"loaded dynamics model from {args.dynamics_path}")
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
-                      contact_aware=args.contact_aware,
                       contact_force=args.contact_force, seed=args.seed + 1)
 
     eval_obs = O[-args.n_eval:]
