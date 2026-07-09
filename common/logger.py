@@ -43,8 +43,8 @@ class HumanOutputFormat(KVWriter):
 
 
 class JSONOutputFormat(KVWriter):
-    def __init__(self, file_path: str):
-        self.file = open(file_path, "wt")
+    def __init__(self, file_path: str, append: bool = False):
+        self.file = open(file_path, "at" if append else "wt")
 
     def write(self, key_values: Dict[str, Any], step: int = 0) -> None:
         # Add step to the data
@@ -57,18 +57,33 @@ class JSONOutputFormat(KVWriter):
 
 
 class CSVOutputFormat(KVWriter):
-    def __init__(self, file_path: str):
-        self.file = open(file_path, "w", newline="")
+    def __init__(self, file_path: str, append: bool = False):
+        # When appending across a resume, reuse the existing header so rows stay
+        # column-aligned and no duplicate header line is written mid-file.
+        self._existing_keys = None
+        if append and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            with open(file_path, "r", newline="") as f:
+                header = f.readline().strip()
+            if header:
+                self._existing_keys = header.split(",")
+        self.file = open(file_path, "a" if append else "w", newline="")
         self.writer = None
         self.keys = []
 
     def write(self, key_values: Dict[str, Any], step: int = 0) -> None:
         if self.writer is None:
-            self.keys = sorted(key_values.keys())
-            self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
-            self.writer.writeheader()
+            if self._existing_keys is not None:
+                self.keys = self._existing_keys
+                self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
+                # header already present in the file we are appending to
+            else:
+                self.keys = sorted(key_values.keys())
+                self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
+                self.writer.writeheader()
 
-        self.writer.writerow({key: key_values.get(key, "") for key in self.keys})
+        self.writer.writerow(
+            {key: key_values.get(key, "") for key in self.keys}
+        )
         self.file.flush()
 
     def close(self) -> None:
@@ -93,7 +108,12 @@ class TensorBoardOutputFormat(KVWriter):
 
 
 class Logger:
-    def __init__(self, folder: Optional[str], output_formats: List[str]):
+    def __init__(
+        self,
+        folder: Optional[str],
+        output_formats: List[str],
+        append: bool = False,
+    ):
         self.name_to_value: Dict[str, Union[float, int]] = defaultdict(float)
         self.name_to_count: Dict[str, int] = defaultdict(int)
         self.name_to_excluded: Dict[str, str] = {}
@@ -106,11 +126,17 @@ class Logger:
                 if fmt == "stdout":
                     self.output_formats.append(HumanOutputFormat(sys.stdout))
                 elif fmt == "log":
-                    self.output_formats.append(HumanOutputFormat(open(f"{folder}/log.txt", "wt")))
+                    self.output_formats.append(
+                        HumanOutputFormat(open(f"{folder}/log.txt", "at" if append else "wt"))
+                    )
                 elif fmt == "json":
-                    self.output_formats.append(JSONOutputFormat(f"{folder}/progress.json"))
+                    self.output_formats.append(
+                        JSONOutputFormat(f"{folder}/progress.json", append=append)
+                    )
                 elif fmt == "csv":
-                    self.output_formats.append(CSVOutputFormat(f"{folder}/progress.csv"))
+                    self.output_formats.append(
+                        CSVOutputFormat(f"{folder}/progress.csv", append=append)
+                    )
                 elif fmt == "tensorboard":
                     self.output_formats.append(TensorBoardOutputFormat(folder))
 
@@ -156,8 +182,10 @@ class LogManager:
     def __init__(self):
         self._loggers: Dict[str, Logger] = {}
 
-    def configure(self, folder: Optional[str], output_formats: List[str]) -> None:
-        self._loggers["default"] = Logger(folder, output_formats)
+    def configure(
+        self, folder: Optional[str], output_formats: List[str], append: bool = False
+    ) -> None:
+        self._loggers["default"] = Logger(folder, output_formats, append=append)
 
     def get_logger(self) -> Logger:
         return self._loggers.get("default", None)
@@ -184,11 +212,13 @@ class LogManager:
 logger = LogManager()
 
 
-def configure(folder: Optional[str], output_formats: List[str]) -> None:
+def configure(
+    folder: Optional[str], output_formats: List[str], append: bool = False
+) -> None:
     """
     Configure the global logger.
     """
-    logger.configure(folder, output_formats)
+    logger.configure(folder, output_formats, append=append)
 
 
 def record(key: str, value: Any, exclude: Optional[str] = None) -> None:

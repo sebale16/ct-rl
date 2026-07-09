@@ -128,7 +128,11 @@ class BaseAlgorithm(ABC):
         Shared setup for the learn method.
         """
         self._total_timesteps = total_timesteps
-        self.num_timesteps = 0
+        # When resuming from a checkpoint the timestep counter is restored by
+        # common.checkpoint.load_checkpoint and must survive setup; otherwise
+        # start a fresh run from zero.
+        if not getattr(self, "_resumed_from_checkpoint", False):
+            self.num_timesteps = 0
         self.start_time = time.time()
         if callback:
             callback.init_callback(self)

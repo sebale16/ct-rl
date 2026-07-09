@@ -31,7 +31,9 @@ from common.callbacks import (
     CallbackList,
     CheckpointCallback,
     EvalCallback,
+    WallClockCheckpointCallback,
 )
+from common.checkpoint import load_checkpoint
 
 from common.logger import configure
 from common.utils import (
@@ -121,9 +123,20 @@ def run_algorithm(
     desc: str,
     n_eval_episodes: int = 10,
     eval_range: str | None = None,
-):
+    resume: bool = False,
+    max_seconds: float | None = None,
+    checkpoint_dir: str | None = None,
+    run_id: str | None = None,
+) -> bool:
     """
     Runs a single RL algorithm experiment.
+
+    Returns True if training reached ``total_timesteps`` (finished), False if it
+    paused for a wall-time/signal checkpoint and should be resumed. When
+    ``max_seconds`` is set, a resumable checkpoint (model + replay buffer +
+    optimizers + counters + RNG) is written as the job approaches that budget and
+    the loop exits cleanly; passing ``resume=True`` on a later run reloads the
+    latest checkpoint and continues from the exact timestep.
     """
     print(
         f"\n{'='*50}\nRunning: {algo} on {env_id} (mode: {mode}, eval_mode: {eval_mode or mode}, seed: {seed})\n{'='*50}"
@@ -167,14 +180,25 @@ def run_algorithm(
         total_timesteps = total_timesteps_override
 
     # Build logs and saved_models save paths
-    log_dir = build_save_path(log_root_dir, algo, env_id, mode, seed, env_kwargs, desc)
+    log_dir = build_save_path(
+        log_root_dir, algo, env_id, mode, seed, env_kwargs, desc, run_id=run_id
+    )
     save_dir = build_save_path(
-        save_root_dir, algo, env_id, mode, seed, env_kwargs, desc
+        save_root_dir, algo, env_id, mode, seed, env_kwargs, desc, run_id=run_id
     )
 
+    # Resumable-checkpoint location and whether a complete one exists to resume.
+    from common.checkpoint import _is_complete
+
+    ckpt_dir = checkpoint_dir or str(save_dir / "checkpoint")
+    resume_active = bool(resume) and _is_complete(ckpt_dir)
+
+    # When resuming, append to the existing logs so the learning curve stays
+    # continuous across the resubmission chain instead of being truncated.
     configure(
         folder=str(log_dir),
         output_formats=["csv", "json", "tensorboard", "log"],
+        append=resume_active,
     )
 
     # Create (vectorized) train environments
@@ -331,7 +355,67 @@ def run_algorithm(
         name_prefix=f"{algo}_{env_id}_{mode}",
         verbose=1,
     )
-    callback = CallbackList([checkpoint_callback, eval_callback])
+
+    # Resume: reload the full trainer state (buffer, optimizers, counters, RNG)
+    # and restore the EvalCallback's cumulative history so the eval curve stays
+    # whole and best_model.pth is not clobbered by a worse early eval.
+    if resume_active:
+        extra = load_checkpoint(algorithm, ckpt_dir)
+        eval_state = extra.get("eval", {})
+        if eval_state:
+            eval_callback.best_mean_reward = eval_state.get(
+                "best_mean_reward", eval_callback.best_mean_reward
+            )
+            eval_callback.last_mean_reward = eval_state.get(
+                "last_mean_reward", eval_callback.last_mean_reward
+            )
+            eval_callback._last_eval_timesteps = eval_state.get(
+                "last_eval_timesteps", 0
+            )
+            eval_callback.evaluations_timesteps = eval_state.get(
+                "evaluations_timesteps", []
+            )
+            eval_callback.evaluations_results = eval_state.get(
+                "evaluations_results", []
+            )
+            eval_callback.evaluations_lengths = eval_state.get(
+                "evaluations_lengths", []
+            )
+        print(
+            f"[resume] loaded checkpoint from {ckpt_dir}: "
+            f"num_timesteps={algorithm.num_timesteps}, "
+            f"buffer_size={algorithm.replay_buffer.size()}, "
+            f"eval_best={eval_callback.best_mean_reward:.3f}",
+            flush=True,
+        )
+
+    callbacks = [checkpoint_callback, eval_callback]
+
+    # Wall-clock checkpoint: near the time budget, write a resumable checkpoint
+    # and stop cleanly so the resubmission chain can continue.
+    wall_cb = None
+    if max_seconds is not None and max_seconds > 0:
+        def _collect_extra():
+            return {
+                "eval": {
+                    "best_mean_reward": float(eval_callback.best_mean_reward),
+                    "last_mean_reward": float(eval_callback.last_mean_reward),
+                    "last_eval_timesteps": int(eval_callback._last_eval_timesteps),
+                    "evaluations_timesteps": eval_callback.evaluations_timesteps,
+                    "evaluations_results": eval_callback.evaluations_results,
+                    "evaluations_lengths": eval_callback.evaluations_lengths,
+                }
+            }
+
+        wall_cb = WallClockCheckpointCallback(
+            ckpt_dir=ckpt_dir,
+            max_seconds=max_seconds,
+            extra_state_fn=_collect_extra,
+            verbose=1,
+        )
+        callbacks.append(wall_cb)
+
+    callback = CallbackList(callbacks)
 
     # Training
     env_kwargs["n_envs"] = n_envs  # Put back n_envs only for printing
@@ -350,7 +434,35 @@ def run_algorithm(
         callback=callback,
         log_interval=log_interval,
     )
-    print("Training finished.")
+
+    # Distinguish "reached total_timesteps" from "paused for a wall-time
+    # checkpoint". The runner writes a marker file the batch script reads to
+    # decide whether to resubmit the next chunk of the chain.
+    paused = bool(wall_cb is not None and wall_cb.stopped)
+    finished = (algorithm.num_timesteps >= total_timesteps) and not paused
+
+    if max_seconds is not None:
+        os.makedirs(ckpt_dir, exist_ok=True)
+        marker = os.path.join(ckpt_dir, "STATUS")
+        with open(marker, "w") as f:
+            f.write(
+                ("DONE" if finished else "INCOMPLETE")
+                + f" num_timesteps={algorithm.num_timesteps}"
+                + f" total_timesteps={total_timesteps}\n"
+            )
+
+    if finished:
+        print(
+            f"Training finished: reached {algorithm.num_timesteps}/{total_timesteps} steps.",
+            flush=True,
+        )
+    else:
+        print(
+            f"Training paused at {algorithm.num_timesteps}/{total_timesteps} steps "
+            f"(will resume from checkpoint).",
+            flush=True,
+        )
+    return finished
 
 
 def parse_args():
@@ -427,6 +539,33 @@ def parse_args():
         default="Q3_2025",
         help="Evaluation quarters for the trading environment",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the latest checkpoint under the checkpoint dir if present.",
+    )
+    parser.add_argument(
+        "--max_seconds",
+        type=float,
+        default=None,
+        help="Wall-clock budget (seconds). When set, a resumable checkpoint is "
+        "written as this budget is approached and training exits cleanly so a "
+        "resubmission chain can continue. Omit for a normal single run.",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default=None,
+        help="Override the checkpoint directory (default: <save_dir>/checkpoint).",
+    )
+    parser.add_argument(
+        "--run_id",
+        type=str,
+        default=None,
+        help="Fixed run identifier used in the run directory name instead of a "
+        "wall-clock timestamp. Give all chunks of a resubmission chain the same "
+        "run_id so they share one log/save/checkpoint directory.",
+    )
     return parser.parse_args()
 
 
@@ -439,9 +578,13 @@ def main():
     else:
         eval_range = None
 
+    # Exit code convention (used by the resubmission chain): 0 = all runs
+    # finished, 42 = at least one run paused for a wall-time checkpoint and
+    # should be resumed.
+    all_finished = True
     for algo in algos_to_run:
         try:
-            run_algorithm(
+            finished = run_algorithm(
                 algo=algo,
                 env_id=env_id,
                 mode=args.mode,
@@ -454,9 +597,19 @@ def main():
                 desc=args.desc,
                 n_eval_episodes=args.n_eval_episodes,
                 eval_range=eval_range,
+                resume=args.resume,
+                max_seconds=args.max_seconds,
+                checkpoint_dir=args.checkpoint_dir,
+                run_id=args.run_id,
             )
+            all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:
             print(f"\nCould not run {algo} due to a configuration error: {e}\n")
+
+    if args.max_seconds is not None and not all_finished:
+        import sys
+
+        sys.exit(42)
 
 
 if __name__ == "__main__":

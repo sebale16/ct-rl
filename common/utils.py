@@ -355,6 +355,7 @@ def build_save_path(
     seed: int,
     env_kwargs: Dict[str, Any],
     desc: str,
+    run_id: str | None = None,
 ):
     root = Path(root_dir) / algo / env_id / mode / f"seed_{seed}"
 
@@ -373,8 +374,17 @@ def build_save_path(
         safe_desc = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(desc))
         run_name_parts.append(safe_desc)
 
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name_parts.append(run_timestamp)
+    # A fixed run_id yields a stable directory across a resubmission chain (so
+    # resume finds its checkpoint and logs stay in one place); otherwise fall
+    # back to a wall-clock timestamp, giving each fresh run its own directory.
+    if run_id:
+        safe_run_id = "".join(
+            c if (c.isalnum() or c in "-_") else "_" for c in str(run_id)
+        )
+        run_name_parts.append(safe_run_id)
+    else:
+        run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_name_parts.append(run_timestamp)
     run_name = "_".join(run_name_parts)
 
     dir = root / run_name

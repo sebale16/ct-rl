@@ -272,6 +272,100 @@ class CheckpointCallback(BaseCallback):
         return True
 
 
+class WallClockCheckpointCallback(BaseCallback):
+    """
+    Save a full, resumable training checkpoint when the job approaches its wall
+    time (or receives a termination signal), then stop the loop gracefully so a
+    resubmission chain can pick up exactly where it left off.
+
+    A checkpoint is triggered when either:
+      - elapsed wall-clock time since training start exceeds ``max_seconds``, or
+      - the process receives SIGTERM / SIGUSR1 (Slurm's pre-timeout signal, if
+        the job is submitted with e.g. ``--signal=B:TERM@300``).
+
+    On trigger it calls :func:`common.checkpoint.save_checkpoint` (model + replay
+    buffer + optimizers + counters + entropy temperature + RNG + caller extra)
+    and returns ``False`` so ``learn`` exits cleanly. ``extra_state_fn`` supplies
+    the dict of auxiliary state to persist (used to carry the EvalCallback's
+    best-reward and eval history across the resume).
+
+    ``stopped`` is set True iff a checkpoint was written because of this callback,
+    letting the runner distinguish "paused for wall time" from "finished".
+    """
+
+    def __init__(
+        self,
+        ckpt_dir: str,
+        max_seconds: float,
+        extra_state_fn: Optional[Callable[[], dict]] = None,
+        catch_signals: bool = True,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.ckpt_dir = ckpt_dir
+        self.max_seconds = float(max_seconds)
+        self.extra_state_fn = extra_state_fn
+        self.catch_signals = bool(catch_signals)
+        self.stopped = False
+        self._start_time = 0.0
+        self._signal_received = False
+
+    def _on_training_start(self) -> None:
+        import time as _time
+
+        self._start_time = _time.monotonic()
+        if self.catch_signals:
+            import signal
+
+            def _handler(signum, frame):
+                self._signal_received = True
+
+            for sig in (signal.SIGTERM, signal.SIGUSR1):
+                try:
+                    signal.signal(sig, _handler)
+                except (ValueError, OSError):
+                    # Not in the main thread, or signal unavailable; time budget
+                    # remains as the trigger.
+                    pass
+
+    def _should_checkpoint(self) -> bool:
+        import time as _time
+
+        if self._signal_received:
+            return True
+        return (_time.monotonic() - self._start_time) >= self.max_seconds
+
+    def _on_step(self) -> bool:
+        if self.stopped:
+            return False
+        if not self._should_checkpoint():
+            return True
+
+        from common.checkpoint import save_checkpoint
+
+        extra = {}
+        if self.extra_state_fn is not None:
+            try:
+                extra = self.extra_state_fn() or {}
+            except Exception as e:  # never let extra-collection abort the save
+                if self.verbose > 0:
+                    print(f"[WallClockCheckpoint] extra_state_fn failed: {e}")
+                extra = {}
+
+        reason = "signal" if self._signal_received else "wall-time budget"
+        if self.verbose > 0:
+            print(
+                f"\n[WallClockCheckpoint] {reason} reached at "
+                f"{self.num_timesteps} steps; saving checkpoint to {self.ckpt_dir}",
+                flush=True,
+            )
+        save_checkpoint(self.algorithm, self.ckpt_dir, extra)
+        if self.verbose > 0:
+            print("[WallClockCheckpoint] checkpoint written; stopping.", flush=True)
+        self.stopped = True
+        return False
+
+
 class ProgressBarCallback(BaseCallback):
     """
     Display a progress bar using tqdm.
