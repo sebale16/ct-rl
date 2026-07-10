@@ -107,5 +107,74 @@ class TestDMCContinuousEnv(unittest.TestCase):
         self.assertEqual(next_obs.shape, env.observation_space.shape)
 
 
+class TestRawStateObs(unittest.TestCase):
+    """raw_state_obs=True: obs = [qpos; qvel] straight from the physics, for
+    the structured dynamics model and the oracle drift on hinge/slide domains."""
+
+    @unittest.skipUnless(HAVE_DMC, "dm_control / DMCContinuousEnv not available")
+    def test_obs_matches_physics_state(self):
+        for domain, task in (("cartpole", "swingup"), ("acrobot", "swingup")):
+            env = DMCContinuousEnv(
+                domain_name=domain, task_name=task, time_sampling="uniform",
+                dt=0.01, episode_duration=0.2, seed=0, raw_state_obs=True,
+            )
+            nq = int(env._env.physics.model.nq)
+            nv = int(env._env.physics.model.nv)
+            self.assertEqual(env.observation_space.shape, (nq + nv,))
+            obs, _ = env.reset(seed=0)
+            data = env._env.physics.data
+            np.testing.assert_allclose(
+                obs, np.concatenate([data.qpos, data.qvel]).astype(np.float32),
+                rtol=0, atol=1e-6, err_msg=domain,
+            )
+            next_obs, *_ = env.step(env.action_space.sample())
+            np.testing.assert_allclose(
+                next_obs,
+                np.concatenate([data.qpos, data.qvel]).astype(np.float32),
+                rtol=0, atol=1e-6, err_msg=domain,
+            )
+
+    @unittest.skipUnless(HAVE_DMC, "dm_control / DMCContinuousEnv not available")
+    def test_string_flag_from_csv_is_coerced(self):
+        env = DMCContinuousEnv(
+            domain_name="cartpole", task_name="swingup", time_sampling="uniform",
+            dt=0.01, episode_duration=0.2, raw_state_obs="True",
+        )
+        self.assertIs(env.raw_state_obs, True)
+
+    @unittest.skipUnless(HAVE_DMC, "dm_control / DMCContinuousEnv not available")
+    def test_rejects_quaternion_domains(self):
+        # humanoid has a free root joint: nq = nv + 1, so d(qpos)/dt != qvel
+        with self.assertRaises(ValueError):
+            DMCContinuousEnv(
+                domain_name="humanoid", task_name="stand",
+                time_sampling="uniform", dt=0.025, episode_duration=0.2,
+                raw_state_obs=True,
+            )
+
+    @unittest.skipUnless(HAVE_DMC, "dm_control / DMCContinuousEnv not available")
+    def test_oracle_drift_matches_finite_difference(self):
+        # raw obs makes dynamics_terms exact on any hinge/slide domain: at a
+        # fine dt the analytic drift must match the realized increment.
+        env = DMCContinuousEnv(
+            domain_name="cartpole", task_name="swingup", time_sampling="uniform",
+            dt=0.001, physics_dt=0.001, episode_duration=5.0, seed=0,
+            raw_state_obs=True,
+        )
+        env.action_space.seed(0)
+        O, A, NO, DT = [], [], [], []
+        obs, _ = env.reset(seed=0)
+        for _ in range(200):
+            a = env.action_space.sample()
+            o, t, _, r, no, nt, term, trunc, _ = env.step_dt(a)
+            O.append(o); A.append(a); NO.append(no); DT.append(nt - t)
+            obs = no if not (term or trunc) else env.reset()[0]
+        O, A, NO, DT = map(lambda x: np.asarray(x, np.float32), (O, A, NO, DT))
+        b = env.dynamics_terms(O, A)
+        fd = (NO - O) / DT.reshape(-1, 1)
+        corr = np.corrcoef(b.ravel(), fd.ravel())[0, 1]
+        self.assertGreater(corr, 0.99)
+
+
 if __name__ == "__main__":
     unittest.main()

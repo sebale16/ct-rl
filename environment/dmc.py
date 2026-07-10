@@ -90,6 +90,7 @@ class DMCContinuousEnv(ContinuousEnv):
             Dict[str, Any]
         ] = None,  # Keyword arguments for time sampling ("irregular")
         return_reward_increment: bool = False,
+        raw_state_obs: bool = False,
     ) -> None:
         # Initialize ContinuousEnv (time grid, dt sampling, etc.)
         super().__init__(
@@ -171,6 +172,25 @@ class DMCContinuousEnv(ContinuousEnv):
         else:
             self.observation_space = _spec_to_box(self._obs_spec)
 
+        # Raw-state observations: obs = [qpos (nq); qvel (nv)] read straight from
+        # the physics, replacing the task's (often cos/sin-encoded) observation.
+        # This is what the structured port-Hamiltonian model and the oracle drift
+        # need: generalized coordinates whose position block satisfies
+        # d(qpos)/dt = qvel exactly, which requires hinge/slide joints only
+        # (nq == nv; quaternion/free joints pack qpos differently).
+        self.raw_state_obs = str(raw_state_obs).strip().lower() in ("1", "true", "yes")
+        if self.raw_state_obs:
+            nq = int(self._env.physics.model.nq)
+            nv = int(self._env.physics.model.nv)
+            if nq != nv:
+                raise ValueError(
+                    f"raw_state_obs requires nq == nv (hinge/slide joints only); "
+                    f"{domain_name} has nq={nq}, nv={nv}."
+                )
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(nq + nv,), dtype=np.float32
+            )
+
     def render(
         self,
         mode: str = "human",
@@ -244,6 +264,14 @@ class DMCContinuousEnv(ContinuousEnv):
 
     # --------------------------- ContinuousEnv abstract method implementations ---------------------------
 
+    def _raw_obs(self) -> np.ndarray:
+        """Raw generalized state [qpos; qvel] from the live physics."""
+        data = self._env.physics.data
+        return np.concatenate(
+            [np.asarray(data.qpos, dtype=np.float32),
+             np.asarray(data.qvel, dtype=np.float32)]
+        )
+
     def _reset_physics(
         self,
         *,
@@ -254,7 +282,7 @@ class DMCContinuousEnv(ContinuousEnv):
         del seed, options  # unused for now
         ts = self._env.reset()
         self._elapsed_time = 0.0
-        obs = _flatten_obs(ts.observation)
+        obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
         self._last_obs_dmc = obs
         info: Dict[str, Any] = {}
         return obs, info
@@ -290,7 +318,7 @@ class DMCContinuousEnv(ContinuousEnv):
 
             return obs, reward, terminated, truncated, info, float(actual_dt)
 
-        obs = _flatten_obs(ts.observation)
+        obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
         self._last_obs_dmc = obs
         reward = float(ts.reward if ts.reward is not None else 0.0)
 
@@ -329,20 +357,23 @@ class DMCContinuousEnv(ContinuousEnv):
 
         Used by the model-based generator in CT-SAC (``dynamics_source="mujoco"``).
 
-        Currently supports the ``cheetah`` domain, whose observation is
-        ``[qpos[1:] (nq-1), qvel (nv)]`` with index-aligned planar coordinates,
-        so the drift is exact without an observation Jacobian:
+        Supported observation maps, both index-aligned so the drift is exact
+        without an observation Jacobian:
 
-            d/dt obs[:nq-1] = qvel[1:nq]   (positions)
-            d/dt obs[nq-1:] = qacc         (velocities; MuJoCo forward dynamics)
+        - ``raw_state_obs=True`` (any hinge/slide domain, nq == nv):
+          obs = [qpos (nq); qvel (nv)],
+          d/dt obs[:nq] = qvel, d/dt obs[nq:] = qacc.
+        - the ``cheetah`` task observation, obs = [qpos[1:] (nq-1); qvel (nv)]:
+          d/dt obs[:nq-1] = qvel[1:nq], d/dt obs[nq-1:] = qacc.
 
         The live physics state is snapshotted and restored, so this is safe to
         call during training. Computation loops over the batch on CPU.
         """
-        if self.domain_name != "cheetah":
+        if not self.raw_state_obs and self.domain_name != "cheetah":
             raise NotImplementedError(
-                "dynamics_terms currently supports the 'cheetah' domain only "
-                "(obs = [qpos[1:], qvel]); other domains need their own obs<->state map."
+                "dynamics_terms supports raw_state_obs=True (any hinge/slide "
+                "domain) or the 'cheetah' task observation; other domains need "
+                "their own obs<->state map."
             )
 
         if hasattr(obs, "detach"):
@@ -358,9 +389,14 @@ class DMCContinuousEnv(ContinuousEnv):
         data = physics.data
         nq = int(physics.model.nq)
         nv = int(physics.model.nv)
-        assert obs_dim == (nq - 1) + nv, (
-            f"cheetah obs_dim {obs_dim} != (nq-1)+nv = {(nq - 1) + nv}"
-        )
+        if self.raw_state_obs:
+            assert obs_dim == nq + nv, f"raw obs_dim {obs_dim} != nq+nv = {nq + nv}"
+            pos_width = nq  # obs = [qpos; qvel]
+        else:
+            assert obs_dim == (nq - 1) + nv, (
+                f"cheetah obs_dim {obs_dim} != (nq-1)+nv = {(nq - 1) + nv}"
+            )
+            pos_width = nq - 1  # obs = [qpos[1:]; qvel], root x dropped
 
         low = np.asarray(self.action_space.low, dtype=np.float64)
         high = np.asarray(self.action_space.high, dtype=np.float64)
@@ -375,14 +411,14 @@ class DMCContinuousEnv(ContinuousEnv):
         try:
             for i in range(obs.shape[0]):
                 qpos = np.zeros(nq, dtype=np.float64)
-                qpos[1:] = obs[i, : nq - 1]
-                qvel = obs[i, nq - 1 :].astype(np.float64)
+                qpos[nq - pos_width:] = obs[i, :pos_width]
+                qvel = obs[i, pos_width:].astype(np.float64)
                 data.qpos[:] = qpos
                 data.qvel[:] = qvel
                 data.ctrl[:] = np.clip(action[i], low, high)
                 physics.forward()
-                out[i, : nq - 1] = np.asarray(data.qvel[1:nq])
-                out[i, nq - 1 :] = np.asarray(data.qacc[:nv])
+                out[i, :pos_width] = np.asarray(data.qvel[nq - pos_width:nq])
+                out[i, pos_width:] = np.asarray(data.qacc[:nv])
         finally:
             data.qpos[:] = saved[0]
             data.qvel[:] = saved[1]

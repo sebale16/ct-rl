@@ -1,6 +1,7 @@
 # evaluations/hamiltonian_recovery.py
-"""Compare a trained structured port-Hamiltonian model against the real cheetah
-Hamiltonian.
+"""Compare a trained structured port-Hamiltonian model against the simulator's
+true Hamiltonian (cheetah, or any raw-state hinge/slide domain via
+``--raw_state_obs``, e.g. cartpole/acrobot).
 
 The structured model (models/port_hamiltonian.py, mode="structured") learns the
 physical objects themselves — mass matrix M(q), potential V(q), damping D, and
@@ -48,7 +49,7 @@ from torch.func import jacfwd, vmap
 
 from common.buffers import ReplayBuffer
 from environment.dmc import DMCContinuousEnv
-from models.port_hamiltonian import PortHamiltonianModel
+from models.port_hamiltonian import DOFLayout, PortHamiltonianModel
 from models.noise import OrnsteinUhlenbeckActionNoise
 
 
@@ -87,19 +88,26 @@ def collect(env, n, policy=None, ou_sigma=0.4, seed=0):
 
 
 def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
-    """Extract the true mechanical terms at each observed state. Cheetah obs is
-    [qpos[1:] (nq-1); qvel (nv)]; root x is set to 0 (every extracted quantity
-    is translation-invariant). The live physics state is snapshotted/restored.
+    """Extract the true mechanical terms at each observed state. Two observation
+    maps are supported: raw state (obs = [qpos (nq); qvel (nv)], the env's
+    ``raw_state_obs`` option) and the cheetah task observation
+    (obs = [qpos[1:] (nq-1); qvel (nv)], root x set to 0 — every extracted
+    quantity is translation-invariant). The live physics state is
+    snapshotted/restored.
 
     Returns a dict of numpy arrays:
       M (B,nv,nv), e_pot (B,), e_kin (B,), g_pot (B,nv) gravity+spring torque,
       coriolis (B,nv) = C(q,v)v, dof_damping (nv,), G (nv,nu).
     """
-    assert env.domain_name == "cheetah", "ground_truth supports the cheetah domain"
+    raw = bool(getattr(env, "raw_state_obs", False))
+    assert raw or env.domain_name == "cheetah", (
+        "ground_truth supports raw_state_obs envs or the cheetah domain"
+    )
     physics = env._env.physics
     model, data = physics.model, physics.data
     nq, nv, nu = int(model.nq), int(model.nv), int(model.nu)
-    obs = np.asarray(obs, dtype=np.float64).reshape(-1, (nq - 1) + nv)
+    pos_width = nq if raw else nq - 1
+    obs = np.asarray(obs, dtype=np.float64).reshape(-1, pos_width + nv)
     B = obs.shape[0]
 
     model.opt.enableflags |= mujoco.mjtEnableBit.mjENBL_ENERGY
@@ -120,8 +128,8 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
         data.ctrl[:] = 0.0
 
         for i in range(B):
-            qpos = np.zeros(nq); qpos[1:] = obs[i, : nq - 1]
-            qvel = obs[i, nq - 1:]
+            qpos = np.zeros(nq); qpos[nq - pos_width:] = obs[i, :pos_width]
+            qvel = obs[i, pos_width:]
             # with velocity: energy, mass matrix, full bias force
             data.qpos[:] = qpos; data.qvel[:] = qvel
             physics.forward()
@@ -321,28 +329,33 @@ def recovery_report(truth: dict, learned: dict) -> dict:
     return rep
 
 
-def sanity_check_truth(truth: dict, obs: np.ndarray, nq: int):
+def sanity_check_truth(truth: dict, obs: np.ndarray, pos_width: int,
+                       check_root_invariance: bool = True):
     """Internal consistency of the extraction: M SPD, MuJoCo's kinetic energy
-    equals 1/2 v^T M v, and the gravity+spring torque has no root-x component."""
+    equals 1/2 v^T M v, and (cheetah) the gravity+spring torque has no root-x
+    component. ``pos_width`` is the observation's position-block width."""
     eig = np.linalg.eigvalsh(truth["M"])
     assert eig.min() > 0, "true mass matrix not SPD"
-    v = obs[:, nq - 1:]
+    v = obs[:, pos_width:]
     ek = 0.5 * np.einsum("na,nab,nb->n", v, truth["M"], v)
     err = np.abs(ek - truth["e_kin"]).max() / (np.abs(truth["e_kin"]).max() + 1e-12)
     assert err < 1e-6, f"kinetic energy mismatch ({err:.2e}): extraction inconsistent"
-    assert np.abs(truth["g_pot"][:, 0]).max() < 1e-9, "gravity torque has root-x part"
+    if check_root_invariance:
+        assert np.abs(truth["g_pot"][:, 0]).max() < 1e-9, "gravity torque has root-x part"
 
 
 # --------------------------- offline fit ---------------------------
 
 
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
-              contact_force=0, hidden=(128, 128), seed=1, log_every=1000):
+              contact_force=0, hidden=(128, 128), seed=1, log_every=1000,
+              dof_layout=None):
     th.manual_seed(seed)
     od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
     m = PortHamiltonianModel(od, ad, mode="structured",
                              structured_hidden=hidden,
-                             contact_force=contact_force)
+                             contact_force=contact_force,
+                             dof_layout=dof_layout)
     buf = ReplayBuffer(len(O), env.observation_space, env.action_space,
                        device="cpu", n_envs=1)
     for i in range(len(O)):
@@ -388,13 +401,19 @@ def main():
                    help="RL checkpoint (*.pth) whose policy collects the data")
     p.add_argument("--mode", default="mbq_structured_quad_contact_roll",
                    help="CSV mode row used to size the policy nets for --checkpoint")
+    p.add_argument("--raw_state_obs", action="store_true",
+                   help="raw-state observations [qpos; qvel] (hinge/slide "
+                        "domains, e.g. cartpole/acrobot; must match the run)")
     p.add_argument("--out", default=None, help="write the report as JSON here")
     args = p.parse_args()
 
     th.manual_seed(args.seed); np.random.seed(args.seed)
     domain, task = args.env_id.split("-", 1)
     env = DMCContinuousEnv(domain, task, time_sampling="uniform", dt=0.01,
-                           physics_dt=0.002, episode_duration=20.0, seed=args.seed)
+                           physics_dt=0.002, episode_duration=20.0, seed=args.seed,
+                           raw_state_obs=args.raw_state_obs)
+    layout = (DOFLayout.raw_state(nv=int(env.observation_space.shape[0]) // 2)
+              if args.raw_state_obs else None)
 
     policy = None
     if args.checkpoint:
@@ -416,17 +435,21 @@ def main():
         ad = int(env.action_space.shape[0])
         m = PortHamiltonianModel(od, ad, mode="structured",
                                  structured_hidden=(128, 128),
-                                 contact_force=args.contact_force)
+                                 contact_force=args.contact_force,
+                                 dof_layout=layout)
         m.load_state_dict(th.load(args.dynamics_path, map_location="cpu"))
         print(f"loaded dynamics model from {args.dynamics_path}")
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
-                      contact_force=args.contact_force, seed=args.seed + 1)
+                      contact_force=args.contact_force, seed=args.seed + 1,
+                      dof_layout=layout)
 
     eval_obs = O[-args.n_eval:]
     truth = ground_truth(env, eval_obs)
+    nq = int(env._env.physics.model.nq)
     sanity_check_truth(truth, eval_obs.astype(np.float64),
-                       nq=int(env._env.physics.model.nq))
+                       pos_width=nq if args.raw_state_obs else nq - 1,
+                       check_root_invariance=not args.raw_state_obs)
     learned = learned_terms(m, eval_obs)
     rep = recovery_report(truth, learned)
 

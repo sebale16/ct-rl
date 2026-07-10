@@ -250,7 +250,7 @@ def run_algorithm(
     if algo == "ct_sac" and str(
         algo_kwargs.get("use_model_based_q", "")
     ).strip().lower() in ("1", "true", "yes"):
-        from models.port_hamiltonian import PortHamiltonianModel
+        from models.port_hamiltonian import DOFLayout, PortHamiltonianModel
 
         source = str(algo_kwargs.get("dynamics_source", "mujoco"))
         intensity = float(algo_kwargs.get("human_input_intensity", 0.0) or 0.0)
@@ -259,6 +259,16 @@ def run_algorithm(
         )
         obs_dim = int(np.prod(train_env.observation_space.shape))
         act_dim = int(np.prod(train_env.action_space.shape))
+        # Raw-state envs (obs = [qpos; qvel]) get the generic layout; the
+        # structured model otherwise defaults to the cheetah layout.
+        raw_env = train_env
+        while not hasattr(raw_env, "raw_state_obs") and hasattr(raw_env, "env"):
+            raw_env = raw_env.env
+        dof_layout = (
+            DOFLayout.raw_state(nv=obs_dim // 2)
+            if getattr(raw_env, "raw_state_obs", False)
+            else None
+        )
         if source == "mujoco":
             base_env = train_env
             while not hasattr(base_env, "dynamics_terms") and hasattr(base_env, "env"):
@@ -289,14 +299,15 @@ def run_algorithm(
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
             # constant diagonal damping on momentum; optional explicit contact
             # port (dynamics_contact_force = number of learned contact points,
-            # which also makes M translation-invariant). DOF layout defaults to
-            # cheetah; pass an explicit dof_layout otherwise.
+            # which also makes M translation-invariant). Raw-state envs use the
+            # generic layout; the default layout is cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(
                 obs_dim,
                 act_dim,
                 mode="structured",
                 human_input_intensity=intensity,
                 contact_force=contact_force,
+                dof_layout=dof_layout,
             )
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")
