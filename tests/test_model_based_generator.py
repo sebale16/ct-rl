@@ -647,6 +647,98 @@ class TestStructuredDynamics(unittest.TestCase):
         self.assertTrue(th.all(th.isfinite(b)))
 
 
+class TestRawStateLayout(unittest.TestCase):
+    """DOFLayout.raw_state + raw-obs envs: the structured model and the oracle
+    drift on a plain [qpos; qvel] observation (cartpole/acrobot validation)."""
+
+    def test_layout_shape_and_validation(self):
+        lay = DOFLayout.raw_state(nv=2)
+        self.assertEqual((lay.obs_dim, lay.npos, lay.nv), (4, 2, 2))
+        self.assertEqual(lay.cyclic_cfg, ())
+        self.assertEqual(lay.obs_pos_to_cfg, (0, 1))
+
+    def test_structured_drift_and_fits(self):
+        th.manual_seed(0)
+        m = PortHamiltonianModel(4, 1, mode="structured", structured_hidden=(32, 32),
+                                 dof_layout=DOFLayout.raw_state(nv=2))
+        x = th.randn(8, 4); a = th.randn(8, 1)
+        b = m.drift(x, a)
+        self.assertEqual(tuple(b.shape), (8, 4))
+        self.assertTrue(th.all(th.isfinite(b)))
+        # position block is exactly the observed velocity (identity kinematics)
+        self.assertTrue(th.allclose(b[:, :2], x[:, 2:], atol=1e-5))
+        opt = th.optim.Adam(m.parameters(), lr=1e-3)
+        xp = x + 0.05 * th.randn(8, 4)
+        first = m.fit_step(x, a, xp, 0.01, opt)
+        last = first
+        for _ in range(60):
+            last = m.fit_step(x, a, xp, 0.01, opt)
+        self.assertLess(last, first)
+
+    def test_energy_balance_matches_damping_power(self):
+        # same identity as the cheetah layout: with zero action,
+        # dE/dt = -qd^T D qd along the drift
+        th.manual_seed(1)
+        m = PortHamiltonianModel(4, 1, mode="structured", structured_hidden=(32, 32),
+                                 dof_layout=DOFLayout.raw_state(nv=2))
+        x = 0.5 * th.randn(6, 4)
+        xin = x.clone().requires_grad_(True)
+        M = th.vmap(m._mass)(xin[:, :2])
+        E = m._potential(xin[:, :2]) + 0.5 * th.einsum(
+            "na,nab,nb->n", xin[:, 2:], M, xin[:, 2:])
+        (gE,) = th.autograd.grad(E.sum(), xin)
+        with th.no_grad():
+            dEdt = (gE * m.drift(x, th.zeros(6, 1))).sum(-1)
+            D = m._damping(x[:, :2])
+            expected = -th.einsum("na,nab,nb->n", x[:, 2:], D, x[:, 2:])
+        self.assertLess((dEdt - expected).abs().max().item(), 1e-2)
+
+    def _cartpole_raw(self):
+        return DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform", dt=0.01,
+            episode_duration=10.0, seed=0, raw_state_obs=True,
+        )
+
+    def test_ct_sac_oracle_quad_runs_on_raw_cartpole(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = self._cartpole_raw()
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], v_net_arch=[32], device="cpu",
+        )
+        ph = PortHamiltonianModel(od, ad, mode="mujoco",
+                                  drift_fn=env.dynamics_terms)
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=ph, generator_substeps=4,
+            value_warmup=5,
+        )
+        agent.learn(total_timesteps=60)
+
+    def test_ct_sac_structured_roll_runs_on_raw_cartpole(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = self._cartpole_raw()
+        od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], v_net_arch=[32], device="cpu",
+        )
+        ph = PortHamiltonianModel(
+            od, ad, mode="structured", structured_hidden=(32, 32),
+            dof_layout=DOFLayout.raw_state(nv=od // 2),
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", learning_starts=10, batch_size=16,
+            buffer_size=500, num_expectation_samples=2, seed=0,
+            use_model_based_q=True, dynamics_model=ph, dynamics_warmup=5,
+            dynamics_fit_horizon=2, generator_substeps=4, value_warmup=5,
+        )
+        agent.learn(total_timesteps=60)
+        self.assertGreater(agent._dynamics_updates, 5)
+
+
 class TestContactForcePort(unittest.TestCase):
     """Explicit contact-force port (contact_force > 0): learned gap functions
     with unilateral Hunt-Crossley normal forces and regularized Coulomb

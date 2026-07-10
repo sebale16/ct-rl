@@ -39,7 +39,7 @@ class TestGroundTruthExtraction(unittest.TestCase):
         truth = ground_truth(env, obs)
         nq = int(env._env.physics.model.nq)
         # SPD mass, kinetic identity e_kin = 1/2 v^T M v, translation invariance
-        sanity_check_truth(truth, obs, nq=nq)
+        sanity_check_truth(truth, obs, pos_width=nq - 1)
         # cheetah's three root DOFs are unactuated: G rows ~ 0 there, and each
         # actuator drives exactly one joint DOF with its gear value
         G = truth["G"]
@@ -228,6 +228,48 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         m0 = fit_model(env, O, A, NO, DT, DN, steps=1, horizon=1,
                        hidden=(32, 32), log_every=0)
         self.assertNotIn("g_pot_combined", learned_terms(m0, obs))
+
+
+class TestRawStateRecovery(unittest.TestCase):
+    """The generalized extraction on a raw-state env (cartpole): ground truth
+    consistency and the full report through the raw DOFLayout."""
+
+    def _cartpole(self, seed=0):
+        return DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform", dt=0.01,
+            physics_dt=0.002, episode_duration=20.0, seed=seed,
+            raw_state_obs=True,
+        )
+
+    def test_ground_truth_consistency(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = self._cartpole()
+        O, *_ = collect(env, 60, seed=0)
+        obs = O[-30:]
+        truth = ground_truth(env, obs)
+        nq = int(env._env.physics.model.nq)
+        sanity_check_truth(truth, obs.astype(np.float64), pos_width=nq,
+                           check_root_invariance=False)
+        # cartpole-specific physics: gravity is vertical, the slider is
+        # horizontal, so the gravity torque's slider component is zero
+        self.assertLess(np.abs(truth["g_pot"][:, 0]).max(), 1e-9)
+        # and the true M depends only on the pole angle, never the cart position
+        self.assertEqual(truth["M"].shape, (30, 2, 2))
+
+    def test_tiny_fit_produces_finite_report(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = self._cartpole()
+        O, A, NO, DT, DN = collect(env, 300, seed=0)
+        from models.port_hamiltonian import DOFLayout
+        m = fit_model(env, O, A, NO, DT, DN, steps=50, horizon=2,
+                      hidden=(32, 32), log_every=0,
+                      dof_layout=DOFLayout.raw_state(nv=2))
+        obs = O[-50:]
+        truth = ground_truth(env, obs)
+        rep = recovery_report(truth, learned_terms(m, obs))
+        for k, v in rep.items():
+            arr = np.asarray(v, dtype=np.float64)
+            self.assertTrue(np.all(np.isfinite(arr)), k)
 
 
 if __name__ == "__main__":

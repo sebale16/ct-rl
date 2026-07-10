@@ -103,6 +103,22 @@ class DOFLayout:
             assert 0 <= self.contact_tangent_cfg < self.nv, "contact_tangent_cfg out of range"
 
     @classmethod
+    def raw_state(cls, nv: int, act_to_cfg: Optional[Tuple[int, ...]] = None) -> "DOFLayout":
+        """Layout for a raw-state observation [qpos (nv); qvel (nv)] — every
+        config DOF observed as a plain coordinate (hinge/slide joints, nq == nv;
+        the DMCContinuousEnv ``raw_state_obs`` option). No cyclic coordinates
+        and no contact-port fields; suits smooth low-DOF validation systems
+        (cartpole, acrobot, pendulum)."""
+        return cls(
+            obs_dim=2 * int(nv),
+            pos_slice=(0, int(nv)),
+            vel_slice=(int(nv), 2 * int(nv)),
+            cyclic_cfg=(),
+            obs_pos_to_cfg=tuple(range(int(nv))),
+            act_to_cfg=act_to_cfg,
+        )
+
+    @classmethod
     def cheetah(cls, obs_dim: int = 17, action_dim: int = 6) -> "DOFLayout":
         # obs = [qpos[1:] (8), qvel (9)]; root x (config DOF 0) is cyclic (dropped
         # from qpos, kept in qvel). Dense G_a(6->9) reproduces the validated prototype.
