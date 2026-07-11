@@ -6,8 +6,10 @@ robots: noindex
 
 # CT-SAC Sub-Step Quadrature Generator — Setup and Call Stack
 
+Base: https://hackmd.io/@-YScJRgTQoiFn3RF3xJ3Fg/rkgsjiWQzg
+
 :::info
-**Summary.** This document describes a model-based critic target for CT-SAC that estimates the value change over the control interval by a **sub-step quadrature** of the dynamics model, read directly from the decoupled value head. The dynamics model is rolled $m$ Euler sub-steps over the nominal interval, the scalar $V$-head is evaluated at the rolled endpoint, and the value change is taken as a finite difference of $V$ over the predicted states — with no autograd gradient. It is the multi-point generalization of the first-order generator $\Delta t_{\text{default}}\,(b\cdot\nabla V)$ and of the single-step finite difference $V(x+b\,\Delta t_{\text{default}}) - V(x)$. The estimator is controlled by `generator_substeps` on `CTSAC` and is built and validated on `cartpole-swingup`, a smooth system where the learned drift fits well. Background lives in `docs/ct_sac_model_based_call_stack.md` (the first-order generator §6, target variance §7, the $V$-head §9).
+**Summary.** This document describes a model-based critic target for CT-SAC that estimates the value change over the control interval by a **sub-step quadrature** of the dynamics model, read directly from the decoupled value head. The dynamics model is integrated over the full nominal interval using the same finite-duration flow routine as its supervised fit, the scalar $V$-head is evaluated at the rolled endpoint, and the value change is taken as a finite difference of $V$ over the predicted states — with no autograd gradient. `generator_substeps` requests a minimum resolution, while a finer exposed physics step takes precedence. This is the multi-point generalization of the first-order generator $\Delta t_{\text{default}}\,(b\cdot\nabla V)$. Background lives in `docs/ct_sac_model_based_call_stack.md` (the first-order generator §6, target variance §7, the $V$-head §9).
 :::
 
 [TOC]
@@ -39,33 +41,41 @@ $$
 
 The first-order generator approximates this with the left-endpoint rule, $(\mathcal{L}^a V)(x_0)\,\Delta t_{\text{default}} = \Delta t_{\text{default}}\,(b\cdot\nabla V)$, which is one rate sample.
 
-The sub-step quadrature instead rolls the model $m$ Euler sub-steps of size $h = \Delta t_{\text{default}}/m$ and reads the value change from the $V$-head at the endpoints:
+The sub-step quadrature instead calls the shared flow integrator. Let $h_{\text{dyn}}$ be the configured or environment-exposed dynamics step when available. `generator_substeps` $m$ requests $\Delta t_{\text{default}}/m$, and the effective integration is
+
+$$
+h_{\max}=\min\!\left(\frac{\Delta t_{\text{default}}}{m},h_{\text{dyn}}\right),
+\qquad n=\left\lceil\frac{\Delta t_{\text{default}}}{h_{\max}}\right\rceil,
+\qquad h=\frac{\Delta t_{\text{default}}}{n},
+$$
+
+with $h_{\max}=\Delta t_{\text{default}}/m$ when no $h_{\text{dyn}}$ is known, followed by
 
 $$
 \hat x_0 = x,\qquad \hat x_{k+1} = \hat x_k + b(\hat x_k, a)\,h,\qquad
-\boxed{\;\ell_f = \big(V(\hat x_m) - V(x)\big) - \beta\,V(x)\;}
+\boxed{\;\ell_f = \big(V(\hat x_n) - V(x)\big) - \beta\,V(x)\;}.
 $$
 
-and the critic target is $\text{target} = r + (1-\text{done})\,(V(x) + \ell_f) = r + V(\hat x_m) - \beta V(x)$.
+The critic target is $\text{target} = r + (1-\text{done})\,(V(x) + \ell_f) = r + V(\hat x_n) - \beta V(x)$.
 
-The change of $V$ along the rolled orbit, $V(\hat x_m) - V(x)$, is the telescoped sum of the sub-step changes, so it is the finite-difference reading of $\int (\mathcal{L}^a V)\,ds$ over the predicted trajectory. No autograd gradient is taken; the value gradient and its curvature enter through the finite difference of the (clean, state-only) $V$-head.
+The change of $V$ along the rolled orbit, $V(\hat x_n) - V(x)$, is the telescoped sum of the sub-step changes, so it is the finite-difference reading of $\int (\mathcal{L}^a V)\,ds$ over the predicted trajectory. No autograd gradient is taken; the value gradient and its curvature enter through the finite difference of the (clean, state-only) $V$-head.
 
 **Two limits and what each captures.**
 
 | `generator_substeps` $m$ | estimator | captures |
 |---|---|---|
 | 0 | $\Delta t_{\text{default}}\,(b\cdot\nabla V) - \beta V$ (autograd) | first-order rate at $x$ |
-| 1 | $\big(V(x + b\,\Delta t_{\text{default}}) - V(x)\big) - \beta V$ | value change along one Euler step (curvature along $b\,\Delta t_{\text{default}}$ included) |
-| $m > 1$ | $\big(V(\hat x_m) - V(x)\big) - \beta V$ | value change along the $m$-sub-step orbit (reduced Euler error in $\hat x_m$) |
+| 1 | $\big(V(\widehat\Phi_{\Delta t_{\text{default}}}^a(x)) - V(x)\big) - \beta V$ | value change along the integrated orbit; one Euler step only if no finer $h_{\text{dyn}}$ applies |
+| $m > 1$ | $\big(V(\widehat\Phi_{\Delta t_{\text{default}}}^a(x)) - V(x)\big) - \beta V$ | same value change with a requested step no larger than $\Delta t_{\text{default}}/m$ |
 
-The $m=1$ case is the single-Euler-step finite difference over states: it already captures the curvature the first-order autograd term drops, because $V(x + b\,\Delta t_{\text{default}}) - V(x) = \Delta t_{\text{default}}(b\cdot\nabla V) + \tfrac12 (b\,\Delta t_{\text{default}})^\top \nabla^2 V (b\,\Delta t_{\text{default}}) + \cdots$. Larger $m$ refines the rolled endpoint toward the true model flow (Euler error $O(1/m)$), which matters when $\lVert b\,\Delta t_{\text{default}}\rVert$ is not small.
+Even $m=1$ uses a finite difference of $V$ over states, so it captures curvature that the first-order autograd term drops. When $h_{\text{dyn}}\ge\Delta t_{\text{default}}$, this reduces to the literal single-step expression $V(x + b\,\Delta t_{\text{default}}) - V(x)$. Increasing $m$ refines the rolled endpoint toward the model flow, while an already finer $h_{\text{dyn}}$ prevents the critic from querying the vector field more coarsely than the dynamics fit.
 
 :::warning
 **Discount convention (a simplification).** The discount is kept as the single lump $-\beta V(x)$, matching the first-order target's $\Delta t_{\text{default}}(b\cdot\nabla V) - \beta V$ structure. A fuller treatment would discount each sub-step along the orbit. The drift contribution is the part the quadrature refines.
 :::
 
 :::info
-**Why the $V$-head matters here.** $V$ is read from the decoupled state-only head $V_\psi$ (`docs/ct_sac_model_based_call_stack.md` §9), so $V(\hat x_m)$ and $V(x)$ are clean scalar evaluations with no action sampling. The whole estimator runs under `th.no_grad()`; the target is deterministic given the batch (verified sample-free). Without the $V$-head it falls back to the sampled $\mathbb{E}_a[\tilde Q]$ at the rolled state, which reintroduces action-sampling noise.
+**Why the $V$-head matters here.** $V$ is read from the decoupled state-only head $V_\psi$ (`docs/ct_sac_model_based_call_stack.md` §9), so $V(\widehat\Phi(x))$ and $V(x)$ are clean scalar evaluations with no action sampling. The whole estimator runs under `th.no_grad()`; the target is deterministic given the batch (verified sample-free). Without the $V$-head it falls back to the sampled $\mathbb{E}_a[\tilde Q]$ at the rolled state, which reintroduces action-sampling noise.
 :::
 
 ---
@@ -97,9 +107,9 @@ flowchart TD
     MB --> BR{"generator_substeps >= 1?"}
     BR -->|"no"| GEN["first-order: dt_default (b . grad V) via autograd"]
     BR -->|"yes"| QUAD["_substep_quadrature_target"]
-    QUAD --> ROLL["roll m Euler sub-steps: x_hat = x_hat + b(x_hat,a) h"]
-    ROLL --> VEND["V-head at endpoints: V(x_hat_m), V(x)"]
-    VEND --> LF["lf = (V(x_hat_m) - V(x)) - beta V(x)"]
+    QUAD --> ROLL["shared flow integrator: full nominal interval, steps <= min(dt/m, physics step)"]
+    ROLL --> VEND["V-head at endpoints: V(x_hat_n), V(x)"]
+    VEND --> LF["lf = (V(x_hat_n) - V(x)) - beta V(x)"]
     LF --> TGT["target = r + V(x) + lf"]
     GEN --> TGT
     FD --> TGT
@@ -116,9 +126,10 @@ The quadrature branch is entered at the top of `_model_based_target` when `gener
 
 | Test | Claim |
 |---|---|
-| `test_m1_matches_finite_difference_over_states` | $m=1$ reproduces $V(x + b\,\Delta t_{\text{default}}) - V(x) - \beta V(x)$ exactly |
+| `test_m1_matches_finite_difference_over_states` | in the fixture where the physics and nominal steps coincide, $m=1$ reproduces $V(x + b\,\Delta t_{\text{default}}) - V(x) - \beta V(x)$ exactly |
 | `test_target_finite_and_sample_free` | $m=4$ target is finite, shape $(B,1)$, and identical across RNG seeds (no action sampling) |
 | `test_substeps_reduce_integration_error` | on a linear drift, target$(m{=}8)$ is closer to a fine reference target$(m{=}128)$ than target$(m{=}1)$ |
+| `test_target_uses_finer_exposed_physics_step` | the target uses the exposed 2 ms physics step when it is finer than $\Delta t_{\text{default}}/m$ |
 
 The integration property is clean: on a linear system $\dot x = Ax$ with $\lVert A\,\Delta t\rVert \sim O(1)$, the Euler-rolled endpoint converges to the exact flow $e^{A\Delta t}x$ with error halving each time $m$ doubles ($O(1/m)$).
 
@@ -134,9 +145,9 @@ The integration property is clean: on a linear system $\dot x = Ax$ with $\lVert
 
 The quadrature reduces the integration (truncation) error of the model-based target and removes the autograd value gradient. Its accuracy is bounded by the dynamics model: every predicted sub-state $\hat x_k$ is a model output, so on contact-rich systems (cheetah, humanoid) the rolled states go off-distribution and inherit the model's contact inaccuracy (`docs/ct_sac_model_based_call_stack.md` §6; the dyna collapse). The estimator is therefore matched to smooth, accurate-model regimes — cartpole here, and the trading SDE.
 
-The real successor $x'$ is already available in the batch, and $V_\psi(x') - V_\psi(x)$ is the exact, sample-free value change for the actual transition. The model-rolled endpoint $\hat x_m$ adds value beyond that for variance reduction under stochasticity ($\sigma \neq 0$), for evaluation at off-sample actions, and for sub-control-step resolution the environment does not return. In the deterministic uniform-$\Delta t$ cartpole setup the main quantity being checked is whether the quadrature recovers the value change the first-order generator approximates.
+The real successor $x'$ is already available in the batch, and $V_\psi(x') - V_\psi(x)$ is the exact, sample-free value change for the actual transition. The model-rolled endpoint $\widehat\Phi(x)$ adds value beyond that for variance reduction under stochasticity ($\sigma \neq 0$), for evaluation at off-sample actions, and for sub-control-step resolution the environment does not return. In the deterministic uniform-$\Delta t$ cartpole setup the main quantity being checked is whether the quadrature recovers the value change the first-order generator approximates.
 
-The estimator leaves the value-iteration's contraction properties unchanged (`docs/ct_sac_model_based_call_stack.md` §7.2): differencing $V$ over the real $x'$ is the contractive model-free backup, while the model-based quadrature relies on the rolled $\hat x_m$ and so inherits the generator's stability properties. Leaning on the real $x'$ moves it toward the contractive backup; leaning on $\hat x_m$ moves it toward the generator.
+The estimator leaves the value-iteration's contraction properties unchanged (`docs/ct_sac_model_based_call_stack.md` §7.2): differencing $V$ over the real $x'$ is the contractive model-free backup, while the model-based quadrature relies on the rolled $\widehat\Phi(x)$ and so inherits the generator's stability properties. Leaning on the real $x'$ moves it toward the contractive backup; leaning on the model flow moves it toward the generator.
 
 ---
 

@@ -8,7 +8,7 @@ from environment.dmc import DMCContinuousEnv
 from algorithms.ct_sac import CTSAC
 from common.buffers import ReplayBuffer
 from models.actor_q_critic import ActorQCriticModel
-from models.port_hamiltonian import DOFLayout, PortHamiltonianModel
+from models.port_hamiltonian import DOFLayout, PortHamiltonianModel, integrate_drift
 
 
 def _corr_slope(pred: th.Tensor, target: th.Tensor):
@@ -56,6 +56,94 @@ def _train_eval_phast(O, A, NO, DT, n_train, steps=1500, hidden=(128, 128)):
         fd = (NO[n_train:] - O[n_train:]) / (DT[n_train:] + 1e-12)
         corr, _ = _corr_slope(b, fd)
     return ph, mse / noop, corr
+
+
+class TestVariableDurationIntegration(unittest.TestCase):
+    """The shared flow integrator keeps irregular outer durations while using a
+    bounded internal Euler step and remains differentiable for model fitting."""
+
+    def test_mixed_durations_keep_full_interval_and_skip_inactive_samples(self):
+        calls = []
+
+        def constant_drift(x, a):
+            calls.append(x.shape[0])
+            return a
+
+        x = th.zeros(4, 2)
+        a = th.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        dt = th.tensor([[0.0], [0.002], [0.010], [0.030]])
+        pred = integrate_drift(constant_drift, x, a, dt, max_step=0.002)
+
+        self.assertTrue(th.allclose(pred, a * dt))
+        # 0 + 1 + 5 + 15 active sample-steps: long intervals are resolved, while
+        # completed/zero-duration samples are not reevaluated at every inner step.
+        self.assertEqual(sum(calls), 21)
+        self.assertEqual(len(calls), 15)
+
+    def test_finer_integration_is_more_accurate_and_backpropagates(self):
+        scale = th.nn.Parameter(th.tensor(1.0))
+
+        def linear_drift(x, _a):
+            return scale * x
+
+        x = th.ones(3, 1)
+        a = th.zeros(3, 1)
+        dt = th.tensor([[0.002], [0.010], [0.030]])
+        coarse = integrate_drift(linear_drift, x, a, dt)
+        fine = integrate_drift(linear_drift, x, a, dt, max_step=0.002)
+        exact = th.exp(dt)
+
+        self.assertLess((fine - exact).abs().mean(), (coarse - exact).abs().mean())
+        fine.sum().backward()
+        self.assertIsNotNone(scale.grad)
+        self.assertTrue(th.isfinite(scale.grad))
+        self.assertNotEqual(scale.grad.item(), 0.0)
+
+    def test_intermediate_guard_does_not_saturate_endpoint_gradient(self):
+        force = th.nn.Parameter(th.tensor(100.0))
+
+        def bad_drift(x, _a):
+            return th.ones_like(x) * force
+
+        pred = integrate_drift(
+            bad_drift,
+            th.zeros(1, 1),
+            th.zeros(1, 1),
+            0.01,
+            max_step=0.002,
+            delta_limit=th.tensor([[0.001]]),
+            clamp_final=False,
+        )
+        pred.square().sum().backward()
+        self.assertIsNotNone(force.grad)
+        self.assertTrue(th.isfinite(force.grad))
+        self.assertNotEqual(force.grad.item(), 0.0)
+
+    def test_rejects_invalid_duration_or_step(self):
+        drift = lambda x, a: th.zeros_like(x)
+        x, a = th.zeros(1, 2), th.zeros(1, 1)
+        for bad_dt in (-0.1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                integrate_drift(drift, x, a, bad_dt, max_step=0.002)
+        for bad_step in (0.0, -0.1, float("nan")):
+            with self.assertRaises(ValueError):
+                integrate_drift(drift, x, a, 0.01, max_step=bad_step)
+
+    def test_structured_flow_runs_under_no_grad(self):
+        model = PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(16,)
+        )
+        with th.no_grad():
+            pred = integrate_drift(
+                model.drift,
+                th.randn(2, 17),
+                th.randn(2, 6),
+                th.tensor([[0.002], [0.004]]),
+                max_step=0.002,
+            )
+        self.assertEqual(tuple(pred.shape), (2, 17))
+        self.assertTrue(th.all(th.isfinite(pred)))
+        self.assertFalse(pred.requires_grad)
 
 
 class TestModelBasedGenerator(unittest.TestCase):
@@ -477,6 +565,44 @@ class TestSubstepQuadrature(unittest.TestCase):
         self.assertFalse(t1.requires_grad)
         self.assertLess((t1 - t2).abs().max().item(), 1e-6)
 
+    def test_target_uses_finer_exposed_physics_step(self):
+        """The shared flow resolution is the finer of dt_default/m and the
+        environment physics step; this aligns benchmark fitting and target use."""
+        env = DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform",
+            dt=0.01, physics_dt=0.002, episode_duration=10.0, seed=0,
+        )
+        od = int(env.observation_space.shape[0])
+
+        class CountingDynamics(th.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+            def drift(self, obs, action):
+                self.calls += 1
+                return th.zeros_like(obs)
+            def diffusion(self, obs):
+                return None
+
+        dynamics = CountingDynamics()
+        model = ActorQCriticModel(
+            observation_space=env.observation_space, action_space=env.action_space,
+            q_net_arch=[32], pi_net_arch=[32], v_net_arch=[32], device="cpu",
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", buffer_size=100,
+            use_model_based_q=True, dynamics_model=dynamics,
+            generator_substeps=4,
+        )
+        self.assertAlmostEqual(agent.dynamics_integration_step, 0.002)
+        self.assertAlmostEqual(agent._integration_max_step(), 0.002)
+        obs = th.zeros(3, od)
+        act = th.zeros(3, int(env.action_space.shape[0]))
+        agent._substep_quadrature_target(
+            obs, act, th.zeros(3, 1), th.zeros(3, 1), th.tensor(agent.alpha)
+        )
+        self.assertEqual(dynamics.calls, 5)  # 10 ms / 2 ms
+
     def test_substeps_reduce_integration_error(self):
         """More sub-steps roll the model more accurately, so the target converges:
         target(m=8) is closer to a fine reference target(m=128) than target(m=1)."""
@@ -886,13 +1012,13 @@ class TestRolloutFit(unittest.TestCase):
         xp = x + 0.05 * th.randn(8, 17)
 
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
-        one = m.fit_step(x, a, xp, 0.01, opt)
+        one = m.fit_step(x, a, xp, 0.01, opt, max_step=0.002)
 
         m.load_state_dict(state)
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         roll = m.fit_step_rollout(
             x, a.unsqueeze(1), xp.unsqueeze(1), th.full((8, 1, 1), 0.01),
-            th.ones(8, 1, 1), opt,
+            th.ones(8, 1, 1), opt, max_step=0.002,
         )
         self.assertLess(abs(one - roll), 1e-6)
 
@@ -909,12 +1035,15 @@ class TestRolloutFit(unittest.TestCase):
         mask = th.tensor([1.0, 0.0, 0.0]).view(1, 3, 1).expand(8, 3, 1)
 
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
-        l_masked = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+        l_masked = m.fit_step_rollout(
+            x, A, XP, dt, mask, opt, max_step=0.002
+        )
 
         m.load_state_dict(state)
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         l_short = m.fit_step_rollout(
-            x, A[:, :1], XP[:, :1], dt[:, :1], th.ones(8, 1, 1), opt
+            x, A[:, :1], XP[:, :1], dt[:, :1], th.ones(8, 1, 1), opt,
+            max_step=0.002,
         )
         self.assertLess(abs(l_masked - l_short), 1e-6)
 
@@ -987,22 +1116,22 @@ class TestNumericalStabilityGuards(unittest.TestCase):
         mask = th.ones(batch, horizon, 1)
         return x, A, XP, dt, mask
 
-    def test_explosive_rollout_cannot_nan_parameters(self):
-        """A model whose drift is astronomically wrong overflows the rollout
-        loss; the update must be skipped and every parameter stay finite."""
+    def test_explosive_internal_roll_is_bounded_and_cannot_nan_parameters(self):
+        """Even an astronomically wrong drift is cumulatively clamped after each
+        internal flow step, so it cannot overflow before the outer guard runs."""
         th.manual_seed(0)
         m = PortHamiltonianModel(17, 6, mode="structured", structured_hidden=(32, 32))
         with th.no_grad():
             m.G_a.weight.mul_(1e20)  # drift ~ 1e20 -> loss overflows to inf
-        before = {k: v.clone() for k, v in m.state_dict().items()}
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         x, A, XP, dt, mask = self._windows()
         for _ in range(3):
-            loss = m.fit_step_rollout(x, A, XP, dt, mask, opt)
-        self.assertFalse(np.isfinite(loss))  # reported faithfully
+            loss = m.fit_step_rollout(
+                x, A, XP, dt, mask, opt, max_step=0.002
+            )
+        self.assertTrue(np.isfinite(loss))
         for k, v in m.state_dict().items():
             self.assertTrue(th.all(th.isfinite(v)), k)
-            self.assertTrue(th.equal(v, before[k]), f"{k} updated on inf loss")
 
     def test_huge_but_finite_loss_takes_clipped_step(self):
         """A large finite loss must still update (clipped), not be skipped."""
@@ -1023,8 +1152,8 @@ class TestNumericalStabilityGuards(unittest.TestCase):
             self.assertTrue(th.all(th.isfinite(v)), k)
 
     def test_compounding_steps_are_clamped(self):
-        """The k>=1 Euler increments saturate at the data-derived bound, so a
-        bad drift cannot compound the rolled state to overflow."""
+        """Every outer transition and its internal substeps saturate at the
+        data-derived cumulative bound, so a bad drift cannot overflow."""
         th.manual_seed(0)
         m = PortHamiltonianModel(17, 6, mode="structured", structured_hidden=(32, 32))
         with th.no_grad():
@@ -1033,15 +1162,14 @@ class TestNumericalStabilityGuards(unittest.TestCase):
         # reproduce the roll's forward pass bound: 5 * max observed step + 1e-3
         obs_steps = XP - th.cat([x.unsqueeze(1), XP[:, :-1]], dim=1)
         limit = 5.0 * obs_steps.abs().amax(dim=1) + 1e-3
-        # worst possible rolled state: |x_hat| <= |x| + |step0| + (H-1)*limit,
-        # with step0 the unclamped first increment
-        with th.no_grad():
-            b0 = m.drift(x, A[:, 0])
-        bound = x.abs() + (b0 * 0.01).abs() + 3 * limit
+        # Each of the H transitions can move at most one window-derived limit.
+        bound = x.abs() + 4 * limit
         # run the fit and check the loss stayed finite (no overflow), which
         # only the clamp guarantees at this drift scale
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
-        loss = m.fit_step_rollout(x, A, XP, dt, mask, opt)
+        loss = m.fit_step_rollout(
+            x, A, XP, dt, mask, opt, max_step=0.002
+        )
         worst = float(bound.max())
         self.assertTrue(np.isfinite(loss))
         self.assertLess((worst ** 2), np.finfo(np.float32).max)

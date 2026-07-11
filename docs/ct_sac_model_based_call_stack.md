@@ -6,6 +6,8 @@ robots: noindex
 
 # CT-SAC Model-Based Extension — Implementation and Training Call Stack
 
+Base: https://hackmd.io/@-YScJRgTQoiFn3RF3xJ3Fg/rkgsjiWQzg
+
 :::info
 **Summary.** This document describes the model-based extension of CT-SAC: a port-Hamiltonian dynamics model (`PortHamiltonianModel`) supplies the drift `b(x,a)`, which lets the critic target be computed from a *model* of the dynamics — the analytic generator $(\mathcal{L}^a V) = b\cdot\nabla V$. (The model-free baseline computes the same target from a finite difference over a sampled successor state.) The document first explains how the dynamics model is implemented, then walks the modified training call stack, and finally compares the two paths. File/line references point to `algorithms/ct_sac.py` and `models/port_hamiltonian.py`.
 :::
@@ -70,10 +72,10 @@ All of `H_θ`, `_J_raw`, `d₀`, `L`, and `G_a` are learnable parameters of a **
 
 ### 2.3 Fitting the learned model
 
-`fit_step(obs, action, next_obs, dt, optimizer)` (lines 128–140) is one supervised step: it minimizes the one-step prediction error `‖(x + b·dt) − x'‖²` and updates the model parameters.
+`fit_step(obs, action, next_obs, dt, optimizer, max_step=...)` is one supervised flow-matching step. It integrates the learned drift over each transition's complete recorded duration, holding its action fixed and using internal Euler steps no larger than the exposed physics step, then minimizes `‖Phi_hat_dt^a(x) − x'‖²`. The irregular replay durations are not rounded, discarded, or replaced.
 
 :::warning
-**Relation to the PHAST paper.** This is a deliberately reduced, UNKNOWN-regime model. It uses a generic energy MLP, a free skew `J`, a constant `R`, forward-Euler one-step fitting, and the one-step data loss alone; the observations already contain velocities, so the velocity observer / canonicalizer is omitted. The paper's fuller model adds the separable form `H = V(q) + ½pᵀM(q)⁻¹p`, the canonical symplectic `J`, a state-dependent `D(q)`, Strang splitting, and passivity / energy / rollout losses. The reduced model retains the port-Hamiltonian *form* and its passivity-by-construction; the remaining physical structure is left for later milestones.
+**Relation to the PHAST paper.** The generic `phast` mode remains a deliberately reduced, UNKNOWN-regime model: a generic energy MLP, a free skew `J`, a constant `R`, and explicit-Euler integration. The current implementation adds finite-duration flow matching and optional multi-transition rollout loss, while the fuller `structured` mode adds the separable form `H = V(q) + ½pᵀM(q)⁻¹p`, canonical mechanical structure, and explicit contact modeling. The observations already contain velocities, so a separate velocity observer is unnecessary.
 :::
 
 ---
@@ -86,7 +88,7 @@ All of `H_θ`, `_J_raw`, `d₀`, `L`, and `G_a` are learnable parameters of a **
 flowchart TD
     T["train(): sample replay batch (x, a, r, x', u)"] --> AL["entropy temperature (alpha) update"]
     AL --> DYN{"_train_dynamics?  (learned model has params)"}
-    DYN -->|"yes (phast)"| FIT["fit_step(): supervised next-state fit  (ct_sac.py:209)"]
+    DYN -->|"yes (learned)"| FIT["fit_step(): supervised finite-duration flow match"]
     DYN -->|"no (oracle / model-free)"| GATE
     FIT --> GATE{"use_model_based_q AND dynamics_ready?"}
     GATE -->|"yes"| MG["_model_based_target  (b·grad V, no x')"]
@@ -104,25 +106,26 @@ Runs only for a trainable model (`_train_dynamics=True`; the oracle has no param
 ```python
 if self._train_dynamics:
     dynamics_loss = self.dynamics_model.fit_step(
-        obs, actions, next_obs, dt, self.dynamics_optimizer)
+        obs, actions, next_obs, dt, self.dynamics_optimizer,
+        max_step=self._integration_max_step())
     self._dynamics_updates += 1
 ```
 
-The model has its **own optimizer** (`self.dynamics_optimizer`, built over the model's parameters in `__init__`, line 134) and is trained purely by supervised next-state prediction — **decoupled** from the critic/actor losses.
+The model has its **own optimizer** (`self.dynamics_optimizer`, built over the model's parameters in `__init__`) and is trained purely by supervised transition-endpoint prediction — **decoupled** from the critic/actor losses.
 
 ### 3.2 The `fit_step` sub-chain
 
 ```mermaid
 flowchart TD
-    F["fit_step()  (port_hamiltonian.py:128)"] --> P["pred = x + drift(x,a)*dt"]
-    P --> D["drift(): (J - R) grad H + G_a a  (:107)"]
-    D --> G["_grad_H(): autograd grad of energy MLP, create_graph=True  (:96)"]
-    F --> LO["loss = mean(||pred - x'||^2)"]
-    LO --> B["loss.backward()  — second-order  (:138)"]
-    B --> S["optimizer.step()  — update H_theta, J, R, G_a  (:139)"]
+    F["fit_step(): transition x,a,x',dt"] --> P["integrate_drift over full dt; action fixed; internal h <= max_step"]
+    P --> D["drift() at every predicted internal state"]
+    D --> G["structured energy / mass / contact derivatives"]
+    F --> LO["loss = mean(||Phi_hat_dt(x,a) - x'||^2)"]
+    LO --> B["loss.backward() through the whole internal flow"]
+    B --> S["gradient clip + optimizer.step()"]
 ```
 
-Because the loss depends on `∇H` (the drift *is* a gradient of the energy), `loss.backward()` is a **second-order / double backward** — it differentiates through the autograd-computed `∇H` into the MLP weights, which is why `_grad_H` sets `create_graph=True`.
+Because the loss depends on energy derivatives, `loss.backward()` differentiates through those derivatives and through every internal integration step. Long replay intervals therefore constrain the accumulated model flow rather than training the initial drift against a coarse secant.
 
 ### 3.3 Warmup gate (ct_sac.py:219–220)
 
@@ -205,7 +208,7 @@ Gentler actions shrink $\lVert b\rVert$, but cheetah-run rewards forward speed, 
 | 0.01 (benchmark) | $\approx 6.7$ | 0.25 | 0.21 | **0.89** |
 | 0.03 (benchmark max) | $\approx 25$ | 0.85 | 0.15 | **0.45** |
 
-**A finite difference over states removes the $\nabla V$-quality limit.** The estimate $V(x + b\,\Delta t) - V(x)$ reads the value change from two evaluations of $V$ at the current state and the model-predicted endpoint $\hat x = x + b\,\Delta t$, with no autograd gradient. It differs from the true $\Delta V = V(x') - V(x)$ only by $V(\hat x) - V(x')$, i.e. by the displacement mismatch $b\,\Delta t - \Delta x$, so its correlation tracks $1 - \text{mismatch}$: $\approx 1.00$ at the floor (5% mismatch), down to 0.45 at $\Delta t = 0.03$ (85% mismatch). This is the $m=1$ sub-step quadrature target (see the sub-step quadrature doc); it attains the finite difference's accuracy without sampling $x'$, so without the $1/u$ variance (§7.1). Two conditions attach. (i) It requires a clean $V$: with the single-sample $\mathbb{E}_a[\tilde Q]$ the finite difference of a noisy value caps the correlation at $\approx 0.5$ and the centered variant collapses (the same single-sample noise pulls $g_1$ down to the $\approx 0.24$ level of the decomposition table below), which is the reason for the scalar $V$-head (§9). (ii) The residual is now entirely the dynamics model's displacement accuracy — measured here with the MuJoCo oracle, so a learned drift's larger mismatch is the operative ceiling.
+**A finite difference over states removes the $\nabla V$-quality limit.** The estimate $V(x + b\,\Delta t) - V(x)$ reads the value change from two evaluations of $V$ at the current state and the model-predicted endpoint $\hat x = x + b\,\Delta t$, with no autograd gradient. It differs from the true $\Delta V = V(x') - V(x)$ only by $V(\hat x) - V(x')$, i.e. by the displacement mismatch $b\,\Delta t - \Delta x$, so its correlation tracks $1 - \text{mismatch}$: $\approx 1.00$ at the floor (5% mismatch), down to 0.45 at $\Delta t = 0.03$ (85% mismatch). This was the one-Euler-step quadrature diagnostic; the current target replaces that endpoint with the internally resolved flow $\widehat\Phi^a_{\Delta t}(x)$. It attains the finite difference's accuracy without sampling $x'$, so without the $1/u$ variance (§7.1). Two conditions attach. (i) It requires a clean $V$: with the single-sample $\mathbb{E}_a[\tilde Q]$ the finite difference of a noisy value caps the correlation at $\approx 0.5$ and the centered variant collapses (the same single-sample noise pulls $g_1$ down to the $\approx 0.24$ level of the decomposition table below), which is the reason for the scalar $V$-head (§9). (ii) The residual is now entirely the dynamics model's displacement accuracy — measured here with the MuJoCo oracle, so a learned drift's larger mismatch is the operative ceiling.
 
 **The physics floor is the obstacle (for the autograd first-order term).** The CT-RL paper's finest timestep for cheetah is $\Delta t_{\text{physics}} = 0.002$ (the MuJoCo model's native step is $0.01$). The generator's clean regime needs $\Delta t \lesssim 0.001$ — *below* the floor. So across the paper's entire legitimate control range $\Delta t \in [0.002, 0.03]$ the first-order step is biased; $\Delta t = 0.002$ is the borderline. Reaching the clean regime would require sub-physics-step control, which is not a valid configuration.
 
