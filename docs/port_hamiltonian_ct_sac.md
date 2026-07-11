@@ -6,6 +6,8 @@ robots: noindex
 
 # Model-Based Generator Estimation for Continuous-Time SAC via a Port-Hamiltonian Dynamics Model
 
+Base: https://hackmd.io/@-YScJRgTQoiFn3RF3xJ3Fg/rkgsjiWQzg
+
 :::info
 **Summary.** This document specifies a design that replaces the model-free, sample-based estimation of the continuous-time advantage-rate function $q$ in CT-SAC with a model-based evaluation of the stochastic generator. A port-Hamiltonian dynamics model supplies the drift $b$ — the "$b$ term" of Eq. 6 — so that the generator $(\mathcal{L}^a V)$ can be evaluated analytically, removing the dependence on a sampled successor state. The port-Hamiltonian is obtained either from the simulator (MuJoCo) or learned with PHAST. The initial implementation targets `cheetah-run`, validates the analytic generator against the existing finite-difference estimator, and defers the diffusion (noise) term to a later milestone.
 :::
