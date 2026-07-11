@@ -11,6 +11,7 @@ from .off_policy import OffPolicyAlgorithm
 from common.schedules import Schedule
 from common.buffers import ReplayBatch
 from models.actor_q_critic import ActorQCriticModel
+from models.port_hamiltonian import integrate_drift
 
 
 class CTSAC(OffPolicyAlgorithm):
@@ -58,6 +59,7 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
         dynamics_fit_horizon: int = 1,
+        dynamics_integration_step: Optional[float] = None,
         generator_gate_scale: float = 0.0,
         value_warmup: int = 0,
         generator_substeps: int = 0,
@@ -122,11 +124,28 @@ class CTSAC(OffPolicyAlgorithm):
         # analytic drift is trusted; elsewhere it falls back to the realized drift
         # (x'_i - x_i)/dt. 0 (default) => pure generator (no gating).
         self.generator_gate_scale = float(generator_gate_scale)
-        # Sub-step quadrature: roll the model this many Euler sub-steps over the
-        # nominal interval and read the value change from the V-head endpoints,
-        # instead of the first-order autograd term dt_default*(b.grad V).
+        # Sub-step quadrature: request at least this many Euler sub-steps over the
+        # nominal interval and read the value change from the V-head endpoints.
+        # An exposed finer physics/integration step takes precedence.
         # 0 (default) => first-order autograd generator. >=1 => quadrature.
         self.generator_substeps = int(generator_substeps)
+        # Maximum internal step used to turn the instantaneous drift into a
+        # finite-duration flow. Replay keeps every irregular transition duration;
+        # this only controls the numerical solver inside the fit/critic target.
+        # Prefer the environment's physics resolution when it is exposed.
+        if dynamics_integration_step is None:
+            dynamics_integration_step = self._infer_physics_step(self.env)
+        if dynamics_integration_step is not None:
+            dynamics_integration_step = float(dynamics_integration_step)
+            if (
+                not np.isfinite(dynamics_integration_step)
+                or dynamics_integration_step <= 0.0
+            ):
+                raise ValueError(
+                    "dynamics_integration_step must be finite and > 0, got "
+                    f"{dynamics_integration_step}"
+                )
+        self.dynamics_integration_step = dynamics_integration_step
         self.dynamics_source = str(dynamics_source)
         self.human_input_intensity = float(human_input_intensity)
         self.dynamics_model = dynamics_model
@@ -137,10 +156,10 @@ class CTSAC(OffPolicyAlgorithm):
         # the replay buffer. Models with no trainable parameters (e.g. the MuJoCo
         # oracle) skip this and are used from the first step.
         self.dynamics_warmup = int(dynamics_warmup)
-        # Multi-step rollout fit: with horizon H > 1 the model is fit on its own
-        # H-step Euler rollouts over replay windows (fit_step_rollout) instead of
-        # the one-step prediction, matching how the generator/quadrature targets
-        # consume it. H = 1 keeps the one-step fit.
+        # Multi-transition rollout fit: with horizon H > 1 the model is fit on its
+        # own flow across H replay intervals instead of a single endpoint. Each
+        # irregular interval is internally integrated at _integration_max_step,
+        # matching how the generator/quadrature target consumes the vector field.
         self.dynamics_fit_horizon = max(1, int(dynamics_fit_horizon))
         self._dynamics_updates = 0
         self._train_dynamics = False
@@ -186,6 +205,38 @@ class CTSAC(OffPolicyAlgorithm):
 
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
+
+    @staticmethod
+    def _infer_physics_step(env) -> Optional[float]:
+        """Read a physics-solver step through vector/wrapper layers when available."""
+        current = env.envs[0] if hasattr(env, "envs") and env.envs else env
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            value = getattr(current, "physics_dt", None)
+            if value is not None:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and np.isfinite(value) and value > 0.0:
+                    return value
+            current = getattr(current, "env", None)
+        return None
+
+    def _integration_max_step(self) -> Optional[float]:
+        """Internal flow resolution shared by dynamics fit and quadrature.
+
+        ``generator_substeps`` remains a requested target resolution. If the
+        environment exposes a finer physics step, both consumers use that finer
+        value so the learned vector field is trained and queried consistently.
+        """
+        candidates = []
+        if self.dynamics_integration_step is not None:
+            candidates.append(float(self.dynamics_integration_step))
+        if self.generator_substeps >= 1:
+            candidates.append(self.dt_default / float(self.generator_substeps))
+        return min(candidates) if candidates else None
 
     # ------------------------ persistence ------------------------
 
@@ -281,13 +332,20 @@ class CTSAC(OffPolicyAlgorithm):
                     dynamics_loss = self.dynamics_model.fit_step_rollout(
                         seq.observations, seq.actions, seq.next_observations,
                         seq.dt, seq.mask, self.dynamics_optimizer,
+                        max_step=self._integration_max_step(),
                     )
                 else:
                     dynamics_loss = self.dynamics_model.fit_step(
                         obs, actions, next_obs, dt, self.dynamics_optimizer,
+                        max_step=self._integration_max_step(),
                     )
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
+                if self._integration_max_step() is not None:
+                    self.logger.record(
+                        "train/dynamics_integration_step",
+                        self._integration_max_step(),
+                    )
 
             ## Value head update (optional explicit scalar V(s) head)
             # Regress V_psi(s) to the soft state-value E_a[Q~(s,a)]. The label's
@@ -462,11 +520,13 @@ class CTSAC(OffPolicyAlgorithm):
         is added via Hessian-vector products.
 
         When ``generator_substeps >= 1`` the first-order autograd term is replaced
-        by a sub-step quadrature: roll the model m Euler sub-steps over the nominal
-        interval and read the value change directly from the V-head endpoints,
-        lf = (V(x_hat_m) - V(x)) - beta*V(x). This is autograd-free, captures the
-        curvature the first-order term drops, and m=1 is a single-Euler-step finite
-        difference over states. See docs/ct_sac_substep_quadrature.md.
+        by a sub-step quadrature: integrate the model over the nominal interval
+        with the same finite-duration flow routine used by dynamics fitting and
+        read the value change directly from the V-head endpoints,
+        lf = (V(x_hat) - V(x)) - beta*V(x). This is autograd-free and captures
+        curvature the first-order term drops. ``m=1`` is a single Euler step only
+        when no finer dynamics integration step applies. See
+        docs/ct_sac_substep_quadrature.md.
         """
         if self.generator_substeps >= 1:
             return self._substep_quadrature_target(
@@ -528,22 +588,24 @@ class CTSAC(OffPolicyAlgorithm):
         of the rate along the model orbit,
           V(x') - V(x) = integral_0^dt_default (L^a V)(x(s)) ds,
         which the first-order term dt_default*(b.grad V) samples at one point. Here
-        the model is rolled m Euler sub-steps of size h = dt_default/m, the V-head
-        is read at the rolled endpoint, and the value change is taken directly:
-          lf = (V(x_hat_m) - V(x)) - beta*V(x),  target = r + V(x) + lf.
+        the model is integrated with explicit-Euler steps no larger than
+        min(dt_default/m, dynamics_integration_step) when the latter is known. The
+        V-head is read at the rolled endpoint and the value change is taken directly:
+          lf = (V(x_hat) - V(x)) - beta*V(x),  target = r + V(x) + lf.
         No autograd / gradient is used; the value gradient and its curvature enter
         through the finite difference of the (clean) V-head over the predicted
-        states. m=1 is a single-Euler-step finite difference over states; larger m
-        reduces the integration (Euler) error in the rolled endpoint. The discount
-        is kept as the single -beta*V(x) lump, matching the first-order target.
+        states. Larger m requests a finer integration; an even finer exposed
+        physics step takes precedence. The discount is kept as the single
+        -beta*V(x) lump, matching the first-order target.
         """
         with th.no_grad():
-            x_hat = obs.detach().clone()
-            h = self.dt_default / float(self.generator_substeps)
-            for _ in range(self.generator_substeps):
-                b_k = self.dynamics_model.drift(x_hat, actions)  # (B, O)
-                b_k = th.as_tensor(b_k, dtype=x_hat.dtype, device=x_hat.device)
-                x_hat = x_hat + b_k * h
+            x_hat = integrate_drift(
+                self.dynamics_model.drift,
+                obs.detach(),
+                actions,
+                self.dt_default,
+                max_step=self._integration_max_step(),
+            )
             V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
             V_next = self._state_value(x_hat, alpha_tensor)  # (B, 1) at rolled state
             lf = (V_next - V_cur) - self.beta * V_cur

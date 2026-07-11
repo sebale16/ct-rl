@@ -37,6 +37,132 @@ from torch import nn
 from torch.func import jacfwd, vmap
 
 
+def integrate_drift(
+    drift_fn: Callable[[th.Tensor, th.Tensor], th.Tensor],
+    obs,
+    action,
+    duration,
+    *,
+    max_step: Optional[float] = None,
+    delta_limit: Optional[th.Tensor] = None,
+    clamp_final: bool = True,
+) -> th.Tensor:
+    """Integrate a batched drift over possibly different durations.
+
+    ``duration`` is the observed/control interval for each sample.  ``max_step``
+    is only the internal explicit-Euler resolution: every sample keeps its full
+    duration and is advanced ``ceil(duration / max_step)`` times while its action
+    is held fixed.  With ``max_step=None`` this reduces exactly to the historical
+    one-Euler-step predictor.
+
+    Active samples are gathered at each internal step rather than evaluating the
+    whole batch ``max(n_steps)`` times.  This matters for the benchmark's two-tail
+    schedule, where most transitions need one physics-sized step and only the
+    sparse long-duration transitions need many.  ``index_copy`` keeps the roll
+    differentiable, so this helper can be shared by dynamics fitting and the
+    no-grad critic target. ``delta_limit`` optionally bounds the cumulative
+    displacement from the interval's starting state after every internal step;
+    the rollout fit uses this as its off-manifold overflow guard. Setting
+    ``clamp_final=False`` guards only intermediate states and leaves the endpoint
+    loss unsaturated, so a bad prediction still receives a corrective gradient.
+    """
+    x = obs if isinstance(obs, th.Tensor) else th.as_tensor(obs, dtype=th.float32)
+    if not x.is_floating_point():
+        x = x.float()
+    if x.ndim == 1:
+        x = x.unsqueeze(0)
+    if x.ndim != 2:
+        raise ValueError(f"obs must have shape (batch, obs_dim), got {tuple(x.shape)}")
+
+    a = th.as_tensor(action, dtype=x.dtype, device=x.device)
+    if a.ndim == 1:
+        a = a.unsqueeze(0)
+    if a.ndim != 2 or a.shape[0] != x.shape[0]:
+        raise ValueError(
+            "action must have shape (batch, action_dim) with the same batch "
+            f"as obs, got {tuple(a.shape)} for batch {x.shape[0]}"
+        )
+
+    dt = th.as_tensor(duration, dtype=x.dtype, device=x.device)
+    if dt.numel() == 1:
+        dt = dt.reshape(1, 1).expand(x.shape[0], 1)
+    elif dt.numel() == x.shape[0]:
+        dt = dt.reshape(x.shape[0], 1)
+    else:
+        raise ValueError(
+            "duration must be scalar or have one value per batch item, got "
+            f"shape {tuple(dt.shape)} for batch {x.shape[0]}"
+        )
+    if not bool(th.all(th.isfinite(dt))):
+        raise ValueError("duration values must be finite")
+    if bool(th.any(dt < 0.0)):
+        raise ValueError("duration values must be non-negative")
+
+    if max_step is None:
+        n_steps = (dt > 0.0).to(dtype=th.long)
+    else:
+        max_step = float(max_step)
+        if not np.isfinite(max_step) or max_step <= 0.0:
+            raise ValueError(f"max_step must be finite and > 0, got {max_step}")
+        # Subtract a tiny tolerance in step-count units so a float32 value such
+        # as 0.010000001 does not spuriously turn five 2 ms steps into six.
+        n_steps = th.ceil(dt / max_step - 1e-6).clamp_min(0).to(dtype=th.long)
+        n_steps = th.where(dt > 0.0, n_steps.clamp_min(1), n_steps)
+
+    step_size = th.where(
+        n_steps > 0,
+        dt / n_steps.clamp_min(1).to(dtype=dt.dtype),
+        th.zeros_like(dt),
+    )
+    max_n = int(n_steps.max().item()) if n_steps.numel() else 0
+    x_hat = x.clone()
+    x_start = x.clone()
+
+    limit = None
+    if delta_limit is not None:
+        limit = th.as_tensor(delta_limit, dtype=x.dtype, device=x.device)
+        if limit.numel() == 1:
+            limit = limit.reshape(1, 1).expand_as(x)
+        elif limit.shape == (x.shape[0], 1):
+            limit = limit.expand_as(x)
+        elif limit.shape != x.shape:
+            raise ValueError(
+                "delta_limit must be scalar, (batch, 1), or match obs shape; "
+                f"got {tuple(limit.shape)} for obs {tuple(x.shape)}"
+            )
+        if not bool(th.all(th.isfinite(limit))) or bool(th.any(limit < 0.0)):
+            raise ValueError("delta_limit values must be finite and non-negative")
+
+    for k in range(max_n):
+        active = th.nonzero(n_steps[:, 0] > k, as_tuple=False).squeeze(-1)
+        if active.numel() == 0:
+            break
+        x_k = x_hat.index_select(0, active)
+        a_k = a.index_select(0, active)
+        b_k = drift_fn(x_k, a_k)
+        b_k = th.as_tensor(b_k, dtype=x.dtype, device=x.device)
+        if b_k.shape != x_k.shape:
+            raise ValueError(
+                f"drift must return shape {tuple(x_k.shape)}, got {tuple(b_k.shape)}"
+            )
+        h_k = step_size.index_select(0, active)
+        x_next = x_k + b_k * h_k
+        if limit is not None:
+            x0_k = x_start.index_select(0, active)
+            lim_k = limit.index_select(0, active)
+            bounded = x0_k + th.clamp(x_next - x0_k, -lim_k, lim_k)
+            if clamp_final:
+                x_next = bounded
+            else:
+                is_final = (
+                    n_steps.index_select(0, active)[:, 0] == (k + 1)
+                ).unsqueeze(-1)
+                x_next = th.where(is_final, x_next, bounded)
+        x_hat = x_hat.index_copy(0, active, x_next)
+
+    return x_hat
+
+
 @dataclass(frozen=True)
 class DOFLayout:
     """Maps a flat observation to a manipulator (q, qd) phase state for the
@@ -421,6 +547,32 @@ class PortHamiltonianModel(nn.Module):
 
     # ------------------------ public API ------------------------
 
+    def to(self, *args, **kwargs):
+        """Move module state and keep the explicit dynamics device in sync.
+
+        ``drift`` accepts NumPy inputs and therefore cannot infer a device from
+        them.  Keeping this attribute synchronized is also required when the
+        shared integrator gathers active sub-batches after CT-SAC moves a model
+        from its construction device.
+        """
+        module = super().to(*args, **kwargs)
+        state_tensor = next(module.parameters(), None)
+        if state_tensor is None:
+            state_tensor = next(module.buffers(), None)
+        if state_tensor is not None:
+            self.device = state_tensor.device
+        else:
+            requested = kwargs.get("device")
+            if requested is None and args:
+                candidate = args[0]
+                if isinstance(candidate, (str, th.device)):
+                    requested = candidate
+                elif isinstance(candidate, th.Tensor):
+                    requested = candidate.device
+            if requested is not None:
+                self.device = th.device(requested)
+        return module
+
     def drift(self, obs, action) -> th.Tensor:
         """Return the drift b(obs, action) of shape (B, obs_dim) on ``self.device``."""
         if self.mode == "mujoco":
@@ -470,8 +622,16 @@ class PortHamiltonianModel(nn.Module):
         optimizer.zero_grad(set_to_none=True)
         return float(loss.detach())
 
-    def fit_step(self, obs, action, next_obs, dt, optimizer) -> float:
-        """One supervised PHAST data step: minimize ||(x + b*dt) - x'||^2 (mode='phast')."""
+    def fit_step(
+        self, obs, action, next_obs, dt, optimizer, *, max_step: Optional[float] = None
+    ) -> float:
+        """One supervised flow-matching step.
+
+        The learned drift is integrated across each transition's complete observed
+        duration, using physics-sized internal steps when ``max_step`` is supplied,
+        before its endpoint is compared with ``x'``.  This keeps irregular replay
+        intervals while avoiding the old coarse-secant target ``x + b(x,a)*dt``.
+        """
         assert self.mode in ("phast", "structured"), (
             "fit_step only applies to learned modes ('phast', 'structured')."
         )
@@ -479,18 +639,34 @@ class PortHamiltonianModel(nn.Module):
         a = th.as_tensor(action, dtype=th.float32, device=self.device)
         xp = th.as_tensor(next_obs, dtype=th.float32, device=self.device)
         dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
-        pred = x + self.drift(x, a) * dt_t
+        # Healthy predictions stay well inside this generous data-scaled bound;
+        # a runaway internal roll saturates before a later drift call sees inf.
+        delta_limit = 5.0 * (xp - x).abs() + 1e-3 if max_step is not None else None
+        pred = integrate_drift(
+            self.drift,
+            x,
+            a,
+            dt_t,
+            max_step=max_step,
+            delta_limit=delta_limit,
+            clamp_final=False,
+        )
         loss = ((pred - xp) ** 2).mean()
         return self._fit_optimizer_step(loss, optimizer)
 
     def fit_step_rollout(
-        self, obs, actions, next_obs, dt, mask, optimizer
+        self, obs, actions, next_obs, dt, mask, optimizer, *,
+        max_step: Optional[float] = None,
     ) -> float:
-        """Multi-step (rollout) data step: roll the model H explicit Euler steps
-        from x_t along the recorded actions and regress every rolled state onto
-        the observed sequence,
+        """Multi-transition flow-matching step.
 
-          x_hat_0 = x_t,   x_hat_{k+1} = x_hat_k + b(x_hat_k, a_{t+k}) dt_{t+k},
+        Roll the model across ``H`` replay transitions and regress every endpoint
+        onto the observed sequence.  Each outer transition keeps its recorded
+        duration and action; internally, :func:`integrate_drift` resolves that
+        interval with steps no larger than ``max_step``:
+
+          x_hat_0 = x_t,
+          x_hat_{k+1} = Phi_hat(dt_{t+k}, x_hat_k, a_{t+k}),
           loss = sum_k m_k ||x_hat_{k+1} - x_{t+k+1}||^2 / (obs_dim * sum_k m_k).
 
         Gradients flow through the whole roll (backprop through time), so the
@@ -498,19 +674,15 @@ class PortHamiltonianModel(nn.Module):
         its own predictions, not only on buffer states. ``mask`` (1 valid,
         0 invalid, cumulative) zeroes the steps of a window that crosses an
         episode end or the ring seam; ``horizon=1`` with a full mask is exactly
-        ``fit_step``.
+        ``fit_step`` when both use the same ``max_step``.
 
-        The compounding steps (k >= 1) evaluate the drift at the model's own
-        predictions, where nothing bounds it — the Coriolis term is quadratic
-        in velocity, so one bad prediction can blow up the rest of the roll,
-        overflow the loss, and NaN the parameters through BPTT. Each such
-        increment is therefore clamped elementwise to a generous multiple of
-        the window's own observed increments; healthy rolls never touch the
-        bound, and a run-away roll saturates instead of compounding (saturated
-        entries also stop back-propagating). The first step is taken from a
-        real buffer state and is left unclamped, so horizon=1 remains exactly
-        ``fit_step``. The optimizer step itself is clipped and skipped on a
-        non-finite loss (``_fit_optimizer_step``).
+        The compounding steps evaluate the drift at model-predicted states, where
+        the velocity-quadratic Coriolis term can overflow. Internal states and
+        off-manifold outer endpoints are therefore bounded by a generous multiple
+        of the window's observed increments. The first real-state endpoint remains
+        unclamped in the loss (so it keeps a corrective gradient and horizon=1 is
+        exactly ``fit_step``), although a bounded copy seeds a longer rollout.
+        The optimizer step is also gradient-clipped and skipped on non-finite loss.
 
         Shapes: obs (B, O); actions (B, H, A); next_obs (B, H, O);
         dt, mask (B, H, 1)."""
@@ -532,17 +704,36 @@ class PortHamiltonianModel(nn.Module):
         # Per-sample, per-dimension bound on a compounding Euler increment:
         # 5x the largest observed one-step change in this window.
         obs_steps = xp - th.cat([x_hat.unsqueeze(1), xp[:, :-1]], dim=1)  # (B, H, O)
-        step_limit = 5.0 * obs_steps.abs().amax(dim=1) + 1e-3            # (B, O)
+        step_limit = 5.0 * (obs_steps.abs() * m).amax(dim=1) + 1e-3      # (B, O)
 
         loss = x_hat.new_zeros(())
         for k in range(horizon):
-            b = self.drift(x_hat, a[:, k])
-            # The update is gated by the mask so an invalid tail cannot run the
-            # state off to non-finite values (0 * inf would poison the masked loss).
-            step = b * (dt_t[:, k] * m[:, k])
-            if k > 0:
+            # Zero duration keeps masked tails fixed and, importantly, prevents
+            # their drift from being evaluated at all inside integrate_drift.
+            x_next = integrate_drift(
+                self.drift,
+                x_hat,
+                a[:, k],
+                dt_t[:, k] * m[:, k],
+                max_step=max_step,
+                delta_limit=step_limit if max_step is not None else None,
+                # The first real-state endpoint is the same unsaturated label as
+                # fit_step. Later off-manifold endpoints retain the legacy clamp.
+                clamp_final=(k > 0),
+            )
+            step = x_next - x_hat
+            if k == 0:
+                # Regress the true, unclamped endpoint, but keep an explosive
+                # prediction from becoming the starting state of the next outer
+                # transition. Healthy predictions never touch this guard.
+                x_loss = x_next
+                if max_step is not None:
+                    step = th.clamp(step, -step_limit, step_limit)
+                x_hat = x_hat + step
+            else:
                 step = th.clamp(step, -step_limit, step_limit)
-            x_hat = x_hat + step
-            loss = loss + (m[:, k] * (x_hat - xp[:, k]) ** 2).sum()
+                x_hat = x_hat + step
+                x_loss = x_hat
+            loss = loss + (m[:, k] * (x_loss - xp[:, k]) ** 2).sum()
         loss = loss / (m.sum() * self.obs_dim + 1e-8)
         return self._fit_optimizer_step(loss, optimizer)
