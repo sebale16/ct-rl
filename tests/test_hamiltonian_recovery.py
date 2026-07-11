@@ -11,9 +11,14 @@ from algorithms.ct_sac import CTSAC
 from environment.dmc import DMCContinuousEnv
 from evaluations.hamiltonian_recovery import (
     collect,
+    energy_balance_report,
     fit_model,
+    generator_report,
     ground_truth,
     learned_terms,
+    mujoco_transition,
+    predictive_report,
+    quadrature_report,
     recovery_report,
     sanity_check_truth,
 )
@@ -26,6 +31,25 @@ def _cheetah(seed=0):
         "cheetah", "run", time_sampling="uniform", dt=0.01, physics_dt=0.002,
         episode_duration=20.0, seed=seed,
     )
+
+
+# metrics that are legitimately NaN on some data (empty stratum, no contact
+# edges, no valid rollout window) — excluded from the blanket finite checks
+_NAN_OK = ("_strata", "contact_edge_offset_steps", "contact_edge_matched_frac",
+           "rollout_rel_err")
+
+
+def _assert_finite(testcase, node, path=""):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _assert_finite(testcase, v, f"{path}.{k}")
+        return
+    if isinstance(node, (bool, str)) or node is None:
+        return
+    arr = np.asarray(node, dtype=np.float64)
+    if any(tag in path for tag in _NAN_OK):
+        return
+    testcase.assertTrue(np.all(np.isfinite(arr)), path)
 
 
 class TestGroundTruthExtraction(unittest.TestCase):
@@ -100,9 +124,11 @@ class TestRecoveryMetrics(unittest.TestCase):
     def test_rescaled_truth_scores_perfectly(self):
         th.manual_seed(0); np.random.seed(0)
         env = _cheetah()
-        O, *_ = collect(env, 60, seed=0)
-        obs = O[-20:]
+        O, A, *_ = collect(env, 60, seed=0)
+        obs, act = O[-20:], A[-20:]
         truth = ground_truth(env, obs)
+        nq = int(env._env.physics.model.nq)
+        qd = obs[:, nq - 1:].astype(np.float64)
         s = 0.5  # pretend the learner found everything at half scale
         fake = dict(
             M=s * truth["M"],
@@ -113,18 +139,33 @@ class TestRecoveryMetrics(unittest.TestCase):
             d_base=s * truth["dof_damping"],
             G=s * truth["G"],
             dM_mag=np.array([0.0] + [1.0] * 7),   # no z-dependence
+            qd=qd,
+            f_damp=s * truth["dof_damping"][None, :] * qd,
         )
-        rep = recovery_report(truth, fake)
+        rep = recovery_report(truth, fake, actions=act)
         self.assertAlmostEqual(rep["gauge_scale_c"], 1.0 / s, places=5)
-        self.assertLess(rep["mass_rel_frob_err"], 1e-5)
+        # strict (scale-locked) recovery: near-zero error everywhere
+        for k in ("mass_rel_frob_err", "mass_diag_rel_err",
+                  "mass_offdiag_rel_err", "mass_eig_rel_err",
+                  "mass_inverse_response_nrmse", "potential_locked_nrmse",
+                  "kinetic_nrmse", "total_H_locked_nrmse", "damping_rel_err",
+                  "gradV_force_nrmse", "coriolis_force_nrmse",
+                  "damping_force_nrmse", "actuator_force_nrmse"):
+            self.assertLess(rep[k], 1e-5, k)
+        self.assertLess(rep["G_rel_frob_err"], 1e-6)
+        self.assertAlmostEqual(rep["mass_cond_ratio"], 1.0, places=4)
+        # shape diagnostics and correlations
         self.assertGreater(rep["mass_entry_corr"], 0.999)
-        self.assertLess(rep["mass_dMdz_ratio"], 1e-9)
-        for k in ("potential_affine_R2", "kinetic_R2", "total_H_affine_R2",
-                  "damping_affine_R2"):
+        self.assertGreater(rep["mass_uppertri_corr"], 0.999)
+        for k in ("potential_shape_R2", "kinetic_R2", "total_H_shape_R2",
+                  "damping_locked_R2"):
             self.assertGreater(rep[k], 0.999, k)
         for k in ("gradV_force_corr", "coriolis_force_corr"):
             self.assertGreater(rep[k], 0.999, k)
-        self.assertLess(rep["G_rel_frob_err"], 1e-6)
+        self.assertAlmostEqual(rep["potential_slope_ratio"], 1.0, places=4)
+        # architectural probe: zero and flagged non-structural for a plain dict
+        self.assertLess(rep["mass_dMdz_ratio"], 1e-9)
+        self.assertFalse(rep["mass_dMdz_structural"])
 
 
 class TestDynamicsSidecar(unittest.TestCase):
@@ -184,12 +225,19 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         O, A, NO, DT, DN = collect(env, 300, seed=0)
         m = fit_model(env, O, A, NO, DT, DN, steps=50, horizon=2,
                       hidden=(32, 32), log_every=0)
-        obs = O[-50:]
+        obs, act = O[-50:], A[-50:]
         truth = ground_truth(env, obs)
-        rep = recovery_report(truth, learned_terms(m, obs))
-        for k, v in rep.items():
-            arr = np.asarray(v, dtype=np.float64)
-            self.assertTrue(np.all(np.isfinite(arr)), k)
+        rep = recovery_report(truth, learned_terms(m, obs), actions=act,
+                              dt=DT[-50:], dones=DN[-50:])
+        _assert_finite(self, rep)
+        pred = predictive_report(m, obs, act, NO[-50:], DT[-50:], DN[-50:],
+                                 max_step=env.physics_dt)
+        _assert_finite(self, pred)
+        eng = energy_balance_report(m, obs, act)
+        _assert_finite(self, eng)
+        # the energy balance is an identity of the model: the residual must be
+        # numerics-small even on a barely fit model
+        self.assertLess(eng["residual_nrmse"], 1e-2)
 
     def test_contact_port_combined_potential(self):
         """With the port active the report gains the combined-conservative-force
@@ -205,9 +253,10 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         learned = learned_terms(m, obs)
         for key in ("g_pot_combined", "contact_gap", "contact_in_frac",
                     "contact_in_frac_per", "contact_spring_ratio",
-                    "contact_kcm"):
+                    "contact_kcm", "contact_F", "contact_power"):
             self.assertIn(key, learned)
-        rep = recovery_report(ground_truth(env, obs), learned)
+        rep = recovery_report(ground_truth(env, obs), learned,
+                              actions=A[-50:], dt=DT[-50:], dones=DN[-50:])
         self.assertIn("gradV_combined_corr", rep)
         # port parameters: k/c at gauge scale, mu raw; all positive (softplus),
         # one entry per contact point; per-contact activity + gap stats present
@@ -266,10 +315,73 @@ class TestRawStateRecovery(unittest.TestCase):
                       dof_layout=DOFLayout.raw_state(nv=2))
         obs = O[-50:]
         truth = ground_truth(env, obs)
-        rep = recovery_report(truth, learned_terms(m, obs))
-        for k, v in rep.items():
-            arr = np.asarray(v, dtype=np.float64)
-            self.assertTrue(np.all(np.isfinite(arr)), k)
+        rep = recovery_report(truth, learned_terms(m, obs), actions=A[-50:],
+                              dt=DT[-50:], dones=DN[-50:])
+        _assert_finite(self, rep)
+
+
+class TestMuJoCoTransition(unittest.TestCase):
+    """The paired-rollout helper must reproduce the env's own transitions when
+    integrating the recorded action over the recorded (uniform) duration."""
+
+    def test_matches_recorded_transitions(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = _cheetah()
+        O, A, NO, DT, DN = collect(env, 40, seed=0)
+        keep = DN[:-1] == 0.0  # exclude reset transitions
+        obs, act, nxt = O[:-1][keep][:10], A[:-1][keep][:10], NO[:-1][keep][:10]
+        pred = mujoco_transition(env, obs, act, float(DT[0]))
+        err = np.abs(pred - nxt).max() / (np.abs(nxt).max() + 1e-12)
+        self.assertLess(err, 1e-4, "mujoco_transition diverges from env.step")
+
+
+class TestControlRelevantMetrics(unittest.TestCase):
+    """Generator-projection and quadrature-label errors through a tiny V-head
+    policy. With the oracle drift substituted, both errors must be ~zero."""
+
+    def _tiny_policy(self, env):
+        return ActorQCriticModel(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            q_net_arch=[16], pi_net_arch=[16], v_net_arch=[16], device="cpu",
+        )
+
+    def test_reports_finite_and_oracle_zero(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = _cheetah()
+        O, A, NO, DT, DN = collect(env, 120, seed=0)
+        obs, act = O[-20:], A[-20:]
+        policy = self._tiny_policy(env)
+        self.assertTrue(policy.has_v_head)
+        m = fit_model(env, O, A, NO, DT, DN, steps=5, horizon=1,
+                      hidden=(16, 16), log_every=0)
+        truth = ground_truth(env, obs)
+
+        gen = generator_report(m, env, policy, obs, act,
+                               contact_flag=truth["contact_flag"],
+                               actions_pi=act[::-1].copy())
+        _assert_finite(self, gen)
+        self.assertIn("data_actions", gen)
+        self.assertIn("policy_actions", gen)
+        self.assertIn("err_vs_action_novelty_corr", gen)
+
+        quad = quadrature_report(m, env, policy, obs, act,
+                                 dt_default=float(env.dt_default),
+                                 max_step=env.physics_dt,
+                                 contact_flag=truth["contact_flag"])
+        _assert_finite(self, quad)
+        self.assertGreaterEqual(quad["sign_disagree_frac"], 0.0)
+        self.assertLessEqual(quad["sign_disagree_frac"], 1.0)
+
+        # oracle drift: the generator projection error must vanish identically
+        oracle = PortHamiltonianModel(
+            int(env.observation_space.shape[0]), int(env.action_space.shape[0]),
+            mode="mujoco", drift_fn=env.dynamics_terms,
+        )
+        oracle.layout = m.layout  # generator_report slices velocities via layout
+        gen0 = generator_report(oracle, env, policy, obs, act,
+                                contact_flag=truth["contact_flag"])
+        self.assertLess(gen0["data_actions"]["rmse"], 1e-6)
 
 
 if __name__ == "__main__":
