@@ -34,7 +34,7 @@ from typing import Callable, Optional, Sequence, Tuple
 import numpy as np
 import torch as th
 from torch import nn
-from torch.func import jacfwd, vmap
+from torch.func import grad, jacfwd, vmap
 
 
 def _inverse_softplus(value: float) -> float:
@@ -52,7 +52,7 @@ def integrate_drift(
     max_step: Optional[float] = None,
     delta_limit: Optional[th.Tensor] = None,
     clamp_final: bool = True,
-    check_finite: bool = False,
+    check_finite: bool | str = False,
 ) -> th.Tensor:
     """Integrate a batched drift over possibly different durations.
 
@@ -72,8 +72,12 @@ def integrate_drift(
     the rollout fit uses this as its off-manifold overflow guard. Setting
     ``clamp_final=False`` guards only intermediate states and leaves the endpoint
     loss unsaturated, so a bad prediction still receives a corrective gradient.
-    ``check_finite=True`` fails at the first bad drift/state and reports the
-    internal step; the critic target uses it for actionable failure diagnostics.
+    ``check_finite=True`` performs one healthy-path endpoint check. If the
+    endpoint is non-finite (or a drift evaluation raises), the integration is
+    replayed once with stepwise checks to report the first failing internal
+    step. This avoids an accelerator synchronization after every substep while
+    retaining actionable failure diagnostics. ``check_finite="step"`` requests
+    the historical eager stepwise checking explicitly; ``False`` disables it.
     """
     x = obs if isinstance(obs, th.Tensor) else th.as_tensor(obs, dtype=th.float32)
     if not x.is_floating_point():
@@ -82,6 +86,15 @@ def integrate_drift(
         x = x.unsqueeze(0)
     if x.ndim != 2:
         raise ValueError(f"obs must have shape (batch, obs_dim), got {tuple(x.shape)}")
+
+    if isinstance(check_finite, bool):
+        finite_mode = "endpoint" if check_finite else "none"
+    elif check_finite in ("none", "endpoint", "step"):
+        finite_mode = str(check_finite)
+    else:
+        raise ValueError(
+            "check_finite must be a bool or one of 'none', 'endpoint', 'step'"
+        )
 
     a = th.as_tensor(action, dtype=x.dtype, device=x.device)
     if a.ndim == 1:
@@ -124,9 +137,6 @@ def integrate_drift(
         th.zeros_like(dt),
     )
     max_n = int(n_steps.max().item()) if n_steps.numel() else 0
-    x_hat = x.clone()
-    x_start = x.clone()
-
     limit = None
     if delta_limit is not None:
         limit = th.as_tensor(delta_limit, dtype=x.dtype, device=x.device)
@@ -142,44 +152,104 @@ def integrate_drift(
         if not bool(th.all(th.isfinite(limit))) or bool(th.any(limit < 0.0)):
             raise ValueError("delta_limit values must be finite and non-negative")
 
-    for k in range(max_n):
-        active = th.nonzero(n_steps[:, 0] > k, as_tuple=False).squeeze(-1)
-        if active.numel() == 0:
-            break
-        x_k = x_hat.index_select(0, active)
-        a_k = a.index_select(0, active)
-        b_k = drift_fn(x_k, a_k)
-        b_k = th.as_tensor(b_k, dtype=x.dtype, device=x.device)
-        if b_k.shape != x_k.shape:
-            raise ValueError(
-                f"drift must return shape {tuple(x_k.shape)}, got {tuple(b_k.shape)}"
-            )
-        if check_finite and not bool(th.all(th.isfinite(b_k))):
-            raise RuntimeError(
-                "non-finite drift at internal flow step "
-                f"{k + 1}/{max_n} ({active.numel()} active samples)"
-            )
-        h_k = step_size.index_select(0, active)
-        x_next = x_k + b_k * h_k
-        if limit is not None:
-            x0_k = x_start.index_select(0, active)
-            lim_k = limit.index_select(0, active)
-            bounded = x0_k + th.clamp(x_next - x0_k, -lim_k, lim_k)
-            if clamp_final:
-                x_next = bounded
-            else:
-                is_final = (
-                    n_steps.index_select(0, active)[:, 0] == (k + 1)
-                ).unsqueeze(-1)
-                x_next = th.where(is_final, x_next, bounded)
-        if check_finite and not bool(th.all(th.isfinite(x_next))):
-            raise RuntimeError(
-                "non-finite state at internal flow step "
-                f"{k + 1}/{max_n} ({active.numel()} active samples)"
-            )
-        x_hat = x_hat.index_copy(0, active, x_next)
+    def _run(
+        x_seed: th.Tensor,
+        a_seed: th.Tensor,
+        limit_seed: Optional[th.Tensor],
+        *,
+        check_steps: bool,
+    ) -> th.Tensor:
+        x_hat = x_seed.clone()
+        x_start = x_seed.clone()
+        for k in range(max_n):
+            active = th.nonzero(n_steps[:, 0] > k, as_tuple=False).squeeze(-1)
+            if active.numel() == 0:
+                break
+            x_k = x_hat.index_select(0, active)
+            a_k = a_seed.index_select(0, active)
+            try:
+                b_k = drift_fn(x_k, a_k)
+            except RuntimeError as exc:
+                if check_steps:
+                    raise RuntimeError(
+                        "drift evaluation failed at internal flow step "
+                        f"{k + 1}/{max_n} ({active.numel()} active samples): {exc}"
+                    ) from exc
+                raise
+            b_k = th.as_tensor(b_k, dtype=x.dtype, device=x.device)
+            if b_k.shape != x_k.shape:
+                raise ValueError(
+                    f"drift must return shape {tuple(x_k.shape)}, got {tuple(b_k.shape)}"
+                )
+            if check_steps and not bool(th.all(th.isfinite(b_k))):
+                raise RuntimeError(
+                    "non-finite drift at internal flow step "
+                    f"{k + 1}/{max_n} ({active.numel()} active samples)"
+                )
+            h_k = step_size.index_select(0, active)
+            x_next = x_k + b_k * h_k
+            if limit_seed is not None:
+                x0_k = x_start.index_select(0, active)
+                lim_k = limit_seed.index_select(0, active)
+                bounded = x0_k + th.clamp(x_next - x0_k, -lim_k, lim_k)
+                if clamp_final:
+                    x_next = bounded
+                else:
+                    is_final = (
+                        n_steps.index_select(0, active)[:, 0] == (k + 1)
+                    ).unsqueeze(-1)
+                    x_next = th.where(is_final, x_next, bounded)
+            if check_steps and not bool(th.all(th.isfinite(x_next))):
+                raise RuntimeError(
+                    "non-finite state at internal flow step "
+                    f"{k + 1}/{max_n} ({active.numel()} active samples)"
+                )
+            x_hat = x_hat.index_copy(0, active, x_next)
+        return x_hat
 
-    return x_hat
+    if finite_mode == "none":
+        return _run(x, a, limit, check_steps=False)
+    if finite_mode == "step":
+        return _run(x, a, limit, check_steps=True)
+
+    # Production finite checking: one synchronization when the endpoint is
+    # healthy. Only the exceptional path pays for a second, diagnostic rollout.
+    original_error = None
+    try:
+        endpoint = _run(x, a, limit, check_steps=False)
+    except RuntimeError as exc:
+        original_error = exc
+        endpoint = None
+    if endpoint is not None and bool(th.all(th.isfinite(endpoint))):
+        return endpoint
+
+    try:
+        with th.no_grad():
+            diagnostic_endpoint = _run(
+                x.detach(),
+                a.detach(),
+                None if limit is None else limit.detach(),
+                check_steps=True,
+            )
+            if not bool(th.all(th.isfinite(diagnostic_endpoint))):
+                raise RuntimeError(
+                    "non-finite state at diagnostic flow endpoint "
+                    f"after {max_n} internal steps"
+                )
+    except RuntimeError as diagnostic_error:
+        raise RuntimeError(
+            "flow integration failed; diagnostic replay found: "
+            f"{diagnostic_error}"
+        ) from (original_error or diagnostic_error)
+
+    if original_error is not None:
+        raise RuntimeError(
+            "flow integration failed, but the stepwise diagnostic replay was finite: "
+            f"{original_error}"
+        ) from original_error
+    raise RuntimeError(
+        "flow endpoint is non-finite, but the stepwise diagnostic replay was finite"
+    )
 
 
 @dataclass(frozen=True)
@@ -765,7 +835,11 @@ class PortHamiltonianModel(nn.Module):
 
         M = vmap(self._mass)(pos)                       # (B, nv, nv), SPD
         dM_pos = vmap(jacfwd(self._mass))(pos)          # (B, nv, nv, npos) = dM/dq_pos
-        gV_pos = vmap(jacfwd(self._potential))(pos)     # (B, npos)
+        # V is scalar, so reverse-mode grad needs one pullback regardless of
+        # npos.  jacfwd seeded one tangent per position coordinate and was the
+        # dominant cost on low-DOF cartpole. torch.func.grad remains fully
+        # differentiable w.r.t. the potential/limit parameters during fitting.
+        gV_pos = vmap(grad(self._potential))(pos)       # (B, npos)
         # scatter the position-config gradients into the nv config axis; cyclic
         # config DOFs are absent from _pos_to_cfg, so their slot stays zero.
         dM = th.zeros(B, nv, nv, nv, dtype=x.dtype, device=x.device).index_copy(
