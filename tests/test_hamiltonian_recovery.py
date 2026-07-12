@@ -215,6 +215,45 @@ class TestDynamicsSidecar(unittest.TestCase):
             agent.save(path)
             self.assertFalse(os.path.exists(os.path.join(d, "ckpt.dynamics.pth")))
 
+    def test_sidecar_saves_published_target_not_rejected_live_candidate(self):
+        th.manual_seed(0); np.random.seed(0)
+        env = _cheetah()
+        model = ActorQCriticModel(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            q_net_arch=[16], pi_net_arch=[16], v_net_arch=[16], device="cpu",
+        )
+        dynamics = PortHamiltonianModel(
+            int(env.observation_space.shape[0]), int(env.action_space.shape[0]),
+            mode="structured", structured_hidden=(16,),
+        )
+        agent = CTSAC(
+            env=env, model=model, device="cpu", seed=0,
+            use_model_based_q=True, dynamics_model=dynamics,
+        )
+        with th.no_grad():
+            for p in agent.dynamics_target_model.parameters():
+                p.fill_(1.0)
+            for p in agent.dynamics_model.parameters():
+                p.fill_(2.0)  # finite but not published
+        agent._dynamics_publications = 1
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "accepted.pth")
+            agent.save(path)
+            saved = th.load(
+                os.path.join(d, "accepted.dynamics.pth"), map_location="cpu"
+            )
+        for value in saved.values():
+            if value.is_floating_point():
+                self.assertFalse(th.any(value == 2.0))
+        first_param = next(agent.dynamics_target_model.parameters())
+        first_key = next(
+            k for k, v in saved.items()
+            if v.shape == first_param.shape and v.is_floating_point()
+        )
+        self.assertTrue(th.allclose(saved[first_key], first_param.detach()))
+
 
 class TestRecoveryEndToEnd(unittest.TestCase):
     """A briefly fit structured model runs through the whole recovery pipeline."""

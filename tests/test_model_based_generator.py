@@ -129,6 +129,26 @@ class TestVariableDurationIntegration(unittest.TestCase):
             with self.assertRaises(ValueError):
                 integrate_drift(drift, x, a, 0.01, max_step=bad_step)
 
+    def test_finite_check_reports_first_bad_internal_step(self):
+        calls = 0
+
+        def failing_drift(x, _a):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                return th.full_like(x, float("inf"))
+            return th.ones_like(x)
+
+        with self.assertRaisesRegex(RuntimeError, "internal flow step 3/5"):
+            integrate_drift(
+                failing_drift,
+                th.zeros(2, 1),
+                th.zeros(2, 1),
+                0.01,
+                max_step=0.002,
+                check_finite=True,
+            )
+
     def test_structured_flow_runs_under_no_grad(self):
         model = PortHamiltonianModel(
             17, 6, mode="structured", structured_hidden=(16,)
@@ -144,6 +164,41 @@ class TestVariableDurationIntegration(unittest.TestCase):
         self.assertEqual(tuple(pred.shape), (2, 17))
         self.assertTrue(th.all(th.isfinite(pred)))
         self.assertFalse(pred.requires_grad)
+
+
+class TestDurationBalancedFlowFit(unittest.TestCase):
+    """Long intervals are fully integrated but need not dominate drift fitting."""
+
+    def test_exact_normalized_endpoint_weights(self):
+        th.manual_seed(0)
+        model = PortHamiltonianModel(2, 1, mode="phast", hidden=())
+        with th.no_grad():
+            for p in model.parameters():
+                p.zero_()
+        optimizer = th.optim.SGD(model.parameters(), lr=0.0)
+        obs = th.zeros(2, 2)
+        action = th.zeros(2, 1)
+        next_obs = th.tensor([[1.0, 1.0], [3.0, 3.0]])
+        dt = th.tensor([[0.002], [0.010]])
+
+        unweighted = model.fit_step(obs, action, next_obs, dt, optimizer)
+        balanced = model.fit_step(
+            obs, action, next_obs, dt, optimizer, balance_dt=0.002
+        )
+
+        self.assertAlmostEqual(unweighted, 5.0, places=5)
+        # Per-sample MSEs are 1 and 9; weights are 1 and (2/10)^2=.04.
+        self.assertAlmostEqual(balanced, (1.0 + 0.04 * 9.0) / 1.04, places=5)
+
+    def test_rejects_invalid_balance_reference(self):
+        model = PortHamiltonianModel(2, 1, mode="phast", hidden=())
+        optimizer = th.optim.SGD(model.parameters(), lr=0.0)
+        for bad in (0.0, -0.1, float("nan")):
+            with self.assertRaises(ValueError):
+                model.fit_step(
+                    th.zeros(1, 2), th.zeros(1, 1), th.zeros(1, 2),
+                    0.01, optimizer, balance_dt=bad,
+                )
 
 
 class TestModelBasedGenerator(unittest.TestCase):
@@ -691,6 +746,122 @@ class TestDOFLayout(unittest.TestCase):
             DOFLayout(obs_dim=17, pos_slice=(0, 7), vel_slice=(8, 17),
                       cyclic_cfg=(0,), obs_pos_to_cfg=tuple(range(1, 8)))
 
+    def test_cartpole_mechanics_layout(self):
+        lay = DOFLayout.cartpole()
+        self.assertEqual((lay.obs_dim, lay.npos, lay.nv), (4, 2, 2))
+        self.assertEqual(lay.m_invariant_pos, (0,))
+        self.assertEqual(lay.potential_invariant_pos, (0,))
+        self.assertEqual(lay.periodic_pos, (1,))
+        self.assertEqual(lay.act_to_cfg, (0,))
+        self.assertTrue(lay.enforce_m_invariance)
+        self.assertEqual(lay.joint_limits, ((0, -1.8, 1.8),))
+        self.assertEqual(lay.joint_limit_stiffness_init, 100.0)
+        self.assertEqual(lay.joint_limit_damping_init, 1.0)
+        self.assertGreater(lay.base_damping_reg, 0.0)
+
+
+class TestCartpoleStructuredMechanics(unittest.TestCase):
+    """Known cartpole symmetries and the passive slider-limit port."""
+
+    def _model(self, **kwargs):
+        th.manual_seed(0)
+        return PortHamiltonianModel(
+            4, 1, mode="structured", structured_hidden=(32, 32),
+            dof_layout=DOFLayout.cartpole(), **kwargs,
+        )
+
+    def test_mass_and_base_potential_symmetries(self):
+        m = self._model()
+        pos = th.tensor([[0.1, -2.0], [-0.7, 0.4], [0.0, 1.2]])
+        translated = pos.clone(); translated[:, 0] += 0.8
+        wrapped = pos.clone(); wrapped[:, 1] += 2.0 * np.pi
+
+        M = th.vmap(m._mass)(pos)
+        self.assertTrue(th.allclose(M, th.vmap(m._mass)(translated), atol=1e-7))
+        self.assertTrue(th.allclose(M, th.vmap(m._mass)(wrapped), atol=2e-6))
+        V0 = th.vmap(m._base_potential)(pos)
+        self.assertTrue(th.allclose(V0, th.vmap(m._base_potential)(translated), atol=1e-7))
+        self.assertTrue(th.allclose(V0, th.vmap(m._base_potential)(wrapped), atol=2e-6))
+
+        # The invariance is exact in derivatives, not merely learned on samples.
+        dM = th.func.jacfwd(m._mass)(pos[0])
+        dV = th.func.jacfwd(m._base_potential)(pos[0])
+        self.assertTrue(th.all(dM[..., 0] == 0.0))
+        self.assertEqual(dV[0].item(), 0.0)
+
+    def test_sparse_actuation_and_near_zero_base_damping(self):
+        m = self._model()
+        self.assertEqual(m.G_a.out_features, 1)
+        force = th.zeros(3, 2).index_add(
+            1, m._act_to_cfg, m.G_a(th.ones(3, 1))
+        )
+        self.assertTrue(th.all(force[:, 1] == 0.0))
+        self.assertLess(th.nn.functional.softplus(m._log_d).max().item(), 5e-4)
+
+    def test_slider_spring_is_unilateral_and_damping_is_passive(self):
+        m = self._model()
+        k, c = th.nn.functional.softplus(m._limit_raw)
+        self.assertAlmostEqual(k.item(), 100.0, places=4)
+        self.assertAlmostEqual(c.item(), 1.0, places=4)
+        pos = th.tensor([[-2.0, 0.3], [0.0, 0.3], [2.0, 0.3]], requires_grad=True)
+        energy = th.vmap(m._joint_limit_energy)(pos)
+        (grad,) = th.autograd.grad(energy.sum(), pos)
+        spring_force = -grad
+        self.assertGreater(spring_force[0, 0].item(), 0.0)  # lower rail pushes right
+        self.assertLess(spring_force[2, 0].item(), 0.0)     # upper rail pushes left
+        self.assertLess(energy[1].item(), 1e-20)            # silent in the interior
+        self.assertEqual(spring_force[:, 1].abs().max().item(), 0.0)
+
+        qd = th.tensor([[-2.0, 1.0], [3.0, -1.0], [2.0, 0.5]])
+        damping_force = m._joint_limit_damping_force(pos.detach(), qd)
+        power = (qd * damping_force).sum(-1)
+        self.assertLessEqual(power.max().item(), 1e-9)
+        self.assertTrue(th.all(damping_force[:, 1] == 0.0))
+
+    def test_total_energy_balance_includes_limit_damping(self):
+        m = self._model()
+        x = th.tensor([
+            [-1.9, -0.4, -2.0, 1.0],
+            [1.9, 0.7, 2.5, -1.2],
+            [0.0, 1.1, 0.5, 2.0],
+        ], requires_grad=True)
+        pos, qd = x[:, :2], x[:, 2:]
+        M = th.vmap(m._mass)(pos)
+        E = th.vmap(m._potential)(pos) + 0.5 * th.einsum(
+            "na,nab,nb->n", qd, M, qd
+        )
+        (gE,) = th.autograd.grad(E.sum(), x)
+        with th.no_grad():
+            drift = m.drift(x.detach(), th.zeros(3, 1))
+            dEdt = (gE * drift).sum(-1)
+            D = m._damping(pos.detach())
+            f_limit = m._joint_limit_damping_force(pos.detach(), qd.detach())
+            expected = -th.einsum("na,nab,nb->n", qd, D, qd) + (
+                qd * f_limit
+            ).sum(-1)
+        self.assertLess((dEdt - expected).abs().max().item(), 2e-3)
+        self.assertLessEqual(expected.max().item(), 1e-8)
+
+    def test_mass_regularization_hooks_and_diagnostics(self):
+        m = self._model(mass_logdet_reg=1e-4, mass_condition_reg=1e-4)
+        x = th.randn(8, 4)
+        penalty = m._mass_regularization(x)
+        self.assertTrue(th.isfinite(penalty))
+        self.assertGreaterEqual(penalty.item(), 0.0)
+        diagnostics = m.mass_diagnostics(x)
+        self.assertEqual(
+            set(diagnostics),
+            {"min_eig", "max_eig", "condition_mean", "condition_max", "logdet_mean"},
+        )
+        self.assertTrue(all(np.isfinite(v) for v in diagnostics.values()))
+        self.assertGreater(diagnostics["min_eig"], 0.0)
+        with th.no_grad():
+            m._log_d.add_(2.0)
+        damping_penalty = m._base_damping_regularization()
+        self.assertGreater(damping_penalty.item(), 0.0)
+        damping_penalty.backward()
+        self.assertTrue(th.all(m._log_d.grad > 0.0))
+
 
 class TestStructuredDynamics(unittest.TestCase):
     """Structured port-Hamiltonian (DeLaN core, constant diagonal damping)."""
@@ -1012,13 +1183,15 @@ class TestRolloutFit(unittest.TestCase):
         xp = x + 0.05 * th.randn(8, 17)
 
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
-        one = m.fit_step(x, a, xp, 0.01, opt, max_step=0.002)
+        one = m.fit_step(
+            x, a, xp, 0.01, opt, max_step=0.002, balance_dt=0.002
+        )
 
         m.load_state_dict(state)
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         roll = m.fit_step_rollout(
             x, a.unsqueeze(1), xp.unsqueeze(1), th.full((8, 1, 1), 0.01),
-            th.ones(8, 1, 1), opt, max_step=0.002,
+            th.ones(8, 1, 1), opt, max_step=0.002, balance_dt=0.002,
         )
         self.assertLess(abs(one - roll), 1e-6)
 
@@ -1036,14 +1209,14 @@ class TestRolloutFit(unittest.TestCase):
 
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         l_masked = m.fit_step_rollout(
-            x, A, XP, dt, mask, opt, max_step=0.002
+            x, A, XP, dt, mask, opt, max_step=0.002, balance_dt=0.002
         )
 
         m.load_state_dict(state)
         opt = th.optim.Adam(m.parameters(), lr=1e-3)
         l_short = m.fit_step_rollout(
             x, A[:, :1], XP[:, :1], dt[:, :1], th.ones(8, 1, 1), opt,
-            max_step=0.002,
+            max_step=0.002, balance_dt=0.002,
         )
         self.assertLess(abs(l_masked - l_short), 1e-6)
 

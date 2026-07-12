@@ -130,7 +130,7 @@ The Coriolis, combined-conservative, and contact forces additionally carry `*_nr
 
 | Key | Definition | What it means |
 |---|---|---|
-| `mass_dMdz_ratio` | $\overline{\lvert\partial M/\partial z\rvert} \,/\, \overline{\lvert\partial M/\partial q_{j\ne z}\rvert}$; **true value 0** | the contact-leak probe: inertia is invariant under vertical translation, so any $z$-dependence of $M$ is ground reaction being absorbed as a contact proxy |
+| `mass_dMdz_ratio` | first translation-coordinate derivative divided by the other position derivatives; **true value 0** | invariance probe: cheetah uses root height $z$, raw cartpole uses cart translation $x$; dependence means an unmodelled constraint force leaked into inertia |
 | `mass_dMdz_structural` | whether $z$ is excluded from the mass input (contact port active) | when true, a zero ratio is **guaranteed by construction** and is no longer evidence that the remaining mass matrix is correct — read it as an invariant check, not a result |
 
 **Energies.**
@@ -151,6 +151,7 @@ The Coriolis, combined-conservative, and contact forces additionally carry `*_nr
 | `coriolis_force_*` (strata) | $c^*\hat C(q,\dot q)\dot q$ vs truth | the term that governs fast motion ($\propto \dot q^2$) is wrong; *negative* correlation means $\partial M/\partial q$ is being used as something else entirely (historically: a touchdown brake) |
 | `damping_force_*` | $c^*(d\circ\dot q)$ vs $d_{\text{true}}\circ\dot q$ | the damping force as felt on the data distribution |
 | `actuator_force_*` | $c^*\hat G a$ vs $G a$ over the dataset's actions | actuator response wrong where actions actually live |
+| `joint_limit_force_*` (strata) | explicit learned rail spring+damping vs `qfrc_constraint` (cartpole) | the rail reaction is missing or has leaked into the invariant mass/base potential; reported separately from gravity recovery |
 | `contact_force_*` (strata) | $c^*\sum_i(J_{n,i}\lambda_i + J_{t,i}f_{t,i})$ vs `qfrc_constraint` | the port's generalized force does not match the true contact force (includes joint-limit forces — a caveat on the truth side) |
 | `contact_power_*` | $c^*\sum_i(\lambda_i\dot g_i + f_{t,i}v_{t,i})$ vs $\dot q^\top$`qfrc_constraint` | contact power misattributed — dissipation/propulsion in the wrong place |
 

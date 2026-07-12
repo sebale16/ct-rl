@@ -1,5 +1,6 @@
 import os
 import pathlib
+from copy import deepcopy
 from typing import Union, Optional, Dict, Any, Type
 import numpy as np
 import torch as th
@@ -59,7 +60,13 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_lr: float = 1e-3,
         dynamics_warmup: int = 1000,
         dynamics_fit_horizon: int = 1,
+        dynamics_fit_horizon_warmup: int = 0,
+        dynamics_duration_balance: bool = False,
         dynamics_integration_step: Optional[float] = None,
+        dynamics_target_tau: float = 0.01,
+        dynamics_publish_max_flow_error_ratio: Optional[float] = 2.0,
+        dynamics_publish_batch_size: int = 32,
+        dynamics_require_value_head: bool = True,
         generator_gate_scale: float = 0.0,
         value_warmup: int = 0,
         generator_substeps: int = 0,
@@ -156,14 +163,68 @@ class CTSAC(OffPolicyAlgorithm):
         # the replay buffer. Models with no trainable parameters (e.g. the MuJoCo
         # oracle) skip this and are used from the first step.
         self.dynamics_warmup = int(dynamics_warmup)
+        self.dynamics_target_tau = float(dynamics_target_tau)
+        if not (0.0 < self.dynamics_target_tau <= 1.0):
+            raise ValueError(
+                "dynamics_target_tau must be in (0, 1], got "
+                f"{self.dynamics_target_tau}"
+            )
+        if dynamics_publish_max_flow_error_ratio is not None:
+            dynamics_publish_max_flow_error_ratio = float(
+                dynamics_publish_max_flow_error_ratio
+            )
+            if (
+                not np.isfinite(dynamics_publish_max_flow_error_ratio)
+                or dynamics_publish_max_flow_error_ratio <= 0.0
+            ):
+                raise ValueError(
+                    "dynamics_publish_max_flow_error_ratio must be finite and > 0 "
+                    f"or None, got {dynamics_publish_max_flow_error_ratio}"
+                )
+        self.dynamics_publish_max_flow_error_ratio = (
+            dynamics_publish_max_flow_error_ratio
+        )
+        self.dynamics_publish_batch_size = int(dynamics_publish_batch_size)
+        if self.dynamics_publish_batch_size <= 0:
+            raise ValueError(
+                "dynamics_publish_batch_size must be > 0, got "
+                f"{self.dynamics_publish_batch_size}"
+            )
+        if isinstance(dynamics_require_value_head, str):
+            dynamics_require_value_head = dynamics_require_value_head.strip().lower() in (
+                "1", "true", "yes"
+            )
+        self.dynamics_require_value_head = bool(dynamics_require_value_head)
         # Multi-transition rollout fit: with horizon H > 1 the model is fit on its
         # own flow across H replay intervals instead of a single endpoint. Each
         # irregular interval is internally integrated at _integration_max_step,
         # matching how the generator/quadrature target consumes the vector field.
         self.dynamics_fit_horizon = max(1, int(dynamics_fit_horizon))
+        # A long replay window now contains all internal physics-sized flow
+        # steps. Start with single-transition fits, then enable the configured
+        # outer horizon after this many dynamics updates to avoid an abrupt
+        # 4 -> up-to-60-step BPTT graph on cartpole.
+        self.dynamics_fit_horizon_warmup = int(dynamics_fit_horizon_warmup)
+        if self.dynamics_fit_horizon_warmup < 0:
+            raise ValueError("dynamics_fit_horizon_warmup must be non-negative")
+        if isinstance(dynamics_duration_balance, str):
+            dynamics_duration_balance = dynamics_duration_balance.strip().lower() in (
+                "1", "true", "yes"
+            )
+        # Endpoint errors grow approximately linearly in duration, so their
+        # squared loss otherwise lets a sparse 30 ms tail dominate abundant
+        # 2 ms data. This option retains and fully integrates every transition,
+        # but normalizes its loss leverage at the internal integration scale.
+        self.dynamics_duration_balance = bool(dynamics_duration_balance)
         self._dynamics_updates = 0
+        self._dynamics_publications = 0
+        self._dynamics_publish_rejections = 0
+        self._dynamics_rollbacks = 0
+        self._last_dynamics_rejection_reason: Optional[str] = None
+        self._last_dynamics_mass_diagnostics: Dict[str, float] = {}
         self._train_dynamics = False
         self.dynamics_optimizer = None
+        self.dynamics_target_model = self.dynamics_model
         if self.dynamics_model is not None:
             dyn_params = [
                 p for p in self.dynamics_model.parameters() if p.requires_grad
@@ -173,6 +234,15 @@ class CTSAC(OffPolicyAlgorithm):
                 self.dynamics_optimizer = th.optim.Adam(
                     dyn_params, lr=float(dynamics_lr)
                 )
+                # The critic never reads the live, optimizer-mutated model. It
+                # reads this frozen copy, which is published only after a finite
+                # post-fit flow check and then updated by EMA.
+                self.dynamics_target_model = deepcopy(self.dynamics_model)
+                if hasattr(self.dynamics_target_model, "to"):
+                    self.dynamics_target_model.to(self.device)
+                for p in self.dynamics_target_model.parameters():
+                    p.requires_grad_(False)
+                self.dynamics_target_model.eval()
 
         # The learning rate will be updated by the base algorithm class
         self.actor_optimizer = th.optim.Adam(
@@ -202,6 +272,18 @@ class CTSAC(OffPolicyAlgorithm):
                 self.model.value_parameters, lr=self.lr_schedule(1.0)
             )
             self.optimizers.append(self.value_optimizer)
+
+        if (
+            self._train_dynamics
+            and self.generator_substeps >= 1
+            and self.dynamics_require_value_head
+            and not self.use_value_head
+        ):
+            raise ValueError(
+                "Learned-dynamics quadrature requires an explicit V-head when "
+                "dynamics_require_value_head=True; configure model_v_net_arch or "
+                "set dynamics_require_value_head=False."
+            )
 
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
@@ -238,6 +320,172 @@ class CTSAC(OffPolicyAlgorithm):
             candidates.append(self.dt_default / float(self.generator_substeps))
         return min(candidates) if candidates else None
 
+    def _current_dynamics_fit_horizon(self) -> int:
+        """Outer rollout horizon after the single-transition fit curriculum."""
+        if self._dynamics_updates < self.dynamics_fit_horizon_warmup:
+            return 1
+        return self.dynamics_fit_horizon
+
+    def _dynamics_balance_dt(self) -> Optional[float]:
+        """Reference duration for flow-loss balancing, without dropping data."""
+        if not self.dynamics_duration_balance:
+            return None
+        step = self._integration_max_step()
+        if step is None:
+            # No physics/integration resolution is exposed. dt_default is a
+            # conservative reference and still caps only longer intervals.
+            return float(self.dt_default)
+        return float(step)
+
+    def _post_fit_flow_quality(
+        self, obs, actions, next_obs, dt, dynamics_loss: float
+    ) -> tuple[bool, float, str]:
+        """Validate the live learned model before publishing it to the critic.
+
+        The check uses the same finite-duration integrator as fitting and target
+        construction.  Its scale-free error is endpoint RMSE divided by the RMS
+        observed displacement, so ``1`` is the no-op predictor's error.  A
+        nominal-duration roll is also required to remain finite because that is
+        the exact path consumed by quadrature.
+        """
+        if not np.isfinite(dynamics_loss):
+            return False, float("inf"), "non-finite fit loss"
+        floating_state = [
+            (name, value)
+            for name, value in self.dynamics_model.state_dict().items()
+            if value.is_floating_point()
+        ]
+        if floating_state and not bool(
+            th.stack([th.isfinite(value).all() for _, value in floating_state]).all()
+        ):
+            bad_name = next(
+                name for name, value in floating_state
+                if not bool(th.isfinite(value).all())
+            )
+            return False, float("inf"), f"non-finite model state: {bad_name}"
+        if (
+            hasattr(self.dynamics_model, "last_fit_accepted")
+            and not bool(self.dynamics_model.last_fit_accepted)
+        ):
+            return False, float("inf"), "fit optimizer update was skipped"
+        if hasattr(self.dynamics_model, "mass_diagnostics"):
+            try:
+                diagnostics = self.dynamics_model.mass_diagnostics(
+                    obs[: min(self.dynamics_publish_batch_size, obs.shape[0])]
+                )
+                self._last_dynamics_mass_diagnostics = diagnostics
+                for name, value in diagnostics.items():
+                    if not np.isfinite(value):
+                        return (
+                            False,
+                            float("inf"),
+                            f"non-finite mass diagnostic: {name}",
+                        )
+            except (RuntimeError, ValueError) as exc:
+                return False, float("inf"), f"mass diagnostics failed: {exc}"
+        try:
+            with th.no_grad():
+                check_n = min(self.dynamics_publish_batch_size, obs.shape[0])
+                obs = obs[:check_n]
+                actions = actions[:check_n]
+                next_obs = next_obs[:check_n]
+                dt = dt[:check_n]
+                pred = integrate_drift(
+                    self.dynamics_model.drift,
+                    obs,
+                    actions,
+                    dt,
+                    max_step=self._integration_max_step(),
+                    check_finite=True,
+                )
+                if not bool(th.all(th.isfinite(pred))):
+                    return False, float("inf"), "non-finite recorded-duration flow"
+                nominal = integrate_drift(
+                    self.dynamics_model.drift,
+                    obs,
+                    actions,
+                    self.dt_default,
+                    max_step=self._integration_max_step(),
+                    check_finite=True,
+                )
+                if not bool(th.all(th.isfinite(nominal))):
+                    return False, float("inf"), "non-finite nominal target flow"
+
+                target = th.as_tensor(
+                    next_obs, dtype=pred.dtype, device=pred.device
+                )
+                start = th.as_tensor(obs, dtype=pred.dtype, device=pred.device)
+                flow_rmse = th.sqrt(th.mean((pred - target) ** 2))
+                displacement_rms = th.sqrt(th.mean((target - start) ** 2))
+                ratio = float(
+                    (flow_rmse / displacement_rms.clamp_min(1e-6)).detach()
+                )
+        except RuntimeError as exc:
+            return False, float("inf"), f"flow evaluation failed: {exc}"
+
+        if not np.isfinite(ratio):
+            return False, ratio, "non-finite flow error ratio"
+        limit = self.dynamics_publish_max_flow_error_ratio
+        if limit is not None and ratio > limit:
+            return False, ratio, f"flow error ratio {ratio:.4g} exceeds {limit:.4g}"
+        return True, ratio, "accepted"
+
+    def _publish_dynamics_target(self) -> None:
+        """Hard-publish the first healthy model, then EMA subsequent versions."""
+        assert self._train_dynamics and self.dynamics_target_model is not None
+        tau = 1.0 if self._dynamics_publications == 0 else self.dynamics_target_tau
+        with th.no_grad():
+            source = self.dynamics_model.state_dict()
+            target = self.dynamics_target_model.state_dict()
+            if source.keys() != target.keys():
+                raise RuntimeError("live and target dynamics state dictionaries differ")
+            for name, target_value in target.items():
+                source_value = source[name].to(target_value.device)
+                if target_value.is_floating_point():
+                    target_value.mul_(1.0 - tau).add_(source_value, alpha=tau)
+                else:
+                    target_value.copy_(source_value)
+        self.dynamics_target_model.eval()
+        self._dynamics_publications += 1
+
+    def _rollback_live_dynamics(self) -> None:
+        """Recover the learner after a non-finite fit from the last safe target."""
+        self.dynamics_model.load_state_dict(self.dynamics_target_model.state_dict())
+        self.dynamics_model.train()
+        # Adam moments associated with the rejected trajectory can immediately
+        # push the restored parameters back into the same bad region.
+        self.dynamics_optimizer.state.clear()
+        self._dynamics_rollbacks += 1
+
+    @property
+    def _dynamics_ready(self) -> bool:
+        if not self._train_dynamics:
+            return True
+        # Even warmup=0 must publish one health-checked learned model before use.
+        enough_publications = self._dynamics_publications >= max(
+            1, self.dynamics_warmup
+        )
+        value_ready = True
+        if self.generator_substeps >= 1 and self.dynamics_require_value_head:
+            value_ready = self._value_head_ready
+        return enough_publications and value_ready
+
+    @staticmethod
+    def _require_finite_target_component(name: str, value: th.Tensor) -> None:
+        finite = th.isfinite(value)
+        if bool(th.all(finite)):
+            return
+        finite_values = value[finite]
+        max_abs_finite = (
+            float(finite_values.abs().max()) if finite_values.numel() else float("nan")
+        )
+        bad = int((~finite).sum())
+        raise RuntimeError(
+            "Model-based critic target is non-finite: "
+            f"component={name}; bad={bad}/{value.numel()}, shape={tuple(value.shape)}, "
+            f"max_abs_finite={max_abs_finite:.6g}."
+        )
+
     # ------------------------ persistence ------------------------
 
     @staticmethod
@@ -248,12 +496,20 @@ class CTSAC(OffPolicyAlgorithm):
         return root + ".dynamics" + (ext or ".pth")
 
     def save(self, path) -> None:
-        """Save the actor-critic checkpoint, plus the learned dynamics model to a
-        sidecar file (so the trained port-Hamiltonian can be inspected later,
-        e.g. by ``evaluations/hamiltonian_recovery.py``)."""
+        """Save the actor-critic and the accepted dynamics used by its critic.
+
+        The live optimizer model may be newer but rejected by the flow-health
+        gate. Recovery audits and resumed targets must therefore load the frozen
+        published model, not an unsafe candidate the critic never consumed.
+        """
         super().save(path)
         if self._train_dynamics and isinstance(path, (str, pathlib.Path)):
-            th.save(self.dynamics_model.state_dict(), self._dynamics_sidecar(path))
+            accepted = (
+                self.dynamics_target_model
+                if self._dynamics_publications > 0
+                else self.dynamics_model
+            )
+            th.save(accepted.state_dict(), self._dynamics_sidecar(path))
 
     def load(self, path, strict: bool = True) -> "CTSAC":
         super().load(path, strict=strict)
@@ -263,6 +519,13 @@ class CTSAC(OffPolicyAlgorithm):
                 self.dynamics_model.load_state_dict(
                     th.load(sidecar, map_location=self.device)
                 )
+                self.dynamics_target_model.load_state_dict(
+                    self.dynamics_model.state_dict()
+                )
+                self.dynamics_target_model.eval()
+                self._dynamics_publications = max(1, self.dynamics_warmup)
+                if self.use_value_head:
+                    self._value_updates = max(self._value_updates, self.value_warmup)
         return self
 
     def _policy_act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
@@ -323,24 +586,79 @@ class CTSAC(OffPolicyAlgorithm):
 
             ## Dynamics model update (learned port-Hamiltonian, fit from transitions)
             if self._train_dynamics:
-                if self.dynamics_fit_horizon > 1:
+                fit_horizon = self._current_dynamics_fit_horizon()
+                balance_dt = self._dynamics_balance_dt()
+                if fit_horizon > 1:
                     # Multi-step rollout fit over a replay window: the model is
                     # rolled along its own predictions and every step regressed.
                     seq = self.replay_buffer.sample_sequences(
-                        batch_size, self.dynamics_fit_horizon
+                        batch_size, fit_horizon
                     )
                     dynamics_loss = self.dynamics_model.fit_step_rollout(
                         seq.observations, seq.actions, seq.next_observations,
                         seq.dt, seq.mask, self.dynamics_optimizer,
                         max_step=self._integration_max_step(),
+                        balance_dt=balance_dt,
                     )
                 else:
                     dynamics_loss = self.dynamics_model.fit_step(
                         obs, actions, next_obs, dt, self.dynamics_optimizer,
                         max_step=self._integration_max_step(),
+                        balance_dt=balance_dt,
                     )
                 self._dynamics_updates += 1
                 self.logger.record("train/dynamics_loss", dynamics_loss)
+                if hasattr(self.dynamics_model, "last_fit_grad_norm"):
+                    self.logger.record(
+                        "train/dynamics_grad_norm",
+                        self.dynamics_model.last_fit_grad_norm,
+                    )
+                self.logger.record("train/dynamics_fit_horizon", fit_horizon)
+                if balance_dt is not None:
+                    self.logger.record("train/dynamics_balance_dt", balance_dt)
+                # Validate on a separately sampled replay batch; otherwise H=1
+                # would publish based only on the same batch it just optimized.
+                quality_batch = self.replay_buffer.sample(
+                    min(batch_size, self.dynamics_publish_batch_size)
+                )
+                accepted, flow_ratio, reason = self._post_fit_flow_quality(
+                    quality_batch.observations,
+                    quality_batch.actions,
+                    quality_batch.next_observations,
+                    quality_batch.dt,
+                    dynamics_loss,
+                )
+                if accepted:
+                    self._publish_dynamics_target()
+                    self._last_dynamics_rejection_reason = None
+                else:
+                    self._dynamics_publish_rejections += 1
+                    self._last_dynamics_rejection_reason = reason
+                    if (
+                        not np.isfinite(dynamics_loss)
+                        or reason.startswith("non-finite")
+                        or reason.startswith("flow evaluation failed")
+                        or reason.startswith("mass diagnostics failed")
+                    ):
+                        self._rollback_live_dynamics()
+                self.logger.record(
+                    "train/dynamics_publish_accepted", float(accepted)
+                )
+                self.logger.record(
+                    "train/dynamics_flow_error_ratio", flow_ratio
+                )
+                self.logger.record(
+                    "train/dynamics_publications", self._dynamics_publications
+                )
+                self.logger.record(
+                    "train/dynamics_publish_rejections",
+                    self._dynamics_publish_rejections,
+                )
+                self.logger.record(
+                    "train/dynamics_rollbacks", self._dynamics_rollbacks
+                )
+                for name, value in self._last_dynamics_mass_diagnostics.items():
+                    self.logger.record(f"train/dynamics_mass_{name}", value)
                 if self._integration_max_step() is not None:
                     self.logger.record(
                         "train/dynamics_integration_step",
@@ -366,9 +684,7 @@ class CTSAC(OffPolicyAlgorithm):
             ## Critic update (target)
             # Use the model-based generator once the dynamics model is ready:
             # immediately for a non-trainable oracle, after warmup for a learned model.
-            dynamics_ready = (not self._train_dynamics) or (
-                self._dynamics_updates >= self.dynamics_warmup
-            )
+            dynamics_ready = self._dynamics_ready
             if (
                 self.use_model_based_q
                 and self.dynamics_model is not None
@@ -533,7 +849,8 @@ class CTSAC(OffPolicyAlgorithm):
                 obs, actions, rewards, dones, alpha_tensor
             )
 
-        sigma = self.dynamics_model.diffusion(obs)
+        target_dynamics = self.dynamics_target_model
+        sigma = target_dynamics.diffusion(obs)
         need_hessian = sigma is not None
 
         obs_req = obs.detach().clone().requires_grad_(True)
@@ -546,7 +863,7 @@ class CTSAC(OffPolicyAlgorithm):
         (gV,) = th.autograd.grad(V.sum(), obs_req, create_graph=need_hessian)  # (B, O)
 
         V_det = V.detach()
-        b = self.dynamics_model.drift(obs, actions)  # (B, O), per second
+        b = target_dynamics.drift(obs, actions)  # (B, O), per second
         b = th.as_tensor(b, dtype=V_det.dtype, device=V_det.device).detach()
 
         if self.generator_gate_scale > 0.0:
@@ -599,16 +916,34 @@ class CTSAC(OffPolicyAlgorithm):
         -beta*V(x) lump, matching the first-order target.
         """
         with th.no_grad():
-            x_hat = integrate_drift(
-                self.dynamics_model.drift,
-                obs.detach(),
-                actions,
-                self.dt_default,
-                max_step=self._integration_max_step(),
-            )
+            try:
+                x_hat = integrate_drift(
+                    self.dynamics_target_model.drift,
+                    obs.detach(),
+                    actions,
+                    self.dt_default,
+                    max_step=self._integration_max_step(),
+                    check_finite=True,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "Model-based critic target is non-finite or invalid: "
+                    f"component=rolled_state; integration error: {exc}"
+                ) from exc
+            self._require_finite_target_component("rolled_state", x_hat)
             V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
+            self._require_finite_target_component("V_cur", V_cur)
             V_next = self._state_value(x_hat, alpha_tensor)  # (B, 1) at rolled state
+            self._require_finite_target_component("V_next", V_next)
             lf = (V_next - V_cur) - self.beta * V_cur
+            self._require_finite_target_component("value_increment", lf)
             q_fast_target = (rewards + (1 - dones) * (V_cur + lf)).detach()
+            self._require_finite_target_component("q_fast_target", q_fast_target)
+            self.logger.record(
+                "train/model_rollout_max_abs", x_hat.abs().max().item()
+            )
+            self.logger.record(
+                "train/model_value_next_max_abs", V_next.abs().max().item()
+            )
             self.logger.record("train/fraction", th.max(th.abs(lf)).item())
         return q_fast_target
