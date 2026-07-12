@@ -135,9 +135,9 @@ class TestVariableDurationIntegration(unittest.TestCase):
         def failing_drift(x, _a):
             nonlocal calls
             calls += 1
-            if calls == 3:
-                return th.full_like(x, float("inf"))
-            return th.ones_like(x)
+            # Deterministic in state so the lazy diagnostic replay reproduces
+            # the same first failure after the healthy-path endpoint check.
+            return th.where(x >= 0.003, th.full_like(x, float("inf")), 1.0)
 
         with self.assertRaisesRegex(RuntimeError, "internal flow step 3/5"):
             integrate_drift(
@@ -147,6 +147,52 @@ class TestVariableDurationIntegration(unittest.TestCase):
                 0.01,
                 max_step=0.002,
                 check_finite=True,
+            )
+        # Five unchecked production steps, then three diagnostic steps through
+        # the first failure. Healthy calls do not pay for that replay.
+        self.assertEqual(calls, 8)
+
+    def test_finite_endpoint_check_has_no_healthy_replay(self):
+        calls = 0
+
+        def finite_drift(x, _a):
+            nonlocal calls
+            calls += 1
+            return th.ones_like(x)
+
+        endpoint = integrate_drift(
+            finite_drift,
+            th.zeros(2, 1),
+            th.zeros(2, 1),
+            0.01,
+            max_step=0.002,
+            check_finite=True,
+        )
+        self.assertEqual(calls, 5)
+        self.assertTrue(th.allclose(endpoint, th.full_like(endpoint, 0.01)))
+
+    def test_explicit_step_finite_mode_and_mode_validation(self):
+        calls = 0
+
+        def finite_drift(x, _a):
+            nonlocal calls
+            calls += 1
+            return th.ones_like(x)
+
+        integrate_drift(
+            finite_drift, th.zeros(1, 1), th.zeros(1, 1), 0.006,
+            max_step=0.002, check_finite="step",
+        )
+        self.assertEqual(calls, 3)
+        with self.assertRaises(ValueError):
+            integrate_drift(
+                finite_drift, th.zeros(1, 1), th.zeros(1, 1), 0.002,
+                check_finite="sometimes",
+            )
+        with self.assertRaisesRegex(RuntimeError, "diagnostic flow endpoint"):
+            integrate_drift(
+                finite_drift, th.full((1, 1), float("nan")), th.zeros(1, 1),
+                0.0, check_finite=True,
             )
 
     def test_structured_flow_runs_under_no_grad(self):
@@ -788,6 +834,44 @@ class TestCartpoleStructuredMechanics(unittest.TestCase):
         dV = th.func.jacfwd(m._base_potential)(pos[0])
         self.assertTrue(th.all(dM[..., 0] == 0.0))
         self.assertEqual(dV[0].item(), 0.0)
+
+    def test_reverse_potential_grad_matches_jacfwd_and_parameter_gradients(self):
+        """Scalar reverse-mode grad is an exact, trainable replacement for the
+        old forward Jacobian on both the cartpole and generic cheetah layouts."""
+        cases = [
+            (self._model(), th.randn(5, 2)),
+            (
+                PortHamiltonianModel(
+                    17, 6, mode="structured", structured_hidden=(16, 16)
+                ),
+                th.randn(3, 8),
+            ),
+        ]
+        for model, pos in cases:
+            forward_jac = th.vmap(th.func.jacfwd(model._potential))(pos)
+            reverse_grad = th.vmap(th.func.grad(model._potential))(pos)
+            self.assertTrue(
+                th.allclose(forward_jac, reverse_grad, atol=2e-6, rtol=2e-5)
+            )
+
+        cartpole, pos = cases[0]
+        potential_params = list(cartpole.potential_net.parameters()) + [
+            cartpole._limit_raw
+        ]
+        old_force = th.vmap(th.func.jacfwd(cartpole._potential))(pos)
+        old_param_grads = th.autograd.grad(
+            old_force.square().sum(), potential_params, allow_unused=True
+        )
+        new_force = th.vmap(th.func.grad(cartpole._potential))(pos)
+        new_param_grads = th.autograd.grad(
+            new_force.square().sum(), potential_params, allow_unused=True
+        )
+        for old, new in zip(old_param_grads, new_param_grads):
+            if old is None or new is None:
+                self.assertIsNone(old)
+                self.assertIsNone(new)
+            else:
+                self.assertTrue(th.allclose(old, new, atol=3e-6, rtol=3e-5))
 
     def test_sparse_actuation_and_near_zero_base_damping(self):
         m = self._model()

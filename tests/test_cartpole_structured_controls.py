@@ -376,6 +376,9 @@ class TestIrregularCartpoleFlowStress(unittest.TestCase):
             "dynamics_target_tau",
             "dynamics_publish_max_flow_error_ratio",
             "dynamics_require_value_head",
+            "dynamics_publish_interval",
+            "dynamics_train_interval",
+            "dynamics_rollout_interval",
         )
         controls = {name: configured[name] for name in control_names}
         agent = CTSAC(
@@ -394,10 +397,19 @@ class TestIrregularCartpoleFlowStress(unittest.TestCase):
         )
         self.assertTrue(agent.dynamics_duration_balance)
         self.assertTrue(agent.dynamics_require_value_head)
+        self.assertEqual(agent.dynamics_publish_interval, 10)
+        self.assertEqual(agent.dynamics_train_interval, 2)
+        self.assertEqual(agent.dynamics_rollout_interval, 4)
+        agent._n_updates = 0
+        self.assertTrue(agent._dynamics_fit_due())
+        agent._n_updates = 1
+        self.assertFalse(agent._dynamics_fit_due())
         self.assertEqual(agent._current_dynamics_fit_horizon(), 1)
         self.assertAlmostEqual(agent._dynamics_balance_dt(), 0.002)
         agent._dynamics_updates = agent.dynamics_fit_horizon_warmup
         self.assertEqual(agent._current_dynamics_fit_horizon(), 4)
+        agent._dynamics_updates += 1
+        self.assertEqual(agent._current_dynamics_fit_horizon(), 1)
         self.assertIsNot(agent.dynamics_target_model, agent.dynamics_model)
 
 

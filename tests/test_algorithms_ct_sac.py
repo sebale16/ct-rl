@@ -20,6 +20,19 @@ class _ConstantLearnedDynamics(th.nn.Module):
     def diffusion(self, obs):
         return None
 
+    def fit_step(
+        self, obs, action, next_obs, dt, optimizer, **kwargs
+    ):
+        # Minimal optimizer-certified fit used to exercise CTSAC cadence rather
+        # than dynamics-model numerics.
+        optimizer.zero_grad()
+        loss = self.value.square() * 0.0
+        loss.backward()
+        optimizer.step()
+        self.last_fit_accepted = True
+        self.last_fit_grad_norm = 0.0
+        return float(loss.detach())
+
 
 class _FrozenDynamics(th.nn.Module):
     def drift(self, obs, action):
@@ -108,6 +121,11 @@ class TestDynamicsPublication(unittest.TestCase):
         dynamics_warmup=2,
         target_tau=0.25,
         require_value=True,
+        publish_interval=1,
+        train_interval=1,
+        rollout_interval=1,
+        fit_horizon=1,
+        fit_horizon_warmup=0,
     ):
         env = DMCContinuousEnv(
             "cartpole", "swingup", time_sampling="uniform", dt=0.02,
@@ -136,9 +154,157 @@ class TestDynamicsPublication(unittest.TestCase):
             dynamics_warmup=dynamics_warmup,
             dynamics_target_tau=target_tau,
             dynamics_publish_max_flow_error_ratio=2.0,
+            dynamics_publish_interval=publish_interval,
+            dynamics_train_interval=train_interval,
+            dynamics_rollout_interval=rollout_interval,
+            dynamics_fit_horizon=fit_horizon,
+            dynamics_fit_horizon_warmup=fit_horizon_warmup,
             dynamics_require_value_head=require_value,
         )
         return env, agent
+
+    @staticmethod
+    def _fill_replay(agent, n=8):
+        obs_dim = int(agent.env.observation_space.shape[0])
+        act_dim = int(agent.env.action_space.shape[0])
+        for i in range(n):
+            obs = th.zeros(1, obs_dim).numpy()
+            action = th.zeros(1, act_dim).numpy()
+            agent.replay_buffer.add(
+                obs,
+                action,
+                th.zeros(1).numpy(),
+                th.zeros(1).numpy(),
+                obs.copy(),
+                th.tensor([0.02 * i]).numpy(),
+                th.tensor([0.02 * (i + 1)]).numpy(),
+            )
+
+    def test_publication_interval_controls_full_validation_in_train(self):
+        _, agent = self._agent(
+            publish_interval=3, dynamics_warmup=100, value_warmup=100
+        )
+        self._fill_replay(agent)
+        calls = 0
+
+        def accept(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return True, 0.0, "accepted"
+
+        agent._post_fit_flow_quality = accept
+        for _ in range(3):
+            agent.train(gradient_steps=1, batch_size=4)
+        self.assertEqual(agent._dynamics_updates, 3)
+        self.assertEqual(calls, 1)
+        self.assertEqual(agent._dynamics_publications, 1)
+
+    def test_bad_fit_rolls_back_without_full_validation(self):
+        _, agent = self._agent(publish_interval=10)
+        self._fill_replay(agent)
+        with th.no_grad():
+            agent.dynamics_model.value.fill_(5.0)
+
+        def skip(*args, **kwargs):
+            agent.dynamics_model.last_fit_accepted = False
+            return 0.0
+
+        full_checks = 0
+
+        def should_not_validate(*args, **kwargs):
+            nonlocal full_checks
+            full_checks += 1
+            return True, 0.0, "accepted"
+
+        agent.dynamics_model.fit_step = skip
+        agent._post_fit_flow_quality = should_not_validate
+        agent.train(gradient_steps=1, batch_size=4)
+        self.assertEqual(full_checks, 0)
+        self.assertEqual(agent._dynamics_rollbacks, 1)
+        self.assertEqual(agent._dynamics_fit_rejections, 1)
+        self.assertEqual(agent._dynamics_publish_rejections, 0)
+        self.assertEqual(agent.dynamics_model.value.item(), 0.0)
+
+    def test_publication_interval_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "publish_interval"):
+            self._agent(publish_interval=0)
+
+    def test_dynamics_fit_interval_decouples_live_model_from_critic_updates(self):
+        _, agent = self._agent(
+            train_interval=2,
+            publish_interval=100,
+            dynamics_warmup=100,
+            value_warmup=100,
+        )
+        self._fill_replay(agent)
+        fit_calls = 0
+        original_fit = agent.dynamics_model.fit_step
+
+        def count_fit(*args, **kwargs):
+            nonlocal fit_calls
+            fit_calls += 1
+            return original_fit(*args, **kwargs)
+
+        agent.dynamics_model.fit_step = count_fit
+        agent.train(gradient_steps=5, batch_size=4)
+        self.assertEqual(agent._n_updates, 5)
+        self.assertEqual(agent._dynamics_updates, 3)
+        self.assertEqual(fit_calls, 3)
+
+    def test_rollout_horizon_is_periodic_after_local_curriculum(self):
+        _, agent = self._agent(
+            fit_horizon=4,
+            fit_horizon_warmup=2,
+            rollout_interval=3,
+        )
+        expected = (1, 1, 4, 1, 1, 4, 1)
+        actual = []
+        for update in range(len(expected)):
+            agent._dynamics_updates = update
+            actual.append(agent._current_dynamics_fit_horizon())
+        self.assertEqual(tuple(actual), expected)
+
+    def test_train_combines_fit_and_rollout_cadences(self):
+        _, agent = self._agent(
+            train_interval=2,
+            fit_horizon=4,
+            fit_horizon_warmup=0,
+            rollout_interval=4,
+            publish_interval=100,
+            dynamics_warmup=100,
+            value_warmup=100,
+        )
+        self._fill_replay(agent, n=12)
+        horizons = []
+        original_h1 = agent.dynamics_model.fit_step
+
+        def h1(*args, **kwargs):
+            horizons.append(1)
+            return original_h1(*args, **kwargs)
+
+        def h4(obs, actions, next_obs, dt, mask, optimizer, **kwargs):
+            horizons.append(int(actions.shape[1]))
+            return original_h1(
+                obs,
+                actions[:, 0],
+                next_obs[:, 0],
+                dt[:, 0],
+                optimizer,
+                **kwargs,
+            )
+
+        agent.dynamics_model.fit_step = h1
+        agent.dynamics_model.fit_step_rollout = h4
+        agent.train(gradient_steps=9, batch_size=4)
+        self.assertEqual(horizons, [4, 1, 1, 1, 4])
+        self.assertEqual(agent._dynamics_updates, 5)
+        self.assertEqual(agent._n_updates, 9)
+
+    def test_dynamics_fit_intervals_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "dynamics_train_interval"):
+            self._agent(train_interval=0)
+        with self.assertRaisesRegex(ValueError, "dynamics_rollout_interval"):
+            self._agent(rollout_interval=0)
 
     def test_first_publication_is_hard_then_ema_and_frozen(self):
         _, agent = self._agent(target_tau=0.25)
@@ -146,16 +312,48 @@ class TestDynamicsPublication(unittest.TestCase):
         self.assertTrue(all(not p.requires_grad for p in
                             agent.dynamics_target_model.parameters()))
 
+        agent._dynamics_updates = 5
         with th.no_grad():
             agent.dynamics_model.value.fill_(2.0)
         agent._publish_dynamics_target()
         self.assertAlmostEqual(agent.dynamics_target_model.value.item(), 2.0)
 
+        agent._dynamics_updates = 9
         with th.no_grad():
             agent.dynamics_model.value.fill_(4.0)
         agent._publish_dynamics_target()
-        self.assertAlmostEqual(agent.dynamics_target_model.value.item(), 2.5)
+        tau_eff = 1.0 - (1.0 - 0.25) ** 4
+        self.assertAlmostEqual(
+            agent.dynamics_target_model.value.item(),
+            2.0 * (1.0 - tau_eff) + 4.0 * tau_eff,
+        )
         self.assertEqual(agent._dynamics_publications, 2)
+
+    def test_rollback_restarts_cadence_correct_ema_clock(self):
+        _, agent = self._agent(target_tau=0.25)
+        agent._dynamics_updates = 5
+        with th.no_grad():
+            agent.dynamics_model.value.fill_(2.0)
+        agent._publish_dynamics_target()
+
+        # A rejected trajectory may have consumed many updates, but rollback
+        # synchronizes live back to target; those discarded updates must not make
+        # the next accepted EMA artificially aggressive.
+        agent._dynamics_updates = 20
+        with th.no_grad():
+            agent.dynamics_model.value.fill_(9.0)
+        agent._rollback_live_dynamics()
+        self.assertAlmostEqual(agent.dynamics_model.value.item(), 2.0)
+
+        agent._dynamics_updates = 24
+        with th.no_grad():
+            agent.dynamics_model.value.fill_(4.0)
+        agent._publish_dynamics_target()
+        tau_eff = 1.0 - (1.0 - 0.25) ** 4
+        self.assertAlmostEqual(
+            agent.dynamics_target_model.value.item(),
+            2.0 * (1.0 - tau_eff) + 4.0 * tau_eff,
+        )
 
     def test_quality_check_and_nonfinite_rollback(self):
         env, agent = self._agent()
@@ -201,11 +399,33 @@ class TestDynamicsPublication(unittest.TestCase):
         self.assertIn("optimizer update was skipped", reason)
         self.assertEqual(agent._dynamics_publications, 0)
 
-    def test_readiness_counts_publications_and_waits_for_value_head(self):
+    def test_optimizer_certificate_skips_redundant_state_scan(self):
+        env, agent = self._agent()
+        batch = 4
+        obs = th.zeros(batch, int(env.observation_space.shape[0]))
+        actions = th.zeros(batch, int(env.action_space.shape[0]))
+        dt = th.full((batch, 1), 0.02)
+        next_obs = obs.clone()
+        agent.dynamics_model.last_fit_accepted = True
+
+        def unexpected_scan(*args, **kwargs):
+            raise AssertionError("certified fit should not rescan state_dict")
+
+        agent.dynamics_model.state_dict = unexpected_scan
+        accepted, _, _ = agent._post_fit_flow_quality(
+            obs, actions, next_obs, dt, 0.0
+        )
+        self.assertTrue(accepted)
+
+    def test_readiness_uses_update_warmup_one_publication_and_value_head(self):
         _, agent = self._agent(value_warmup=3, dynamics_warmup=2)
-        agent._dynamics_updates = 100
+        agent._dynamics_updates = 1
+        agent._dynamics_publications = 100
         self.assertFalse(agent._dynamics_ready)
-        agent._dynamics_publications = 2
+        agent._dynamics_updates = 2
+        agent._dynamics_publications = 0
+        self.assertFalse(agent._dynamics_ready)
+        agent._dynamics_publications = 1
         agent._value_updates = 2
         self.assertFalse(agent._dynamics_ready)
         agent._value_updates = 3
