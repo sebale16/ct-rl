@@ -1,0 +1,5 @@
+mode,family,buffer,n_seeds,final_mean,final_median,final_std,final_min,final_max,peak_mean
+top,model-free,300k,12,942.7,953.3,150.4,682.3,1191.2,1207.9
+top_buf1m,model-free,1M,12,1182.8,1172.1,73.6,1042.2,1291.8,1326.1
+mbq_vhead_quad,oracle+quad+Vhead,300k,12,939.0,946.3,308.2,35.4,1275.4,1299.9
+mbq_vhead_quad_buf1m,oracle+quad+Vhead,1M,12,1380.0,1344.1,104.3,1226.2,1529.2,1444.5
