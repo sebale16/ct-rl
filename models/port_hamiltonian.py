@@ -37,6 +37,12 @@ from torch import nn
 from torch.func import jacfwd, vmap
 
 
+def _inverse_softplus(value: float) -> float:
+    """Stable scalar inverse of softplus for positive parameter initializers."""
+    x = max(float(value), 1e-8)
+    return float(x + np.log(-np.expm1(-x)))
+
+
 def integrate_drift(
     drift_fn: Callable[[th.Tensor, th.Tensor], th.Tensor],
     obs,
@@ -46,6 +52,7 @@ def integrate_drift(
     max_step: Optional[float] = None,
     delta_limit: Optional[th.Tensor] = None,
     clamp_final: bool = True,
+    check_finite: bool = False,
 ) -> th.Tensor:
     """Integrate a batched drift over possibly different durations.
 
@@ -65,6 +72,8 @@ def integrate_drift(
     the rollout fit uses this as its off-manifold overflow guard. Setting
     ``clamp_final=False`` guards only intermediate states and leaves the endpoint
     loss unsaturated, so a bad prediction still receives a corrective gradient.
+    ``check_finite=True`` fails at the first bad drift/state and reports the
+    internal step; the critic target uses it for actionable failure diagnostics.
     """
     x = obs if isinstance(obs, th.Tensor) else th.as_tensor(obs, dtype=th.float32)
     if not x.is_floating_point():
@@ -145,6 +154,11 @@ def integrate_drift(
             raise ValueError(
                 f"drift must return shape {tuple(x_k.shape)}, got {tuple(b_k.shape)}"
             )
+        if check_finite and not bool(th.all(th.isfinite(b_k))):
+            raise RuntimeError(
+                "non-finite drift at internal flow step "
+                f"{k + 1}/{max_n} ({active.numel()} active samples)"
+            )
         h_k = step_size.index_select(0, active)
         x_next = x_k + b_k * h_k
         if limit is not None:
@@ -158,6 +172,11 @@ def integrate_drift(
                     n_steps.index_select(0, active)[:, 0] == (k + 1)
                 ).unsqueeze(-1)
                 x_next = th.where(is_final, x_next, bounded)
+        if check_finite and not bool(th.all(th.isfinite(x_next))):
+            raise RuntimeError(
+                "non-finite state at internal flow step "
+                f"{k + 1}/{max_n} ({active.numel()} active samples)"
+            )
         x_hat = x_hat.index_copy(0, active, x_next)
 
     return x_hat
@@ -186,6 +205,12 @@ class DOFLayout:
     ground reaction cannot be absorbed into M as a contact proxy.
     contact_tangent_cfg is the config-DOF index of the horizontal translation that
     contact friction pushes against (cheetah: the cyclic root x).
+
+    Mechanism fields are opt-in so legacy layouts retain their architecture:
+    ``periodic_pos`` feeds sin/cos rather than a raw angle to the mechanical
+    networks; ``potential_invariant_pos`` removes known cyclic translations from
+    the learned base potential; and ``joint_limits`` adds explicit conservative
+    spring storage plus localized passive damping at known rails.
     """
 
     obs_dim: int
@@ -196,6 +221,20 @@ class DOFLayout:
     act_to_cfg: Optional[Tuple[int, ...]] = None
     m_invariant_pos: Tuple[int, ...] = ()
     contact_tangent_cfg: Optional[int] = None
+    # Optional structure known from the mechanism.  Defaults deliberately keep
+    # the historical cheetah/raw-state architecture unchanged.
+    enforce_m_invariance: bool = False
+    potential_invariant_pos: Tuple[int, ...] = ()
+    periodic_pos: Tuple[int, ...] = ()
+    damping_log_init: float = -2.0
+    base_damping_reg: float = 0.0
+    # Smooth unilateral joint limits, as (observed-position index, lower,
+    # upper).  The base learned potential remains independent of any coordinate
+    # in ``potential_invariant_pos``; limit energy is added explicitly.
+    joint_limits: Tuple[Tuple[int, float, float], ...] = ()
+    joint_limit_width: float = 0.02
+    joint_limit_stiffness_init: float = 1.0
+    joint_limit_damping_init: float = 0.1
 
     @property
     def npos(self) -> int:
@@ -225,6 +264,34 @@ class DOFLayout:
         assert all(0 <= i < self.npos for i in self.m_invariant_pos), (
             "m_invariant_pos indexes observed positions, so entries must be in [0, npos)"
         )
+        assert all(0 <= i < self.npos for i in self.potential_invariant_pos), (
+            "potential_invariant_pos indexes observed positions"
+        )
+        assert all(0 <= i < self.npos for i in self.periodic_pos), (
+            "periodic_pos indexes observed positions"
+        )
+        assert len(set(self.m_invariant_pos)) == len(self.m_invariant_pos)
+        assert len(set(self.potential_invariant_pos)) == len(self.potential_invariant_pos)
+        assert len(set(self.periodic_pos)) == len(self.periodic_pos)
+        assert np.isfinite(self.damping_log_init)
+        assert np.isfinite(self.base_damping_reg) and self.base_damping_reg >= 0.0
+        assert np.isfinite(self.joint_limit_width) and self.joint_limit_width > 0.0
+        assert (
+            np.isfinite(self.joint_limit_stiffness_init)
+            and self.joint_limit_stiffness_init > 0.0
+        )
+        assert (
+            np.isfinite(self.joint_limit_damping_init)
+            and self.joint_limit_damping_init >= 0.0
+        )
+        seen_limits = set()
+        for pos_i, lower, upper in self.joint_limits:
+            assert 0 <= pos_i < self.npos, "joint limit position index out of range"
+            assert pos_i not in seen_limits, "a position may have at most one joint limit"
+            assert np.isfinite(lower) and np.isfinite(upper) and lower < upper, (
+                "joint limit bounds must be finite and ordered"
+            )
+            seen_limits.add(pos_i)
         if self.contact_tangent_cfg is not None:
             assert 0 <= self.contact_tangent_cfg < self.nv, "contact_tangent_cfg out of range"
 
@@ -242,6 +309,44 @@ class DOFLayout:
             cyclic_cfg=(),
             obs_pos_to_cfg=tuple(range(int(nv))),
             act_to_cfg=act_to_cfg,
+        )
+
+    @classmethod
+    def cartpole(
+        cls,
+        slider_limit: Tuple[float, float] = (-1.8, 1.8),
+        *,
+        joint_limit_width: float = 0.02,
+        joint_limit_stiffness_init: float = 100.0,
+        joint_limit_damping_init: float = 1.0,
+        base_damping_reg: float = 1e-3,
+    ) -> "DOFLayout":
+        """Mechanics-aware layout for dm_control's raw-state cartpole.
+
+        The state is ``[cart_x, pole_angle, cart_velocity, pole_velocity]``.
+        Rigid-body inertia and gravity are invariant to cart translation, while
+        the hinge dependence is periodic.  The rail limits are represented by a
+        separate smooth unilateral potential/dissipation port, and the single
+        actuator applies generalized force only to the cart slider.
+        """
+        lower, upper = (float(slider_limit[0]), float(slider_limit[1]))
+        return cls(
+            obs_dim=4,
+            pos_slice=(0, 2),
+            vel_slice=(2, 4),
+            cyclic_cfg=(),
+            obs_pos_to_cfg=(0, 1),
+            act_to_cfg=(0,),
+            m_invariant_pos=(0,),
+            enforce_m_invariance=True,
+            potential_invariant_pos=(0,),
+            periodic_pos=(1,),
+            damping_log_init=-8.0,
+            base_damping_reg=float(base_damping_reg),
+            joint_limits=((0, lower, upper),),
+            joint_limit_width=float(joint_limit_width),
+            joint_limit_stiffness_init=float(joint_limit_stiffness_init),
+            joint_limit_damping_init=float(joint_limit_damping_init),
         )
 
     @classmethod
@@ -279,6 +384,9 @@ class PortHamiltonianModel(nn.Module):
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
         structured_hidden: Sequence[int] = (128, 128),
+        mass_logdet_reg: float = 0.0,
+        mass_condition_reg: float = 0.0,
+        mass_condition_limit: float = 1e3,
     ) -> None:
         super().__init__()
         self.mode = str(mode)
@@ -288,6 +396,17 @@ class PortHamiltonianModel(nn.Module):
         self.contact_force = int(contact_force)
         self.device = th.device(device)
         self._drift_fn = drift_fn
+        self.last_fit_accepted: bool = False
+        self.last_fit_grad_norm: float = float("nan")
+        self.mass_logdet_reg = float(mass_logdet_reg)
+        self.mass_condition_reg = float(mass_condition_reg)
+        self.mass_condition_limit = float(mass_condition_limit)
+        if self.mass_logdet_reg < 0.0 or not np.isfinite(self.mass_logdet_reg):
+            raise ValueError("mass_logdet_reg must be finite and non-negative")
+        if self.mass_condition_reg < 0.0 or not np.isfinite(self.mass_condition_reg):
+            raise ValueError("mass_condition_reg must be finite and non-negative")
+        if self.mass_condition_limit <= 1.0 or not np.isfinite(self.mass_condition_limit):
+            raise ValueError("mass_condition_limit must be finite and greater than 1")
         if self.contact_force > 0 and self.mode != "structured":
             raise ValueError(
                 "contact_force > 0 (the explicit contact port) requires mode='structured'."
@@ -338,6 +457,7 @@ class PortHamiltonianModel(nn.Module):
         )
         assert layout.obs_dim == self.obs_dim, "dof_layout.obs_dim must match obs_dim"
         self.layout = layout
+        self.base_damping_reg = float(layout.base_damping_reg)
         nv, npos = layout.nv, layout.npos
 
         def mlp(out: int, inp: int = npos) -> nn.Sequential:
@@ -349,27 +469,39 @@ class PortHamiltonianModel(nn.Module):
             layers += [nn.Linear(last, out)]
             return nn.Sequential(*layers)
 
-        # With the explicit contact port active, translation-invariant coordinates
-        # (layout.m_invariant_pos, e.g. root height) are excluded from the mass
-        # input: dM/dq is then exactly zero along them, so ground reaction cannot
-        # be absorbed into M — and through dM/dq into the generated Coriolis
-        # terms — as a contact proxy. Without the port the input is left intact
-        # so existing checkpoints keep their architecture.
-        if self.contact_force > 0 and layout.m_invariant_pos:
-            keep = [i for i in range(npos) if i not in layout.m_invariant_pos]
+        # Existing cheetah checkpoints excluded the translation coordinate only
+        # with the explicit contact port.  ``enforce_m_invariance`` opts a layout
+        # (cartpole) into the same exact invariant without changing that default.
+        mass_excluded = (
+            tuple(layout.m_invariant_pos)
+            if layout.m_invariant_pos
+            and (self.contact_force > 0 or layout.enforce_m_invariance)
+            else ()
+        )
+        potential_excluded = tuple(layout.potential_invariant_pos)
+        self._mass_excluded_pos = mass_excluded
+        self._potential_excluded_pos = potential_excluded
+        self._periodic_pos = tuple(layout.periodic_pos)
+        # Keep the legacy attribute/None-buffer contract used by recovery and
+        # old checkpoints.  None buffers do not appear in a state_dict.
+        if mass_excluded:
+            keep = [i for i in range(npos) if i not in mass_excluded]
             self.register_buffer("_mass_in_idx", th.tensor(keep, dtype=th.long))
-            mass_in = len(keep)
         else:
             self.register_buffer("_mass_in_idx", None)
-            mass_in = npos
+
+        mass_in = self._position_feature_dim(mass_excluded)
+        potential_in = self._position_feature_dim(potential_excluded)
         self.mass_net = mlp(nv * (nv + 1) // 2, inp=mass_in)  # Cholesky entries of M(q)
-        self.potential_net = mlp(1)              # scalar potential V(q)
+        self.potential_net = mlp(1, inp=potential_in)  # invariant base potential V(q)
         # G_a maps the action (action_dim) to a generalized force. Dense: one force
         # per config DOF (nv). Sparse: one force per (actuator -> DOF) target in
         # act_to_cfg, scattered additively onto the config axis in the drift.
         n_force = nv if layout.act_to_cfg is None else len(layout.act_to_cfg)
         self.G_a = nn.Linear(self.action_dim, n_force, bias=False)
-        self._log_d = nn.Parameter(th.full((nv,), -2.0))  # base diagonal damping
+        self._log_d = nn.Parameter(
+            th.full((nv,), float(layout.damping_log_init))
+        )  # base diagonal damping
 
         ti = th.tril_indices(nv, nv)
         self.register_buffer("_tri_flat", ti[0] * nv + ti[1])
@@ -377,6 +509,41 @@ class PortHamiltonianModel(nn.Module):
         self.register_buffer("_pos_to_cfg", th.tensor(layout.obs_pos_to_cfg, dtype=th.long))
         if layout.act_to_cfg is not None:
             self.register_buffer("_act_to_cfg", th.tensor(layout.act_to_cfg, dtype=th.long))
+
+        if layout.joint_limits:
+            limit_pos = [int(spec[0]) for spec in layout.joint_limits]
+            limit_cfg = [int(layout.obs_pos_to_cfg[i]) for i in limit_pos]
+            self.register_buffer("_limit_pos_idx", th.tensor(limit_pos, dtype=th.long))
+            self.register_buffer("_limit_cfg_idx", th.tensor(limit_cfg, dtype=th.long))
+            self.register_buffer(
+                "_limit_lower",
+                th.tensor([float(spec[1]) for spec in layout.joint_limits]),
+            )
+            self.register_buffer(
+                "_limit_upper",
+                th.tensor([float(spec[2]) for spec in layout.joint_limits]),
+            )
+            # Positive stiffness/damping through softplus.  The damping is
+            # localized at the rail and is distinct from the near-zero base D.
+            self._limit_raw = nn.Parameter(
+                th.stack(
+                    [
+                        th.full(
+                            (len(limit_pos),),
+                            _inverse_softplus(layout.joint_limit_stiffness_init),
+                        ),
+                        th.full(
+                            (len(limit_pos),),
+                            _inverse_softplus(layout.joint_limit_damping_init),
+                        ),
+                    ]
+                )
+            )
+        else:
+            self.register_buffer("_limit_pos_idx", None)
+            self.register_buffer("_limit_cfg_idx", None)
+            self.register_buffer("_limit_lower", None)
+            self.register_buffer("_limit_upper", None)
 
         if self.contact_force > 0:
             # Explicit contact-force port: K learned point contacts against the
@@ -430,13 +597,42 @@ class PortHamiltonianModel(nn.Module):
 
     # ---- structured helpers (per-sample; vmap'd over the batch) ----
 
+    def _position_feature_dim(self, excluded: Tuple[int, ...]) -> int:
+        """Width of the invariant/periodic feature map used by M or base V."""
+        keep = [i for i in range(self.layout.npos) if i not in excluded]
+        width = sum(2 if i in self._periodic_pos else 1 for i in keep)
+        if width == 0:
+            raise ValueError("a structured mechanics network needs at least one position feature")
+        return width
+
+    def _position_features(
+        self, pos: th.Tensor, excluded: Tuple[int, ...]
+    ) -> th.Tensor:
+        """Map one position vector to invariant, periodic mechanics features.
+
+        Raw generalized coordinates remain the model state, so ``qdot = qd`` is
+        unchanged.  Only the learned mechanical objects see sin/cos features.
+        The fast path preserves the exact historical cheetah computation.
+        """
+        if not excluded and not self._periodic_pos:
+            return pos
+        features = []
+        for i in range(self.layout.npos):
+            if i in excluded:
+                continue
+            if i in self._periodic_pos:
+                features.extend((th.sin(pos[i]), th.cos(pos[i])))
+            else:
+                features.append(pos[i])
+        return th.stack(features)
+
     def _mass(self, pos: th.Tensor) -> th.Tensor:
         """SPD mass matrix M(q) = L L^T + eps I from a Cholesky factor with a
         softplus-positive diagonal. Single-sample (pos: (npos,)) for vmap.
         Translation-invariant coordinates are dropped from the input when the
-        contact port is active (see _init_structured)."""
+        contact port or the selected layout enforces that invariant."""
         nv = self.layout.nv
-        l = self.mass_net(pos if self._mass_in_idx is None else pos[self._mass_in_idx])
+        l = self.mass_net(self._position_features(pos, self._mass_excluded_pos))
         L = th.zeros(nv * nv, dtype=pos.dtype, device=pos.device).scatter(
             0, self._tri_flat, l
         ).reshape(nv, nv)
@@ -444,14 +640,63 @@ class PortHamiltonianModel(nn.Module):
         L = L - th.diag_embed(d) + th.diag_embed(th.nn.functional.softplus(d) + 1e-3)
         return L @ L.t() + 1e-4 * self._eye_nv
 
+    def _base_potential(self, pos: th.Tensor) -> th.Tensor:
+        """Learned smooth potential, before explicit joint-limit storage."""
+        return self.potential_net(
+            self._position_features(pos, self._potential_excluded_pos)
+        ).squeeze(-1)
+
+    def _joint_limit_energy(self, pos: th.Tensor) -> th.Tensor:
+        """Smooth unilateral spring energy for one position vector.
+
+        ``w*softplus(penetration/w)`` is a differentiable positive-part.  Its
+        squared energy yields an inward conservative force on either rail and
+        exponentially vanishing force in the interior.
+        """
+        if self._limit_pos_idx is None:
+            return pos.new_zeros(())
+        q = pos.index_select(0, self._limit_pos_idx)
+        w = float(self.layout.joint_limit_width)
+        lower_pen = th.nn.functional.softplus((self._limit_lower - q) / w) * w
+        upper_pen = th.nn.functional.softplus((q - self._limit_upper) / w) * w
+        k = th.nn.functional.softplus(self._limit_raw[0])
+        # A tensor-valued half keeps forward-mode Jacobians in the model dtype
+        # (a Python 0.5 currently promotes the JVP tangent to float64 in PyTorch).
+        return k.new_tensor(0.5) * (
+            k * (lower_pen.square() + upper_pen.square())
+        ).sum()
+
     def _potential(self, pos: th.Tensor) -> th.Tensor:
-        return self.potential_net(pos).squeeze(-1)
+        # The explicit rail spring is part of stored mechanical energy; keeping
+        # it inside V makes its force enter canonically as -grad V.
+        return self._base_potential(pos) + self._joint_limit_energy(pos)
 
     def _damping(self, pos: th.Tensor) -> th.Tensor:
         """Constant diagonal PSD damping D = diag(softplus(log_d)) — passive joint
         damping. Contact dissipation belongs to the explicit port. (B, nv, nv)."""
         B = pos.shape[0]
         return th.diag_embed(th.nn.functional.softplus(self._log_d)).unsqueeze(0).expand(B, -1, -1)
+
+    def _joint_limit_damping_force(
+        self, pos: th.Tensor, qd: th.Tensor
+    ) -> th.Tensor:
+        """Localized smooth rail damping as a generalized force, shape (B,nv).
+
+        The activation approaches one outside either rail and vanishes
+        exponentially in the interior.  The force is always opposite velocity,
+        so ``qd.T @ F_limit <= 0`` for every state, including during separation.
+        """
+        if self._limit_pos_idx is None:
+            return th.zeros_like(qd)
+        q = pos.index_select(1, self._limit_pos_idx)
+        v = qd.index_select(1, self._limit_cfg_idx)
+        w = float(self.layout.joint_limit_width)
+        activation = th.sigmoid((self._limit_lower - q) / w) + th.sigmoid(
+            (q - self._limit_upper) / w
+        )
+        c = th.nn.functional.softplus(self._limit_raw[1])
+        force_limited = -c * activation * v
+        return th.zeros_like(qd).index_add(1, self._limit_cfg_idx, force_limited)
 
     def _gaps(self, pos: th.Tensor) -> th.Tensor:
         return self.gap_net(pos)
@@ -538,6 +783,9 @@ class PortHamiltonianModel(nn.Module):
                 1, self._act_to_cfg, self.G_a(a)
             )
         pdot = -dHdq - D_qd + Ga
+        # The conservative rail spring is already in gV through _potential;
+        # this separate port contributes only non-positive damping power.
+        pdot = pdot + self._joint_limit_damping_force(pos, qd)
         if self.contact_force > 0:
             pdot = pdot + self._contact_force_gen(pos, qd)
         Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
@@ -605,10 +853,89 @@ class PortHamiltonianModel(nn.Module):
     # parameters and, through the critic target, the whole agent.
     fit_max_grad_norm: float = 10.0
 
+    @staticmethod
+    def _duration_balance_weights(
+        dt: th.Tensor, balance_dt: Optional[float]
+    ) -> th.Tensor:
+        """Endpoint weights that remove the quadratic duration leverage.
+
+        A flow endpoint error is approximately ``dt * drift_error``, so its
+        squared loss otherwise gives a 30 ms transition 225 times the leverage
+        of a 2 ms transition.  ``balance_dt`` retains and fully integrates every
+        interval but caps that leverage with
+        ``w=(balance_dt/max(dt,balance_dt))^2``.  The caller normalizes by the
+        sum of weights.
+        """
+        if balance_dt is None:
+            return th.ones_like(dt)
+        ref = float(balance_dt)
+        if not np.isfinite(ref) or ref <= 0.0:
+            raise ValueError("balance_dt must be finite and > 0")
+        ref_t = dt.new_tensor(ref)
+        return (ref_t / th.maximum(dt, ref_t)).square()
+
+    def _mass_regularization(self, obs: th.Tensor) -> th.Tensor:
+        """Optional numerical gauge and condition penalties for structured M.
+
+        The mean log-determinant anchor chooses one representative of the
+        otherwise free global mechanical scale.  The condition penalty is zero
+        below ``mass_condition_limit``.  Both default to zero, preserving all
+        existing fits and checkpoints.
+        """
+        if self.mode != "structured" or (
+            self.mass_logdet_reg == 0.0 and self.mass_condition_reg == 0.0
+        ):
+            return obs.new_zeros(())
+        pos = obs[:, self.layout.pos_slice[0]:self.layout.pos_slice[1]]
+        M = vmap(self._mass)(pos)
+        penalty = obs.new_zeros(())
+        if self.mass_logdet_reg > 0.0:
+            logdet = th.linalg.slogdet(M).logabsdet
+            penalty = penalty + self.mass_logdet_reg * logdet.mean().square()
+        if self.mass_condition_reg > 0.0:
+            eig = th.linalg.eigvalsh(M)
+            cond = eig[:, -1] / eig[:, 0].clamp_min(1e-8)
+            log_limit = cond.new_tensor(np.log(self.mass_condition_limit))
+            excess = th.relu(th.log(cond) - log_limit)
+            penalty = penalty + self.mass_condition_reg * excess.square().mean()
+        return penalty
+
+    def _base_damping_regularization(self) -> th.Tensor:
+        """Optional relative-scale prior that keeps near-zero base damping small."""
+        if self.mode != "structured" or self.base_damping_reg == 0.0:
+            # Every learned structured/phast mode has at least one parameter;
+            # use it only to construct a correctly placed scalar zero.
+            return next(self.parameters()).new_zeros(())
+        target = self._log_d.new_tensor(float(self.layout.damping_log_init))
+        return self.base_damping_reg * (self._log_d - target).square().mean()
+
+    def mass_diagnostics(self, obs) -> dict[str, float]:
+        """Condition/gauge diagnostics on a batch of structured-model states."""
+        if self.mode != "structured":
+            raise ValueError("mass_diagnostics requires mode='structured'")
+        x = th.as_tensor(obs, dtype=th.float32, device=self.device)
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        pos = x[:, self.layout.pos_slice[0]:self.layout.pos_slice[1]]
+        with th.no_grad():
+            M = vmap(self._mass)(pos)
+            eig = th.linalg.eigvalsh(M)
+            cond = eig[:, -1] / eig[:, 0].clamp_min(1e-12)
+            logdet = th.linalg.slogdet(M).logabsdet
+        return {
+            "min_eig": float(eig[:, 0].min()),
+            "max_eig": float(eig[:, -1].max()),
+            "condition_mean": float(cond.mean()),
+            "condition_max": float(cond.max()),
+            "logdet_mean": float(logdet.mean()),
+        }
+
     def _fit_optimizer_step(self, loss: th.Tensor, optimizer) -> float:
         """backward + clipped step, skipping the update (not the report) when
         the loss or the gradient norm is non-finite, so a pathological batch
         cannot write NaN into the parameters."""
+        self.last_fit_accepted = False
+        self.last_fit_grad_norm = float("nan")
         optimizer.zero_grad()
         if not th.isfinite(loss):
             return float(loss.detach())
@@ -617,13 +944,22 @@ class PortHamiltonianModel(nn.Module):
             [p for g in optimizer.param_groups for p in g["params"]],
             self.fit_max_grad_norm,
         )
+        self.last_fit_grad_norm = float(total_norm.detach())
         if th.isfinite(total_norm):
             optimizer.step()
+            params = [
+                p for group in optimizer.param_groups for p in group["params"]
+            ]
+            self.last_fit_accepted = bool(
+                th.stack([th.isfinite(p).all() for p in params]).all()
+            )
         optimizer.zero_grad(set_to_none=True)
         return float(loss.detach())
 
     def fit_step(
-        self, obs, action, next_obs, dt, optimizer, *, max_step: Optional[float] = None
+        self, obs, action, next_obs, dt, optimizer, *,
+        max_step: Optional[float] = None,
+        balance_dt: Optional[float] = None,
     ) -> float:
         """One supervised flow-matching step.
 
@@ -631,6 +967,8 @@ class PortHamiltonianModel(nn.Module):
         duration, using physics-sized internal steps when ``max_step`` is supplied,
         before its endpoint is compared with ``x'``.  This keeps irregular replay
         intervals while avoiding the old coarse-secant target ``x + b(x,a)*dt``.
+        ``balance_dt`` optionally weights endpoint losses by
+        ``(balance_dt/max(dt,balance_dt))**2`` without shortening any interval.
         """
         assert self.mode in ("phast", "structured"), (
             "fit_step only applies to learned modes ('phast', 'structured')."
@@ -639,6 +977,10 @@ class PortHamiltonianModel(nn.Module):
         a = th.as_tensor(action, dtype=th.float32, device=self.device)
         xp = th.as_tensor(next_obs, dtype=th.float32, device=self.device)
         dt_t = th.as_tensor(dt, dtype=th.float32, device=self.device).reshape(-1, 1)
+        if dt_t.shape[0] == 1 and x.shape[0] != 1:
+            dt_t = dt_t.expand(x.shape[0], 1)
+        elif dt_t.shape[0] != x.shape[0]:
+            raise ValueError("dt must be scalar or have one value per sample")
         # Healthy predictions stay well inside this generous data-scaled bound;
         # a runaway internal roll saturates before a later drift call sees inf.
         delta_limit = 5.0 * (xp - x).abs() + 1e-3 if max_step is not None else None
@@ -651,12 +993,21 @@ class PortHamiltonianModel(nn.Module):
             delta_limit=delta_limit,
             clamp_final=False,
         )
-        loss = ((pred - xp) ** 2).mean()
+        weight = self._duration_balance_weights(dt_t, balance_dt)
+        loss = (weight * (pred - xp).square()).sum() / (
+            weight.sum() * self.obs_dim + 1e-8
+        )
+        loss = (
+            loss
+            + self._mass_regularization(x)
+            + self._base_damping_regularization()
+        )
         return self._fit_optimizer_step(loss, optimizer)
 
     def fit_step_rollout(
         self, obs, actions, next_obs, dt, mask, optimizer, *,
         max_step: Optional[float] = None,
+        balance_dt: Optional[float] = None,
     ) -> float:
         """Multi-transition flow-matching step.
 
@@ -674,7 +1025,7 @@ class PortHamiltonianModel(nn.Module):
         its own predictions, not only on buffer states. ``mask`` (1 valid,
         0 invalid, cumulative) zeroes the steps of a window that crosses an
         episode end or the ring seam; ``horizon=1`` with a full mask is exactly
-        ``fit_step`` when both use the same ``max_step``.
+        ``fit_step`` when both use the same ``max_step`` and ``balance_dt``.
 
         The compounding steps evaluate the drift at model-predicted states, where
         the velocity-quadratic Coriolis term can overflow. Internal states and
@@ -700,6 +1051,8 @@ class PortHamiltonianModel(nn.Module):
             batch, -1, 1
         )
         horizon = a.shape[1]
+        duration_weight = self._duration_balance_weights(dt_t, balance_dt)
+        endpoint_weight = m * duration_weight
 
         # Per-sample, per-dimension bound on a compounding Euler increment:
         # 5x the largest observed one-step change in this window.
@@ -734,6 +1087,15 @@ class PortHamiltonianModel(nn.Module):
                 step = th.clamp(step, -step_limit, step_limit)
                 x_hat = x_hat + step
                 x_loss = x_hat
-            loss = loss + (m[:, k] * (x_loss - xp[:, k]) ** 2).sum()
-        loss = loss / (m.sum() * self.obs_dim + 1e-8)
+            loss = loss + (
+                endpoint_weight[:, k] * (x_loss - xp[:, k]).square()
+            ).sum()
+        loss = loss / (endpoint_weight.sum() * self.obs_dim + 1e-8)
+        loss = (
+            loss
+            + self._mass_regularization(
+                th.as_tensor(obs, dtype=th.float32, device=self.device)
+            )
+            + self._base_damping_regularization()
+        )
         return self._fit_optimizer_step(loss, optimizer)

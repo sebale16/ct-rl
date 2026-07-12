@@ -279,9 +279,19 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
 
     with th.no_grad():
         M = vmap(m._mass)(pos)                                   # (B, nv, nv)
-        V = vmap(m._potential)(pos)                              # (B,)
+        V_total = vmap(m._potential)(pos)                        # (B,)
         dM_pos = vmap(jacfwd(m._mass))(pos)                      # (B, nv, nv, npos)
-        gV_pos = vmap(jacfwd(m._potential))(pos)                 # (B, npos)
+        if getattr(m, "_limit_pos_idx", None) is not None:
+            # MuJoCo reports rail reactions in qfrc_constraint, not in the
+            # gravity potential. Keep the invariant base potential comparison
+            # separate from the explicit learned limit port.
+            V = vmap(m._base_potential)(pos)
+            gV_pos = vmap(jacfwd(m._base_potential))(pos)
+            gV_total_pos = vmap(jacfwd(m._potential))(pos)
+        else:
+            V = V_total
+            gV_pos = vmap(jacfwd(m._potential))(pos)             # (B, npos)
+            gV_total_pos = gV_pos
         dM = th.zeros(B, nv, nv, nv).index_copy(3, m._pos_to_cfg, dM_pos)
         gV = th.zeros(B, nv).index_copy(1, m._pos_to_cfg, gV_pos)
         # Coriolis force in the momentum balance M qdd + c(q,qd) = -grad V + ...
@@ -309,6 +319,18 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
             # guaranteed by construction when the mass input excludes them
             m_input_excluded=bool(getattr(m, "_mass_in_idx", None) is not None),
         )
+
+        if getattr(m, "_limit_pos_idx", None) is not None:
+            gV_limit_pos = gV_total_pos - gV_pos
+            gV_limit = th.zeros(B, nv).index_copy(
+                1, m._pos_to_cfg, gV_limit_pos
+            )
+            F_limit_damp = m._joint_limit_damping_force(pos, qd)
+            out["V_total"] = V_total.numpy()
+            out["joint_limit_energy"] = (V_total - V).numpy()
+            out["joint_limit_F_spring"] = (-gV_limit).numpy()
+            out["joint_limit_F_damp"] = F_limit_damp.numpy()
+            out["joint_limit_F"] = (-gV_limit + F_limit_damp).numpy()
 
         # Contact port: the gap springs k_i phi(g_i) grad g_i are themselves a
         # conservative field, and on always-in-contact data they are nearly
@@ -580,6 +602,25 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
         force_metrics(rep, "actuator_force", act @ (c * learned["G"]).T,
                       act @ truth["G"].T)
 
+    # Explicit unilateral joint-limit port (cartpole rail). MuJoCo exposes the
+    # comparison force through qfrc_constraint rather than the gravity
+    # potential, so keep this axis separate from gradV_force above.
+    if (
+        "joint_limit_F" in learned
+        and "qfrc_contact" in truth
+        and np.linalg.norm(truth["qfrc_contact"]) > 0
+    ):
+        force_metrics(
+            rep,
+            "joint_limit_force",
+            c * learned["joint_limit_F"],
+            truth["qfrc_contact"],
+            strata=strata,
+        )
+        rep["joint_limit_energy_mean"] = float(
+            (c * learned["joint_limit_energy"]).mean()
+        )
+
     # ---- contact port ----
     # with the contact port, V alone is not the whole learned conservative
     # field: compare the combined gradient too, and record how much of the
@@ -818,13 +859,16 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
     decrease" test is invalid under control — actuator work can raise the
     mechanical energy — so the residual accounts for every port:
 
-        dE/dt = qd.G_a a  -  qd.D qd  +  sum_i (lam_i gdot_i + f_t,i v_t,i),
+        dE/dt = qd.G_a a - qd.D qd + qd.F_limit,damp
+                + sum_i (lam_i gdot_i + f_t,i v_t,i),
 
     with E = V + T the mechanical energy; the contact sum contains the
     conservative spring exchange (storage, sign-indefinite) plus the
-    compression and friction dissipation (<= 0). ``residual_nrmse`` checks the
-    identity itself; ``passivity_violation_frac`` counts states whose energy
-    rise is NOT explained by actuator work plus spring release."""
+    compression and friction dissipation (<= 0). The optional rail-limit
+    potential is already part of ``E``; only its localized damping force enters
+    the right-hand-side power ledger. ``residual_nrmse`` checks the identity
+    itself; ``passivity_violation_frac`` counts states whose energy rise is NOT
+    explained by actuator work plus spring release."""
     assert m.mode == "structured"
     lay = m.layout
     x = th.as_tensor(np.asarray(obs), dtype=th.float32).requires_grad_(True)
@@ -845,6 +889,10 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
         p_act = (qd_d * Ga).sum(-1)
         d = th.nn.functional.softplus(m._log_d)
         p_damp = -(qd_d * d * qd_d).sum(-1)
+        p_limit = th.zeros_like(p_act)
+        if getattr(m, "_limit_pos_idx", None) is not None:
+            limit_force = m._joint_limit_damping_force(pos_d, qd_d)
+            p_limit = (qd_d * limit_force).sum(-1)
         p_contact = th.zeros_like(p_act)
         p_spring = th.zeros_like(p_act)
         if getattr(m, "contact_force", 0) > 0:
@@ -854,7 +902,7 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
             phi = th.nn.functional.softplus(-g / w) * w
             p_contact = (lam * gdot + f_t * v_t).sum(-1)
             p_spring = (k_i * phi * gdot).sum(-1)
-        rhs = p_act + p_damp + p_contact
+        rhs = p_act + p_damp + p_limit + p_contact
         resid = (Edot - rhs).numpy()
         scale = float(np.abs(Edot.numpy()).mean() + np.abs(rhs.numpy()).mean()) + 1e-12
         # unexplained energy rise: dE/dt beyond actuator input + spring release
@@ -864,6 +912,7 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
         "passivity_violation_frac": float((unexplained > 1e-3 * scale).mean()),
         "power_actuator_mean": float(p_act.mean()),
         "power_damping_mean": float(p_damp.mean()),
+        "power_joint_limit_mean": float(p_limit.mean()),
         "power_contact_mean": float(p_contact.mean()),
         "power_spring_mean": float(p_spring.mean()),
         "dE_dt_mean": float(Edot.mean()),
@@ -893,13 +942,17 @@ def sanity_check_truth(truth: dict, obs: np.ndarray, pos_width: int,
 
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
               contact_force=0, hidden=(128, 128), seed=1, log_every=1000,
-              dof_layout=None, integration_step=None):
+              dof_layout=None, integration_step=None, mass_logdet_reg=0.0,
+              mass_condition_reg=0.0, mass_condition_limit=1e3):
     th.manual_seed(seed)
     od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
     m = PortHamiltonianModel(od, ad, mode="structured",
                              structured_hidden=hidden,
                              contact_force=contact_force,
-                             dof_layout=dof_layout)
+                             dof_layout=dof_layout,
+                             mass_logdet_reg=mass_logdet_reg,
+                             mass_condition_reg=mass_condition_reg,
+                             mass_condition_limit=mass_condition_limit)
     buf = ReplayBuffer(len(O), env.observation_space, env.action_space,
                        device="cpu", n_envs=1)
     for i in range(len(O)):
@@ -1025,7 +1078,7 @@ def _print_primary(axes: dict):
           f" / {rep['total_H_locked_nrmse']:.3f}")
     for name in ("gradV_force", "gradV_combined", "coriolis_force",
                  "damping_force", "actuator_force", "contact_force",
-                 "contact_power"):
+                 "joint_limit_force", "contact_power"):
         if f"{name}_corr" in rep:
             print(f"{name:<22s} corr/nrmse : {rep[f'{name}_corr']:.3f}"
                   f" / {rep[f'{name}_nrmse']:.3f}  (p95 {rep[f'{name}_err_p95']:.3f})")
@@ -1075,8 +1128,32 @@ def _print_primary(axes: dict):
               f" unexplained-rise frac {e['passivity_violation_frac']:.3f}")
         print(f"  mean powers  act {e['power_actuator_mean']:+.3f}"
               f"  damp {e['power_damping_mean']:+.3f}"
+              f"  joint-limit {e['power_joint_limit_mean']:+.3f}"
               f"  contact {e['power_contact_mean']:+.3f}"
               f"  spring {e['power_spring_mean']:+.3f}")
+
+
+def _select_recovery_dof_layout(
+    domain: str,
+    raw_state_obs: bool,
+    obs_dim: int,
+    dynamics_state=None,
+):
+    """Select the audit model layout, retaining old-sidecar compatibility.
+
+    New raw cartpole runs use the mechanics-aware sparse actuator map. Sidecars
+    produced before that layout have a dense ``G_a`` with two output rows; use
+    the historical generic raw layout for those files so their already-recorded
+    recovery reports remain reproducible.
+    """
+    if not raw_state_obs:
+        return None
+    if domain == "cartpole":
+        ga = dynamics_state.get("G_a.weight") if dynamics_state is not None else None
+        if ga is not None and int(ga.shape[0]) != 1:
+            return DOFLayout.raw_state(nv=int(obs_dim) // 2)
+        return DOFLayout.cartpole()
+    return DOFLayout.raw_state(nv=int(obs_dim) // 2)
 
 
 def main():
@@ -1093,6 +1170,18 @@ def main():
                         "otherwise a model is fit offline on the collected data")
     p.add_argument("--fit_steps", type=int, default=8000)
     p.add_argument("--fit_horizon", type=int, default=4)
+    p.add_argument(
+        "--mass_logdet_reg", type=float, default=0.0,
+        help="offline-fit mass log-determinant gauge penalty (default: off)",
+    )
+    p.add_argument(
+        "--mass_condition_reg", type=float, default=0.0,
+        help="offline-fit mass condition-number penalty (default: off)",
+    )
+    p.add_argument(
+        "--mass_condition_limit", type=float, default=1e3,
+        help="condition threshold used by --mass_condition_reg",
+    )
     p.add_argument("--contact_force", type=int, default=0,
                    help="number of learned contact points for the explicit "
                         "contact-force port (must match --dynamics_path if given)")
@@ -1120,8 +1209,17 @@ def main():
     env = DMCContinuousEnv(domain, task, time_sampling="uniform", dt=0.01,
                            physics_dt=0.002, episode_duration=20.0, seed=args.seed,
                            raw_state_obs=args.raw_state_obs)
-    layout = (DOFLayout.raw_state(nv=int(env.observation_space.shape[0]) // 2)
-              if args.raw_state_obs else None)
+    dynamics_state = (
+        th.load(args.dynamics_path, map_location="cpu")
+        if args.dynamics_path
+        else None
+    )
+    layout = _select_recovery_dof_layout(
+        domain,
+        args.raw_state_obs,
+        int(env.observation_space.shape[0]),
+        dynamics_state,
+    )
     max_step = getattr(env, "physics_dt", None)
 
     def _load_policy(path):
@@ -1161,13 +1259,19 @@ def main():
         m = PortHamiltonianModel(od, ad, mode="structured",
                                  structured_hidden=(128, 128),
                                  contact_force=args.contact_force,
-                                 dof_layout=layout)
-        m.load_state_dict(th.load(args.dynamics_path, map_location="cpu"))
+                                 dof_layout=layout,
+                                 mass_logdet_reg=args.mass_logdet_reg,
+                                 mass_condition_reg=args.mass_condition_reg,
+                                 mass_condition_limit=args.mass_condition_limit)
+        m.load_state_dict(dynamics_state)
         print(f"loaded dynamics model from {args.dynamics_path}")
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
                       contact_force=args.contact_force, seed=args.seed + 1,
-                      dof_layout=layout)
+                      dof_layout=layout,
+                      mass_logdet_reg=args.mass_logdet_reg,
+                      mass_condition_reg=args.mass_condition_reg,
+                      mass_condition_limit=args.mass_condition_limit)
 
     # sanity of the truth extraction on the primary tail
     eval_obs = O[-args.n_eval:]

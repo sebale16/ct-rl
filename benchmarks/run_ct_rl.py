@@ -110,6 +110,49 @@ def make_ct_env(
     return env
 
 
+def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
+    """Choose a mechanics-aware layout through vector/wrapper layers.
+
+    Raw cartpole has information that the generic ``[q; qdot]`` layout cannot
+    infer from tensor shapes: its cart translation is invariant and its single
+    actuator drives only the slider. Other raw hinge/slide domains keep the
+    generic fallback until they have an equally explicit layout.
+
+    ``layout_cls`` is injected to keep the optional model-based import local and
+    make this selection rule independently testable.
+    """
+    current = env.envs[0] if hasattr(env, "envs") and env.envs else env
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if hasattr(current, "raw_state_obs"):
+            break
+        current = getattr(current, "env", None)
+
+    if current is None or not getattr(current, "raw_state_obs", False):
+        return None
+    if getattr(current, "domain_name", None) == "cartpole":
+        return layout_cls.cartpole()
+    return layout_cls.raw_state(nv=int(obs_dim) // 2)
+
+
+def _pop_structured_model_kwargs(algo_kwargs: dict) -> dict:
+    """Move dynamics-model regularizers out of the CTSAC kwargs namespace."""
+    return {
+        "mass_logdet_reg": float(
+            str(algo_kwargs.pop("dynamics_mass_logdet_reg", "") or "0").strip()
+        ),
+        "mass_condition_reg": float(
+            str(algo_kwargs.pop("dynamics_mass_condition_reg", "") or "0").strip()
+        ),
+        "mass_condition_limit": float(
+            str(
+                algo_kwargs.pop("dynamics_mass_condition_limit", "") or "1000"
+            ).strip()
+        ),
+    }
+
+
 def run_algorithm(
     algo: str,
     env_id: str,
@@ -281,17 +324,17 @@ def run_algorithm(
         contact_force = int(
             str(algo_kwargs.pop("dynamics_contact_force", "") or "").strip() or 0
         )
+        # Structured-model-only regularizers live in the benchmark's algo_*
+        # namespace for configuration, but are consumed by the dynamics model
+        # constructor rather than CTSAC itself.
+        structured_model_kwargs = _pop_structured_model_kwargs(algo_kwargs)
         obs_dim = int(np.prod(train_env.observation_space.shape))
         act_dim = int(np.prod(train_env.action_space.shape))
-        # Raw-state envs (obs = [qpos; qvel]) get the generic layout; the
-        # structured model otherwise defaults to the cheetah layout.
-        raw_env = train_env
-        while not hasattr(raw_env, "raw_state_obs") and hasattr(raw_env, "env"):
-            raw_env = raw_env.env
-        dof_layout = (
-            DOFLayout.raw_state(nv=obs_dim // 2)
-            if getattr(raw_env, "raw_state_obs", False)
-            else None
+        # Raw cartpole gets its known invariances and sparse actuation. Other
+        # raw hinge/slide domains keep the generic layout; non-raw structured
+        # models retain their existing domain default.
+        dof_layout = _select_structured_dof_layout(
+            train_env, obs_dim, DOFLayout
         )
         if source == "mujoco":
             base_env = train_env
@@ -323,8 +366,9 @@ def run_algorithm(
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
             # constant diagonal damping on momentum; optional explicit contact
             # port (dynamics_contact_force = number of learned contact points,
-            # which also makes M translation-invariant). Raw-state envs use the
-            # generic layout; the default layout is cheetah's.
+            # which also makes M translation-invariant). Raw cartpole uses its
+            # mechanics-aware layout; other raw-state envs use the generic
+            # layout, and the non-raw default remains cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(
                 obs_dim,
                 act_dim,
@@ -332,6 +376,7 @@ def run_algorithm(
                 human_input_intensity=intensity,
                 contact_force=contact_force,
                 dof_layout=dof_layout,
+                **structured_model_kwargs,
             )
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")

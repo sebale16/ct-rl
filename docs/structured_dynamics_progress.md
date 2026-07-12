@@ -59,11 +59,11 @@ The audits found why cheetah resisted. With no contact term in the model class, 
 
 ### July 7–9 — end-to-end cforce runs: peaks, declines, and the buffer
 
-The port lifted end-to-end returns 3–4× over the pre-port structured runs, to peaks of 330–357 — followed by long declines. The peak-vs-final audits cleared the rollout-fit model (its physics *improves* across the decline, §4), and the declines outlive the 300k replay buffer — the peak-gait data ages out, deleting any rebound attractor — which made the buffer the tested variable and added the buf1m rows. The completed 2×2 (fit mode × buffer) peaked at 295–357 in every cell, against ~800 for the single-seed model-free `top`: a cap no cell escaped.
+The port lifted end-to-end returns 3–4× over the pre-port structured runs, to peaks of 330–357 — followed by long declines. The peak-vs-final audits cleared the rollout-fit model (its physics *improves* across the decline), and the declines outlive the 300k replay buffer — the peak-gait data ages out, deleting any rebound attractor — which made the buffer the tested variable and added the buf1m rows. The completed 2×2 (fit mode × buffer) peaked at 295–357 in every cell, against ~800 for the single-seed model-free `top`: a cap no cell escaped.
 
 ### July 9–10 — ceiling isolation: the target construction beats the baseline
 
-With every learned-model cell capping near 300, the remaining suspects were the target construction itself and the model's coverage where the target reads it. One run separates them: `mbq_vhead_quad_buf1m` — the exact cforce target with the oracle drift, i.e. zero model error. Verdict at 12 seeds, 1M steps: **mean 1203 ± 165 vs 929 ± 297 for `top`** (median 1255 vs 1058), zero collapses vs several, still climbing at 1M while `top` plateaus from 400k. The backup construction is exonerated outright — it *beats* the model-free baseline — so the cforce cap is the learned drift at the points the target reads: candidate actions and faster-than-visited gaits. Coverage, in one word. The single-seed recovery audits of the 2×2 (§4) say the same thing from the other side: three of the four cells hold or improve their physics on the visited states across the decline.
+With every learned-model cell capping near 300, the remaining suspects were the target construction itself and the model's coverage where the target reads it. One run separates them: `mbq_vhead_quad_buf1m` — the exact cforce target with the oracle drift, i.e. zero model error. Verdict at 12 seeds, 1M steps: **mean 1203 ± 165 vs 929 ± 297 for `top`** (median 1255 vs 1058), zero collapses vs several, still climbing at 1M while `top` plateaus from 400k. The backup construction is exonerated outright — it *beats* the model-free baseline — so the cforce cap is the learned drift at the points the target reads: candidate actions and faster-than-visited gaits. Coverage, in one word. The single-seed recovery audits of the 2×2 say the same thing from the other side: three of the four cells hold or improve their physics on the visited states across the decline.
 
 ### July 11 — irregular-duration train/use mismatch and flow matching
 
@@ -81,9 +81,9 @@ An oracle numerical check on held-out cheetah states verifies the integration ch
 | run | seeds | result |
 |---|---|---|
 | `top` (model-free) | 12 | 929 ± 297 at 1M, median 1058; plateau from 400k; several collapses |
-| `top_buf1m` | — | **running** — attribution ablation (§5) |
+| `top_buf1m` | — | **running** — attribution ablation (§4) |
 | `mbq_vhead` (oracle, first-order) | few | 600–950 |
-| `mbq_vhead_quad` | — | **running** — attribution ablation (§5) |
+| `mbq_vhead_quad` | — | **running** — attribution ablation (§4) |
 | `mbq_vhead_quad_buf1m` | 12 | **1203 ± 165 at 1M**, median 1255; zero collapses; still climbing |
 | pre-port structured modes | 1 each | 3–4× below the cforce peaks; first rollout-fit run NaN-died at 260k, guarded rerun flat at 30–38 |
 | cforce / cforce_roll (300k) | 1 each | peak 330 / 357 → final 192 / 236 |
@@ -91,39 +91,11 @@ An oracle numerical check on held-out cheetah states verifies the integration ch
 
 ---
 
-## 4. Recovery audits of the cforce 2×2 (single seed, peak vs final checkpoint)
+## 4. What is being tested now
 
-Each run's saved dynamics model was audited on its own policy's state distribution at the best-eval ("peak") and last ("final") checkpoints. Gauge conventions, metric definitions, and reading guides are in [The Hamiltonian Recovery Report](https://hackmd.io/@-YScJRgTQoiFn3RF3xJ3Fg/S1LqGV1EMl). One seed per cell; the eval distribution is each checkpoint's own gait, so cross-run trends and signs are trustworthy and second-decimal differences are noise.
+**The guarded cartpole rerun.** The first learned-model attempt terminated 10/12 seeds on genuinely non-finite model-based targets. Its survivor had good local acceleration correlation but physically compensating terms: forbidden cart-position dependence in $M$, rough $\nabla V$, excessive damping, and wrong actuator magnitude. The result reinforced the irregular-duration train/use diagnosis—on matching data the 30 ms tail supplied about 95% of the old loss leverage—but also exposed count-only publication of a freshly mutated model and hard slider-limit forces hiding inside the nominally smooth task. The rerun combines duration-balanced flow matching with a mechanics-aware cartpole layout (periodic/invariant $M,V$, sparse actuation, explicit passive rail port) and a health-checked EMA target dynamics model. It stages $H=1\to4$, lowers the dynamics LR, waits for 10,000 accepted publications plus the V-head, and never publishes a rejected live candidate.
 
-**Physics recovery** (gauge-fixed; ∇V-combined is the potential read that respects the $V$↔port gauge):
-
-| run | ckpt (step) | reward | mass rel-err | mass corr | $\partial M/\partial z$ | potential $R^2$ | kinetic $R^2$ | total-$H$ $R^2$ | ∇V comb. | Coriolis | damping $R^2$ | $G_a$ err |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| cforce | peak (0.8M) | 329.9 | 0.26 | 0.96 | 0.00 | 0.53 | 0.76 | 0.83 | 0.70 | 0.85 | 0.14 | 0.60 |
-| cforce | final (2.0M) | 192.1 | 0.28 | 0.96 | 0.00 | 0.84 | −0.36 | 0.83 | 0.18 | 0.06 | 0.42 | 0.92 |
-| cforce_roll | peak (0.6M) | 357.2 | 0.62 | 0.78 | 0.00 | 0.73 | −3.18 | 0.65 | 0.79 | 0.62 | 0.42 | 0.70 |
-| cforce_roll | final (1.24M) | 236.4 | 0.36 | 0.93 | 0.00 | 0.82 | 0.64 | 0.91 | 0.63 | 0.69 | 0.02 | 0.65 |
-| cforce_buf1m | peak (1.53M) | 295.9 | 0.25 | 0.97 | 0.00 | 0.83 | 0.80 | 0.71 | 0.82 | 0.71 | 0.07 | 0.60 |
-| cforce_buf1m | final (2.0M) | 263.5 | 0.54 | 0.83 | 0.00 | 0.89 | −1.68 | 0.80 | 0.82 | 0.75 | 0.01 | 0.73 |
-| cforce_roll_buf1m | peak (1.32M) | 295.4 | 0.45 | 0.89 | 0.00 | 0.89 | 0.85 | 0.89 | 0.80 | −0.05 | 0.01 | 0.62 |
-| cforce_roll_buf1m | final (2.0M) | 219.1 | 0.21 | 0.98 | 0.00 | 0.96 | 0.76 | 0.89 | 0.89 | 0.50 | 0.75 | 0.61 |
-
-**Contact port and actuators:**
-
-| run | ckpt | gauge $c^*$ | in-frac | spring/∇V | gap mean / min | $k$ range | $\mu$ range | $G_a$ cosines |
-|---|---|---|---|---|---|---|---|---|
-| cforce | peak | 28.1 | 0.40 | 0.44 | 0.23 / −0.47 | 19.7–50.0 | 1.34–1.42 | 0.76–0.98 |
-| cforce | final | 6.5 | 0.36 | 0.03 | 0.03 / −0.13 | 6.5–8.7 | 1.01–1.29 | 0.57–0.90 |
-| cforce_roll | peak | 13.3 | 0.37 | 0.11 | 0.28 / −0.53 | 7.9–15.6 | 0.90–1.03 | 0.76–0.94 |
-| cforce_roll | final | 14.8 | 0.52 | 0.62 | 0.61 / −0.54 | 15.7–33.7 | 0.68–1.45 | 0.75–0.98 |
-| cforce_buf1m | peak | 30.6 | 0.52 | 0.36 | 0.20 / −0.52 | 19.8–58.4 | 0.82–1.11 | 0.81–1.00 |
-| cforce_buf1m | final | 14.6 | 0.50 | 0.19 | 0.11 / −0.75 | 11.2–20.6 | 0.93–1.20 | 0.69–0.95 |
-| cforce_roll_buf1m | peak | 16.1 | 0.50 | 0.23 | 0.08 / −0.25 | 16.5–30.9 | 0.64–1.21 | 0.82–0.92 |
-| cforce_roll_buf1m | final | 19.7 | 0.51 | 0.21 | 0.16 / −0.57 | 24.9–41.2 | 1.02–1.18 | 0.79–0.99 |
-
----
-
-## 5. What is being tested now
+**The flow-matching cforce rerun (cheetah).** Every earlier cforce score confounded model quality with the coarse-transition fit (§2, July 11): the drift was trained toward a 30 ms secant while the critic consumed it as a fine-stepped field. A fresh learned cforce run under the finite-duration flow-matching objective is the discriminating result: still capping near 300 convicts coverage cleanly; escaping the cap means the old ceiling was partly the numerical mismatch. Its checkpoints get the reworked three-axis audit (generator and quadrature target error under candidate actions, fixed reference distribution, best-policy forgetting probe).
 
 **The attribution 2×2 (cheetah).** `mbq_vhead_quad_buf1m` beat `top`, but it differs from `top` in two variables at once — the target construction and the buffer size. Two rows change one variable each and are running now: `top_buf1m` (model-free with the 1M buffer: does the buffer alone rescue the model-free plateau?) and `mbq_vhead_quad` (oracle quadrature V-head target at the standard 300k: does the target alone beat `top`?). Together with the two finished corners they complete a 2×2 in (target, buffer) for paper-grade attribution of the win.
 
