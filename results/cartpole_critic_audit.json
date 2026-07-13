@@ -1,0 +1,110 @@
+[
+  {
+    "seed": 0,
+    "final_return": 1690.55,
+    "rms_V": 7.788,
+    "rms_gradV": 6.7484,
+    "rms_oracle_b_gradV": 25.2851,
+    "rms_target": 7.6884,
+    "rms_bellman_err": 1.5558
+  },
+  {
+    "seed": 1,
+    "final_return": 88.18,
+    "rms_V": 967.9602,
+    "rms_gradV": 1191.8959,
+    "rms_oracle_b_gradV": 6997.9758,
+    "rms_target": 947.2649,
+    "rms_bellman_err": 142.293
+  },
+  {
+    "seed": 2,
+    "final_return": 1635.55,
+    "rms_V": 8.8339,
+    "rms_gradV": 7.0009,
+    "rms_oracle_b_gradV": 25.829,
+    "rms_target": 8.7399,
+    "rms_bellman_err": 1.5593
+  },
+  {
+    "seed": 3,
+    "final_return": 900.59,
+    "rms_V": 7.2848,
+    "rms_gradV": 6.7082,
+    "rms_oracle_b_gradV": 24.9446,
+    "rms_target": 7.2556,
+    "rms_bellman_err": 0.5857
+  },
+  {
+    "seed": 4,
+    "final_return": 1409.79,
+    "rms_V": 6.1188,
+    "rms_gradV": 7.9595,
+    "rms_oracle_b_gradV": 34.3213,
+    "rms_target": 6.0333,
+    "rms_bellman_err": 1.8047
+  },
+  {
+    "seed": 5,
+    "final_return": 518.98,
+    "rms_V": 5.8007,
+    "rms_gradV": 4.1319,
+    "rms_oracle_b_gradV": 15.3943,
+    "rms_target": 5.7924,
+    "rms_bellman_err": 0.3633
+  },
+  {
+    "seed": 6,
+    "final_return": 1703.02,
+    "rms_V": 21.5447,
+    "rms_gradV": 8.9907,
+    "rms_oracle_b_gradV": 35.2967,
+    "rms_target": 21.3242,
+    "rms_bellman_err": 1.0828
+  },
+  {
+    "seed": 7,
+    "final_return": 1570.64,
+    "rms_V": 7.923,
+    "rms_gradV": 5.1738,
+    "rms_oracle_b_gradV": 18.9739,
+    "rms_target": 7.8477,
+    "rms_bellman_err": 0.8631
+  },
+  {
+    "seed": 8,
+    "final_return": 1259.0,
+    "rms_V": 6.446,
+    "rms_gradV": 8.6385,
+    "rms_oracle_b_gradV": 21.0173,
+    "rms_target": 6.4186,
+    "rms_bellman_err": 0.638
+  },
+  {
+    "seed": 9,
+    "final_return": 997.63,
+    "rms_V": 5.559,
+    "rms_gradV": 6.6091,
+    "rms_oracle_b_gradV": 18.4952,
+    "rms_target": 5.5468,
+    "rms_bellman_err": 0.8016
+  },
+  {
+    "seed": 10,
+    "final_return": 776.39,
+    "rms_V": 5.8409,
+    "rms_gradV": 6.0312,
+    "rms_oracle_b_gradV": 24.0113,
+    "rms_target": 5.8256,
+    "rms_bellman_err": 0.6246
+  },
+  {
+    "seed": 11,
+    "final_return": 636.84,
+    "rms_V": 7.6933,
+    "rms_gradV": 5.0074,
+    "rms_oracle_b_gradV": 24.0853,
+    "rms_target": 7.6492,
+    "rms_bellman_err": 0.4606
+  }
+]
