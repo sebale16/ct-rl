@@ -111,14 +111,40 @@ def load_policy(
     return policy_fn
 
 
+def _parse_kv(s: str) -> dict:
+    """Parse a 'k=v;k=v' string (the CSV time_sampling_kwargs format) to floats."""
+    out = {}
+    for part in str(s).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        k, v = part.split("=", 1)
+        out[k.strip()] = float(v)
+    return out
+
+
 def build_env(env_id: str, *, raw_state_obs: bool, dt: float,
-              episode_seconds: float, seed: int) -> DMCContinuousEnv:
+              episode_seconds: float, seed: int, time_sampling: str = "uniform",
+              physics_dt: float = 0.002, min_dt: float = 0.002,
+              max_dt: float = 0.03, max_steps: int = 2000,
+              time_sampling_kwargs: str = "") -> DMCContinuousEnv:
     domain, task = env_id.split("-", 1)
-    return DMCContinuousEnv(
+    kw = dict(
         domain_name=domain, task_name=task, seed=seed,
-        raw_state_obs=raw_state_obs, time_sampling="uniform", dt=dt,
+        raw_state_obs=raw_state_obs, time_sampling=time_sampling, dt=dt,
         episode_duration=episode_seconds,
     )
+    if time_sampling == "irregular":
+        # Match the training time base: a heavy small-dt tail (time_sampling_kwargs,
+        # e.g. cheetah's tail_p=0.99;tail_split=0.9) drives the mean control dt to
+        # ~0.005, so a fixed-duration episode accumulates ~max_steps control steps.
+        # The gait metrics resample to a uniform grid, so only the return scale (an
+        # un-normalized per-step sum) and the ∫dt energy terms are affected.
+        kw.update(physics_dt=physics_dt, min_dt=min_dt, max_dt=max_dt,
+                  max_steps=max_steps)
+        if time_sampling_kwargs:
+            kw["time_sampling_kwargs"] = _parse_kv(time_sampling_kwargs)
+    return DMCContinuousEnv(**kw)
 
 
 def _fmt(agg: dict, key: str, fmt: str) -> str:
@@ -173,6 +199,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--warmup-s", type=float, default=2.0,
                    help="Seconds of acceleration to drop before gait analysis.")
     p.add_argument("--dt", type=float, default=0.01)
+    p.add_argument("--time-sampling", choices=["uniform", "irregular"],
+                   default="uniform",
+                   help="'irregular' matches the training time base "
+                        "(fine jittered control dt, ~max_steps steps/episode) so "
+                        "the return scale lines up with training-eval numbers.")
+    p.add_argument("--physics-dt", type=float, default=0.002)
+    p.add_argument("--min-dt", type=float, default=0.002)
+    p.add_argument("--max-dt", type=float, default=0.03)
+    p.add_argument("--max-steps", type=int, default=2000)
+    p.add_argument("--time-sampling-kwargs", type=str, default="",
+                   help="irregular-sampler params in 'k=v;k=v' form; match the "
+                        "training row, e.g. cheetah's 'tail_p=0.99;tail_split=0.9'.")
     p.add_argument("--episode-seconds", type=float, default=10.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cpu")
@@ -184,7 +222,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         p.error("provide --checkpoint PATH or --random")
 
     env = build_env(args.env_id, raw_state_obs=args.raw_state_obs, dt=args.dt,
-                    episode_seconds=args.episode_seconds, seed=args.seed)
+                    episode_seconds=args.episode_seconds, seed=args.seed,
+                    time_sampling=args.time_sampling, physics_dt=args.physics_dt,
+                    min_dt=args.min_dt, max_dt=args.max_dt, max_steps=args.max_steps,
+                    time_sampling_kwargs=args.time_sampling_kwargs)
 
     if args.random:
         label = args.label or "random"
