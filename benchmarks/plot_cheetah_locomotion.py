@@ -6,6 +6,7 @@ hatch = 300k buffer (solid = 1M). Reads results/cheetah_locomotion/*.agg.json.
 
 Output (tracked): results/cheetah_locomotion_metrics.png
 """
+import argparse
 import json
 import os
 
@@ -13,6 +14,14 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+ap = argparse.ArgumentParser(description=__doc__)
+ap.add_argument("--data-dir", default="results/cheetah_locomotion",
+                help="dir holding cheetah_<mode>_locomotion.agg.json")
+ap.add_argument("--out", default="results/cheetah_locomotion_metrics.png")
+ap.add_argument("--tag", default="",
+                help="short tag added to the figure title, e.g. 'regular' / 'irregular'")
+_args = ap.parse_args()
 
 BLUE, VERM = "#0072B2", "#D55E00"     # Okabe-Ito, CVD-safe
 INK, MUT = "#222222", "#666666"
@@ -38,7 +47,7 @@ PANELS = [
 
 agg = {}
 for m, *_ in MODES:
-    p = f"results/cheetah_locomotion/cheetah_{m}_locomotion.agg.json"
+    p = f"{_args.data_dir}/cheetah_{m}_locomotion.agg.json"
     agg[m] = json.load(open(p))
 
 labels = [lbl for _, lbl, _, _ in MODES]
@@ -78,11 +87,11 @@ handles = [
 ]
 fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False,
            fontsize=10, bbox_to_anchor=(0.5, 0.99))
+_tag = f" [{_args.tag} time intervals]" if _args.tag else ""
 fig.suptitle("cheetah-run locomotion: energy efficiency & gait consistency  "
-             "(video-aligned best policies, 8 episodes)\n"
+             f"(video-aligned best policies, 8 episodes){_tag}\n"
              "↑ higher is better · ↓ lower is better", fontsize=12.5, y=1.06)
 fig.tight_layout(rect=[0, 0, 1, 0.95])
-os.makedirs("results", exist_ok=True)
-out = "results/cheetah_locomotion_metrics.png"
-fig.savefig(out, bbox_inches="tight")
-print("saved", out)
+os.makedirs(os.path.dirname(_args.out) or ".", exist_ok=True)
+fig.savefig(_args.out, bbox_inches="tight")
+print("saved", _args.out)
