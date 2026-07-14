@@ -93,6 +93,19 @@ def plot_phase_portraits(portraits: List[Dict[str, Any]], labels: List[str],
             return lo - pad, hi + pad
         theta_lim, theta_dot_lim = _lim(th_all), _lim(td_all)
 
+    # Shared return-map limits: all bottom panels use ONE common range for both
+    # axes (theta_dot_n and theta_dot_{n+1} are the same quantity, so a single
+    # square range keeps the diagonal meaningful and makes the four return maps
+    # directly comparable).
+    cross_lim = None
+    cross_all = [np.asarray(pd["cross_theta_dot"]) for pd in valid
+                 if len(pd["cross_theta_dot"]) >= 2]
+    if cross_all:
+        c_cat = np.concatenate(cross_all)
+        lo, hi = float(np.min(c_cat)), float(np.max(c_cat))
+        pad = 0.05 * (hi - lo + 1e-9)
+        cross_lim = (lo - pad, hi + pad)
+
     for j, (pd, label, col) in enumerate(zip(portraits, labels, colors)):
         top, bot = axes[0][j], axes[1][j]
         if pd is None:
@@ -128,10 +141,13 @@ def plot_phase_portraits(portraits: List[Dict[str, Any]], labels: List[str],
         c = pd["cross_theta_dot"]
         if len(c) >= 2:
             bot.scatter(c[:-1], c[1:], s=30, color=col, edgecolor="white", linewidth=0.6)
-            lo, hi = float(np.min(c)), float(np.max(c))
-            pad = 0.05 * (hi - lo + 1e-9)
-            bot.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=MUT, lw=0.8, ls=":")
-            bot.set_aspect("equal", adjustable="box")
+            # diagonal spans the SHARED range so it is identical across panels
+            diag = cross_lim if cross_lim is not None else (
+                float(np.min(c)), float(np.max(c)))
+            bot.plot(diag, diag, color=MUT, lw=0.8, ls=":")
+        if cross_lim is not None:
+            bot.set_xlim(*cross_lim); bot.set_ylim(*cross_lim)
+        bot.set_aspect("equal", adjustable="box")
         bot.set_xlabel(r"$\dot\theta_n$ at crossing [rad/s]", fontsize=9)
         bot.set_ylabel(r"$\dot\theta_{n+1}$ [rad/s]", fontsize=9)
 
