@@ -355,6 +355,53 @@ def _poincare_dispersion(ref: np.ndarray, state: np.ndarray, norm: np.ndarray):
 
 
 # --------------------------------------------------------------------------- #
+# Steady-window signals (shared by the gait metrics and the phase portraits)
+# --------------------------------------------------------------------------- #
+_JOINT_NAMES = ("bthigh", "bshin", "bfoot", "fthigh", "fshin", "ffoot")
+
+
+@dataclass
+class _Steady:
+    fs: float                       # uniform resample rate over the steady window
+    grid: np.ndarray                # uniform time grid
+    joints: List[np.ndarray]        # 6 leg-joint angle signals (resampled)
+    jvel: List[np.ndarray]          # 6 leg-joint velocity signals (resampled)
+    feet: List[np.ndarray]          # [bfoot, ffoot] heights (resampled)
+    stats: List[Dict[str, float]]   # spectral stats for joints + feet
+    ref_i: int                      # index of the reference oscillator joint
+    ref: np.ndarray                 # detrended reference joint angle
+
+
+def _steady_reference(
+    roll: CheetahRollout, warmup_s: float, fmin: float, fmax: float
+) -> Optional[_Steady]:
+    """Resample the steady-cruise window to a uniform grid and pick the reference
+    oscillator (most spectrally concentrated leg joint). Returns None if the
+    window is too short to analyse."""
+    t = roll.time
+    mask = t >= (t[0] + warmup_s) if len(t) else np.zeros(0, dtype=bool)
+    tt = t[mask]
+    if len(tt) < 64:
+        return None
+    fs = 1.0 / float(np.median(np.diff(tt)))
+    grid = np.arange(tt[0], tt[-1], 1.0 / fs)
+    if len(grid) < 64:
+        return None
+
+    def rs(sig: np.ndarray) -> np.ndarray:
+        return np.interp(grid, tt, sig[mask])
+
+    ad = roll.act_dof                       # [bthigh, bshin, bfoot, fthigh, fshin, ffoot]
+    joints = [rs(roll.qpos[:, j]) for j in ad]
+    jvel = [rs(roll.qvel[:, j]) for j in ad]
+    feet = [rs(roll.foot_z[:, 0]), rs(roll.foot_z[:, 1])]
+    stats = [_spectral_stats(s, fs, fmin, fmax) for s in joints + feet]
+    joint_pf = np.array([stats[i]["peak_frac"] for i in range(len(joints))], dtype=float)
+    ref_i = int(np.nanargmax(joint_pf)) if np.any(np.isfinite(joint_pf)) else 0
+    return _Steady(fs, grid, joints, jvel, feet, stats, ref_i, _detrend(joints[ref_i]))
+
+
+# --------------------------------------------------------------------------- #
 # Gait metrics (metric 3)
 # --------------------------------------------------------------------------- #
 _NAN_GAIT = {
@@ -384,38 +431,16 @@ def gait_metrics(
     ``band_power_frac`` and ``n_strides`` are still reported so the absence of a
     gait is visible.
     """
-    t = roll.time
-    mask = t >= (t[0] + warmup_s) if len(t) else np.zeros(0, dtype=bool)
-    tt = t[mask]
-    if len(tt) < 64:
+    st = _steady_reference(roll, warmup_s, fmin, fmax)
+    if st is None:
         return dict(_NAN_GAIT)
 
-    # Resample to a uniform grid (control dt may be irregular) for clean FFTs.
-    fs = 1.0 / float(np.median(np.diff(tt)))
-    grid = np.arange(tt[0], tt[-1], 1.0 / fs)
-    if len(grid) < 64:
-        return dict(_NAN_GAIT)
+    entropies = np.array([s["spectral_entropy"] for s in st.stats], dtype=float)
+    peak_fracs = np.array([s["peak_frac"] for s in st.stats], dtype=float)
+    dom_freqs = np.array([s["dom_freq"] for s in st.stats], dtype=float)
+    band_fracs = np.array([s["band_frac"] for s in st.stats], dtype=float)
 
-    def rs(sig: np.ndarray) -> np.ndarray:
-        return np.interp(grid, tt, sig[mask])
-
-    ad = roll.act_dof                       # [bthigh, bshin, bfoot, fthigh, fshin, ffoot]
-    joints = [rs(roll.qpos[:, j]) for j in ad]
-    jvel = [rs(roll.qvel[:, j]) for j in ad]
-    feet = [rs(roll.foot_z[:, 0]), rs(roll.foot_z[:, 1])]
-
-    stats = [_spectral_stats(s, fs, fmin, fmax) for s in joints + feet]
-    entropies = np.array([s["spectral_entropy"] for s in stats], dtype=float)
-    peak_fracs = np.array([s["peak_frac"] for s in stats], dtype=float)
-    dom_freqs = np.array([s["dom_freq"] for s in stats], dtype=float)
-    band_fracs = np.array([s["band_frac"] for s in stats], dtype=float)
-
-    # Reference oscillator = most spectrally concentrated leg joint (in-band).
-    joint_pf = peak_fracs[:len(joints)]
-    ref_i = int(np.nanargmax(joint_pf)) if np.any(np.isfinite(joint_pf)) else 0
-    ref = _detrend(joints[ref_i])
-
-    stride = _stride_stats(_phase(ref), grid)
+    stride = _stride_stats(_phase(st.ref), st.grid)
     n_strides = int(stride["n_strides"])
     band_mean = float(np.nanmean(band_fracs))
 
@@ -425,10 +450,10 @@ def gait_metrics(
         out["band_power_frac_mean"] = band_mean
         return out
 
-    ac_peak, _ = _autocorr_peak(ref, fs, fmin, fmax)
-    state = np.column_stack(joints + jvel)
-    disp, _ = _poincare_dispersion(ref, state, state.std(axis=0))
-    plv = _plv(joints[0], joints[3])        # back thigh vs front thigh
+    ac_peak, _ = _autocorr_peak(st.ref, st.fs, fmin, fmax)
+    state = np.column_stack(st.joints + st.jvel)
+    disp, _ = _poincare_dispersion(st.ref, state, state.std(axis=0))
+    plv = _plv(st.joints[0], st.joints[3])  # back thigh vs front thigh
 
     return {
         "gait_detected": 1.0,
@@ -444,6 +469,48 @@ def gait_metrics(
         "peak_power_frac_mean": float(np.nanmean(peak_fracs)),   # 1 = single freq
         "band_power_frac_mean": float(np.nanmean(band_fracs)),   # motion in stride band
         "n_strides": n_strides,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Phase-portrait data (for plotting the limit cycle + Poincaré return map)
+# --------------------------------------------------------------------------- #
+def phase_portrait_data(
+    roll: CheetahRollout,
+    *,
+    warmup_s: float = 2.0,
+    fmin: float = 0.5,
+    fmax: float = 8.0,
+) -> Optional[Dict[str, Any]]:
+    """Reference-joint (θ, θ̇) trajectory and Poincaré section for one episode.
+
+    The phase portrait is the reference leg joint's angle vs. its velocity over
+    the steady window: a tight closed band is a clean limit-cycle gait, a diffuse
+    cloud is irregular. The Poincaré section is θ crossing its own mean going up;
+    the crossing points (θ = mean, θ̇ interpolated) are the return map, and the
+    spread of θ̇ across crossings is the 2-D shadow of ``poincare_dispersion``.
+    Returns None if the steady window is too short.
+    """
+    st = _steady_reference(roll, warmup_s, fmin, fmax)
+    if st is None:
+        return None
+    theta = st.joints[st.ref_i]
+    theta_dot = st.jvel[st.ref_i]
+    r = st.ref                                  # detrended reference (mean ≈ 0)
+    idx = np.where((r[:-1] < 0) & (r[1:] >= 0))[0]
+    cross_theta_dot = []
+    for i in idx:
+        denom = r[i + 1] - r[i]
+        frac = (-r[i] / denom) if denom != 0 else 0.0
+        cross_theta_dot.append(theta_dot[i] + frac * (theta_dot[i + 1] - theta_dot[i]))
+    return {
+        "joint": _JOINT_NAMES[st.ref_i],
+        "theta": theta,
+        "theta_dot": theta_dot,
+        "time": st.grid,
+        "section_theta": float(theta.mean()),
+        "cross_theta_dot": np.asarray(cross_theta_dot),
+        "metrics": gait_metrics(roll, warmup_s=warmup_s, fmin=fmin, fmax=fmax),
     }
 
 

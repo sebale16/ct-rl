@@ -4,6 +4,7 @@ import numpy as np
 
 from evaluations.locomotion_metrics import (
     CheetahRollout,
+    _JOINT_NAMES,
     _autocorr_peak,
     _plv,
     _poincare_dispersion,
@@ -13,6 +14,7 @@ from evaluations.locomotion_metrics import (
     energy_metrics,
     evaluate_locomotion,
     gait_metrics,
+    phase_portrait_data,
     rollout_cheetah,
 )
 
@@ -193,6 +195,23 @@ class TestGaitRollout(unittest.TestCase):
         self.assertLessEqual(clean["stride_cv"], noisy["stride_cv"])
         self.assertLessEqual(clean["poincare_dispersion"], noisy["poincare_dispersion"])
         self.assertLessEqual(clean["spectral_entropy_mean"], noisy["spectral_entropy_mean"])
+
+
+class TestPhasePortrait(unittest.TestCase):
+    def test_shapes_and_reference(self):
+        pd = phase_portrait_data(_periodic_rollout(f0=2.5), warmup_s=0.5)
+        self.assertIsNotNone(pd)
+        n = len(pd["time"])
+        self.assertEqual(len(pd["theta"]), n)
+        self.assertEqual(len(pd["theta_dot"]), n)
+        self.assertIn(pd["joint"], _JOINT_NAMES)
+        self.assertGreaterEqual(len(pd["cross_theta_dot"]), 3)
+
+    def test_return_map_tighter_for_clean_gait(self):
+        clean = phase_portrait_data(_periodic_rollout(noise=0.0), warmup_s=0.5)
+        loose = phase_portrait_data(_periodic_rollout(noise=0.4, seed=3), warmup_s=0.5)
+        # Crossing-velocity spread (2-D shadow of the return map) is tighter clean.
+        self.assertLess(clean["cross_theta_dot"].std(), loose["cross_theta_dot"].std())
 
 
 class TestCheetahEndToEnd(unittest.TestCase):
