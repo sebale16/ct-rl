@@ -48,7 +48,7 @@ def _color_for(label: str) -> str:
 
 def build_portrait_from_checkpoint(
     checkpoint: Optional[str], env, *, pi_arch, activation, deterministic_policy,
-    warmup_s: float, seed_reset: int = 0,
+    warmup_s: float, seed_reset: int = 0, ref_joint: Optional[object] = None,
 ) -> Optional[Dict[str, Any]]:
     if checkpoint is None:
         policy = lambda _o: env.action_space.sample()  # noqa: E731
@@ -61,7 +61,7 @@ def build_portrait_from_checkpoint(
     best = None
     for _ in range(3):
         roll = rollout_cheetah(policy, env)
-        pd = phase_portrait_data(roll, warmup_s=warmup_s)
+        pd = phase_portrait_data(roll, warmup_s=warmup_s, ref_joint=ref_joint)
         if pd is None:
             continue
         if best is None or pd["metrics"].get("n_strides", 0) > best["metrics"].get("n_strides", 0):
@@ -145,6 +145,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--dt", type=float, default=0.01)
     p.add_argument("--episode-seconds", type=float, default=10.0)
     p.add_argument("--warmup-s", type=float, default=2.0)
+    p.add_argument("--joint", type=str, default=None,
+                   help="pin the reference joint across all policies "
+                        "(name: bthigh/bshin/bfoot/fthigh/fshin/ffoot, or index); "
+                        "default auto-selects per episode")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=str, default="results/cheetah_phase_portraits.png")
     args = p.parse_args(argv)
@@ -164,6 +168,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         build_portrait_from_checkpoint(
             ckpt, env, pi_arch=pi_arch, activation=args.activation,
             deterministic_policy=args.deterministic_policy, warmup_s=args.warmup_s,
+            ref_joint=args.joint,
         )
         for ckpt in checkpoints
     ]

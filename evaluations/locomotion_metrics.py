@@ -373,11 +373,16 @@ class _Steady:
 
 
 def _steady_reference(
-    roll: CheetahRollout, warmup_s: float, fmin: float, fmax: float
+    roll: CheetahRollout, warmup_s: float, fmin: float, fmax: float,
+    ref_joint: Optional[object] = None,
 ) -> Optional[_Steady]:
     """Resample the steady-cruise window to a uniform grid and pick the reference
     oscillator (most spectrally concentrated leg joint). Returns None if the
-    window is too short to analyse."""
+    window is too short to analyse.
+
+    ``ref_joint`` pins the reference oscillator to a fixed joint (name in
+    ``_JOINT_NAMES`` or its index) instead of auto-selecting per episode, so the
+    same joint can be compared across policies."""
     t = roll.time
     mask = t >= (t[0] + warmup_s) if len(t) else np.zeros(0, dtype=bool)
     tt = t[mask]
@@ -398,6 +403,9 @@ def _steady_reference(
     stats = [_spectral_stats(s, fs, fmin, fmax) for s in joints + feet]
     joint_pf = np.array([stats[i]["peak_frac"] for i in range(len(joints))], dtype=float)
     ref_i = int(np.nanargmax(joint_pf)) if np.any(np.isfinite(joint_pf)) else 0
+    if ref_joint is not None:
+        ref_i = (_JOINT_NAMES.index(ref_joint) if isinstance(ref_joint, str)
+                 else int(ref_joint))
     return _Steady(fs, grid, joints, jvel, feet, stats, ref_i, _detrend(joints[ref_i]))
 
 
@@ -420,6 +428,7 @@ def gait_metrics(
     fmax: float = 8.0,
     min_strides: int = 3,
     min_band_frac: float = 0.2,
+    ref_joint: Optional[object] = None,
 ) -> Dict[str, float]:
     """Gait-consistency battery over the steady-cruise window.
 
@@ -431,7 +440,7 @@ def gait_metrics(
     ``band_power_frac`` and ``n_strides`` are still reported so the absence of a
     gait is visible.
     """
-    st = _steady_reference(roll, warmup_s, fmin, fmax)
+    st = _steady_reference(roll, warmup_s, fmin, fmax, ref_joint=ref_joint)
     if st is None:
         return dict(_NAN_GAIT)
 
@@ -481,6 +490,7 @@ def phase_portrait_data(
     warmup_s: float = 2.0,
     fmin: float = 0.5,
     fmax: float = 8.0,
+    ref_joint: Optional[object] = None,
 ) -> Optional[Dict[str, Any]]:
     """Reference-joint (θ, θ̇) trajectory and Poincaré section for one episode.
 
@@ -491,7 +501,7 @@ def phase_portrait_data(
     spread of θ̇ across crossings is the 2-D shadow of ``poincare_dispersion``.
     Returns None if the steady window is too short.
     """
-    st = _steady_reference(roll, warmup_s, fmin, fmax)
+    st = _steady_reference(roll, warmup_s, fmin, fmax, ref_joint=ref_joint)
     if st is None:
         return None
     theta = st.joints[st.ref_i]
@@ -510,7 +520,8 @@ def phase_portrait_data(
         "time": st.grid,
         "section_theta": float(theta.mean()),
         "cross_theta_dot": np.asarray(cross_theta_dot),
-        "metrics": gait_metrics(roll, warmup_s=warmup_s, fmin=fmin, fmax=fmax),
+        "metrics": gait_metrics(roll, warmup_s=warmup_s, fmin=fmin, fmax=fmax,
+                                ref_joint=ref_joint),
     }
 
 
