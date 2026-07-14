@@ -1,0 +1,232 @@
+{
+  "mode": "final",
+  "chain": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll",
+  "saved": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "beta": 0.020202707317519466,
+  "dt_default": 0.01,
+  "physics_dt": 0.002,
+  "grid": {
+    "n": 101,
+    "low": -1.0,
+    "high": 1.0
+  },
+  "n_states": 256,
+  "k_top": 10,
+  "n_policy_samples": 16,
+  "n_collect": 2000,
+  "grad_h": 0.020000000000000018,
+  "dataset_seed": 20260713,
+  "dists": [
+    "replay",
+    "onpolicy",
+    "ou"
+  ],
+  "checkpoints": {
+    "seed_0": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_0/checkpoint/model.pth",
+      "model_sha256": "ae79fb884c8a6b94640536e487d2e08b8c2a033cd04cd91ac6d0d188f729a528",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_0/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "7329b925002bb98043c47fdc10f75e2328c4db9b9f4230b2abff4e90150f3289",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_0/checkpoint/buffer.npz",
+      "buffer_sha256": "00415bd78b6ecfd015cd06119ef1192d241c27bad7ddbcf2ed6c1676d5537c96",
+      "step": 498724,
+      "alpha": 0.007815510965883732,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_1": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_1/checkpoint/model.pth",
+      "model_sha256": "71e77a524748d80793ff43a3604e256758395c7a996c5bda1cedfe4469f46bae",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_1/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "471e550a7b89b96640f86f309d687163b809e4d33bf8840064bfacd93bc0d3c6",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_1/checkpoint/buffer.npz",
+      "buffer_sha256": "af84de9e6f88042c9065c7ab2b186a4cd7494bee2748fbe87f54764a85b7d267",
+      "step": 496515,
+      "alpha": 1.017537236213684,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_2": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_2/checkpoint/model.pth",
+      "model_sha256": "c67616f1ca4130756899ca5bc370ddae3e28898aadc442a2743fcefb4894bae9",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_2/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "39248377569102aa7a59e0523ffc3d4680fcbae38a69d4790e9af20c183319c8",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_2/checkpoint/buffer.npz",
+      "buffer_sha256": "64e876132bcbbdb75922a0e4be4248e5c96eaa89d6b18bd087caa67f2f86ad59",
+      "step": 498535,
+      "alpha": 0.008194858208298683,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_3": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_3/checkpoint/model.pth",
+      "model_sha256": "f0e14d1262d23eee5178da80e04d83af3ef2c73a46db6bf5e591e61104e0e9ff",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_3/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "c55a99db0e32de2cf55a856cfe765df07a0097efb42d1f97a618d7b5b0745ff3",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_3/checkpoint/buffer.npz",
+      "buffer_sha256": "a38f735e918793596de279217787b2a53c9baa5070d354f9f7d95c3c6cf4cc2a",
+      "step": 495479,
+      "alpha": 0.010699798353016376,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_4": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_4/checkpoint/model.pth",
+      "model_sha256": "33ba4aa0ec5cf21b15abf4d3dbc02d85b5442cfa9ea72e5413f0de522f6151fb",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_4/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "577488fc10b5d34e748ce45d03ad4bc818342049f3570511e76585511b0b047e",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_4/checkpoint/buffer.npz",
+      "buffer_sha256": "6261bb8017a9aceae699428a6b16e7d7873fbd0f7ec1ca742ca78268bc760ad0",
+      "step": 494885,
+      "alpha": 0.007597669027745724,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_5": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_5/checkpoint/model.pth",
+      "model_sha256": "545264d1f6159b9b9c68a8ed6b9d8efb22410d8d6e9437de099abbbd9a0b269e",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_5/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "c961f9d299e9b15ad2a9a6f8327c7c4797cd401e029538bc48262aa1f077d76e",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_5/checkpoint/buffer.npz",
+      "buffer_sha256": "88974b3c730ebd0fe75dd1cdb6e5b7695fceb979f94b959c2413de4877b2e656",
+      "step": 493776,
+      "alpha": 0.008153616450726986,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_6": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_6/checkpoint/model.pth",
+      "model_sha256": "be38cb53c542c1cba7016b80d01f070f849d9d7b23e721ff542223f99f42e31e",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_6/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "3f3571c3dd87c02eba6c06db93b2999aadb8e326103d6a9f1537a8447432ff84",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_6/checkpoint/buffer.npz",
+      "buffer_sha256": "f091cb72acf2f65bbbc5963640583dada453246ae8b1b26d3e5f74eeedfd5818",
+      "step": 497497,
+      "alpha": 0.008995944634079933,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_7": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_7/checkpoint/model.pth",
+      "model_sha256": "f6a06bb944ca14c009d61ab9a59a739b3d237566f0284c8b1d03ccacef804c8c",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_7/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "f453bb07c0b0697c246784a1be5d84749960e1caae427bc1fdc2d6b2b70b12c0",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_7/checkpoint/buffer.npz",
+      "buffer_sha256": "ec4ab9fec60f4366694021e59a9f08150640ac606b0b141f0aca0869a61bf108",
+      "step": 496543,
+      "alpha": 0.006722529884427786,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_8": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_8/checkpoint/model.pth",
+      "model_sha256": "fa34334984f6c24e5a78361230dfd3e4bbc9c16a6972f52364a84d79fbb11b11",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_8/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "438622721f3211e0236ee934470d5780372f8a3b3c63bcf1c86dbd12452e5e96",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_8/checkpoint/buffer.npz",
+      "buffer_sha256": "7634388a9deb2d490617b70fb6db2811d7a7a4fbad8614671dab221df4124b86",
+      "step": 491113,
+      "alpha": 0.00752455135807395,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 1e-06
+      }
+    },
+    "seed_9": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_9/checkpoint/model.pth",
+      "model_sha256": "19d0013e2ea22ee844ee092cc338d043f5712d143a88b39af163e881e66daa3f",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_9/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "690d861fc0eddbfc98f0086789edc34122414d2f9cf5a63f99497efe9adf9dd1",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_9/checkpoint/buffer.npz",
+      "buffer_sha256": "b8e36396bfca4c23018a81a26ac5a9e2329b97a8c9a109dbd9689a5d176396cb",
+      "step": 495368,
+      "alpha": 0.00752656813710928,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_10": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_10/checkpoint/model.pth",
+      "model_sha256": "085d8950e19fb53a160a822ef53478578f6e3139d625057931c12d68da2575bf",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_10/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "57c7694440d3d536072fbd2e873a416a7c07b61a8791a612b3d4df1bab39422f",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_10/checkpoint/buffer.npz",
+      "buffer_sha256": "f8045ba055da00e20e03dc9412d06247b06a9d2502767979c53c95b3857d8719",
+      "step": 494041,
+      "alpha": 0.007823485881090164,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    },
+    "seed_11": {
+      "model_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_11/checkpoint/model.pth",
+      "model_sha256": "1b36a9788d4debb2c4f19c34dde3ef0919baf7fb2afc3b0e13ae5ead9bd45331",
+      "dynamics_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_11/checkpoint/model.dynamics.pth",
+      "dynamics_sha256": "f68364b8e3fbe6867695991be916db78ee85c4f096b9ac790b003efd4bb601e8",
+      "buffer_path": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll/seed_11/checkpoint/buffer.npz",
+      "buffer_sha256": "e3d88b3df4a2afcfcbf17191ebca973f88bd3d0b749617272b61abdee94531fb",
+      "step": 492449,
+      "alpha": 0.012155499309301376,
+      "reward_validation": {
+        "n": 256,
+        "mae": 0.0,
+        "p99_abs": 0.0,
+        "max_abs": 0.0
+      }
+    }
+  }
+}

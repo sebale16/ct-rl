@@ -1,0 +1,339 @@
+{
+  "mode": "trajectory",
+  "chain": ".chain_mbq_cforce_grid/cartpole-swingup__mbq_structured_quad_roll",
+  "saved": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll",
+  "seeds": [
+    1,
+    3,
+    5,
+    11
+  ],
+  "beta": 0.020202707317519466,
+  "dt_default": 0.01,
+  "physics_dt": 0.002,
+  "grid": {
+    "n": 101,
+    "low": -1.0,
+    "high": 1.0
+  },
+  "n_states": 256,
+  "k_top": 10,
+  "n_policy_samples": 16,
+  "n_collect": 2000,
+  "grad_h": 0.020000000000000018,
+  "dataset_seed": 20260713,
+  "dists": [
+    "onpolicy",
+    "ou"
+  ],
+  "checkpoints": {
+    "seed_1_step_100000": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.pth",
+      "model_sha256": "f66661b24d89dc133c924f94dbb2425ba6e5eece6d146552bec03af4eb0099a9",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.dynamics.pth",
+      "dynamics_sha256": "69151546f46ed15813a693883c6fad07821fb2ef516a3ed6b75b8af4ca7186d3",
+      "step": 100000
+    },
+    "seed_1_step_126079": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_126079_steps.pth",
+      "model_sha256": "e28fbba2d26fac46c72ce43673bffd84f6a2334a5d8252056c6e600441940408",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_126079_steps.dynamics.pth",
+      "dynamics_sha256": "dda6504df17606c5dbae359ea3afe491de861e24343c1399cc900fa686c06cd8",
+      "step": 126079
+    },
+    "seed_1_step_153070": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_153070_steps.pth",
+      "model_sha256": "93a2b6b9a3bc62846ae0433ad6521d5fd5501d663a01d6eea873f190a1e9cce5",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_153070_steps.dynamics.pth",
+      "dynamics_sha256": "bde1fc665571a1fd2ae6636b23455893f964da28efeeee94da5f260826b8b91d",
+      "step": 153070
+    },
+    "seed_1_step_180169": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_180169_steps.pth",
+      "model_sha256": "f743e4fb8511893bd1052adc0abec159d46fe66dca8c8b3ab61197b716c608da",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_180169_steps.dynamics.pth",
+      "dynamics_sha256": "eb5adec8084b9945080645e675024f663d7be81be21241d4b04d8c9e58b12708",
+      "step": 180169
+    },
+    "seed_1_step_209984": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_209984_steps.pth",
+      "model_sha256": "b403ef07ae8bfb41a593c7da6a97b488751fbe52f2870c5aa7fed3d6771750f2",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_209984_steps.dynamics.pth",
+      "dynamics_sha256": "6885ad7c7d96df6b427236adfe996a5f1454dea5079148bcf50e54f06f001bb9",
+      "step": 209984
+    },
+    "seed_1_step_239957": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_239957_steps.pth",
+      "model_sha256": "648ab90b52d238e59e65582adca4d088807172e8b60580a2b1a12611b745f671",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_239957_steps.dynamics.pth",
+      "dynamics_sha256": "3a61b936f71eb18a095086f0eb9cabd55637dfb5f31c568578947cb3969fe344",
+      "step": 239957
+    },
+    "seed_1_step_269442": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_269442_steps.pth",
+      "model_sha256": "07cc68d879f6e331caa619393dd73f4c21563a8974b23d46c862afbcd2a20d90",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_269442_steps.dynamics.pth",
+      "dynamics_sha256": "ac57382b49e8a345500e703f1a1af7517ace9e7775c6bd97d173d467cce8b0c3",
+      "step": 269442
+    },
+    "seed_1_step_298945": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_298945_steps.pth",
+      "model_sha256": "3b1a61efb38b1dd70f2ab7710e9d748a42d0420bab03406f88b8342df453a941",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_298945_steps.dynamics.pth",
+      "dynamics_sha256": "ee8bc767597915fc90cb21c59295dfa92bbf5c02620b226a49f303ab7fb97062",
+      "step": 298945
+    },
+    "seed_1_step_328272": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_328272_steps.pth",
+      "model_sha256": "d96bbbcc8f6ea5c354b3242aec81c03f5835f63f78b6febd89f220e9f6774ef1",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_328272_steps.dynamics.pth",
+      "dynamics_sha256": "f6a39ecfd83e815b50020253ec999402018f1a70c42ffd62dddf805191d1f7b3",
+      "step": 328272
+    },
+    "seed_1_step_358020": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_358020_steps.pth",
+      "model_sha256": "e9ad519e045c962b5b1e4d520b3971bc78170d160800c81fe7d817b8033b7b1a",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_358020_steps.dynamics.pth",
+      "dynamics_sha256": "6d7b2c39d956ede16847f4daf03d3de353aff46a32aef9e3c971a1266c4b2d76",
+      "step": 358020
+    },
+    "seed_1_step_387737": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_387737_steps.pth",
+      "model_sha256": "256c1136d419b8f9233b7c8ceab7300268651665ea9d60bcd82a1dcc76ac61fc",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_1/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_387737_steps.dynamics.pth",
+      "dynamics_sha256": "84ba02067e434598aa89f80359f92da465081dcf2dc39c78ead4e0d01b43841d",
+      "step": 387737
+    },
+    "seed_3_step_100000": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.pth",
+      "model_sha256": "dad1285c400e9ee0ad8896d24b43e2717fc0757e2734061672c55b31910f0fbe",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.dynamics.pth",
+      "dynamics_sha256": "8dbf588b02f60450710275c3337f399f6d7bdffedc312edd82b4111d2222d99c",
+      "step": 100000
+    },
+    "seed_3_step_124221": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_124221_steps.pth",
+      "model_sha256": "5963e9b11cf7c46bf3b7a33e8672cd9af83c09fee73b7e512c542f5a7e824c83",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_124221_steps.dynamics.pth",
+      "dynamics_sha256": "abef45a290aa99fe7220281460d3b8af252b87cb5cde55077614edb8c73596f8",
+      "step": 124221
+    },
+    "seed_3_step_150858": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_150858_steps.pth",
+      "model_sha256": "b25967ce90ddbdb90a49e3e274f7f327ad0266cb39191179fb7cadc931da484d",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_150858_steps.dynamics.pth",
+      "dynamics_sha256": "82518b76efb9e541e5131d5d2e650341adb97d16ec6b846918126760b4f86b5e",
+      "step": 150858
+    },
+    "seed_3_step_177959": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_177959_steps.pth",
+      "model_sha256": "51cb3f20f4d92a814e57e4f8613047eae89f52b08e0ad068dc039cc4970464f6",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_177959_steps.dynamics.pth",
+      "dynamics_sha256": "bbe2306aa9057bb71f69461c07fafd4b1987e239477d2d9013324740422a9061",
+      "step": 177959
+    },
+    "seed_3_step_207864": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_207864_steps.pth",
+      "model_sha256": "d7055d88c586b395d81a8faae33aa04f00393fa97f9ef54fc8a2215f3038bd6d",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_207864_steps.dynamics.pth",
+      "dynamics_sha256": "9417dd2d002ca93f83a0d74b2ea73ca08a8a212c96e0c6c65bad4a111950814c",
+      "step": 207864
+    },
+    "seed_3_step_237719": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_237719_steps.pth",
+      "model_sha256": "7e9698d6fd8afb10a3765decf51bdd64c90ec49e0f3e441ed46c3a9312d4ec26",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_237719_steps.dynamics.pth",
+      "dynamics_sha256": "5653b721ee8d9fe2eb7834378c0f54a0efd8a0c5f8b22bba299401a3c3fb6af7",
+      "step": 237719
+    },
+    "seed_3_step_267590": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267590_steps.pth",
+      "model_sha256": "6fa8d7dbad178cd231d6dc15387bfa89907028223a9a04db42d6ff4c7777a668",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267590_steps.dynamics.pth",
+      "dynamics_sha256": "d311fda5c91ad574bda43b87a5760e1713a46d4ef60df981f47b27ba31225c52",
+      "step": 267590
+    },
+    "seed_3_step_297487": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_297487_steps.pth",
+      "model_sha256": "1a6939a4a5c17b8aa9636dde8091433c03e113acaf4f7834b62eecc4fda2ff68",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_297487_steps.dynamics.pth",
+      "dynamics_sha256": "2125a1f7e1d6315116e8101a8c0dd68ddb3b300b8701d257b19fdde210bc0485",
+      "step": 297487
+    },
+    "seed_3_step_327174": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_327174_steps.pth",
+      "model_sha256": "999e2ac78979978fcd055183cde217e5ec575cb9e0937083904f47118d061352",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_327174_steps.dynamics.pth",
+      "dynamics_sha256": "92765d98c838b080d388bb54753ee9e8381dcbaa1ce25fbbe6f320894aceea64",
+      "step": 327174
+    },
+    "seed_3_step_356717": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_356717_steps.pth",
+      "model_sha256": "8c1e8d9c708c9e7159782e1edc288eab4cfc2a751bb526601affdd72e11cc610",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_356717_steps.dynamics.pth",
+      "dynamics_sha256": "838c71abd262436aaf5e7bc46366183a01aa67f3b2c2d4c069fd87442a5cf488",
+      "step": 356717
+    },
+    "seed_3_step_386418": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_386418_steps.pth",
+      "model_sha256": "00dc105eb784c2e43299fae34d930e2c789c736cf586134f7250d0627bbe509e",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_3/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_386418_steps.dynamics.pth",
+      "dynamics_sha256": "1b07cabc3393f5b840f12a7709ae53eaafc078ab55b9f1400e9f42f27714db28",
+      "step": 386418
+    },
+    "seed_5_step_100000": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.pth",
+      "model_sha256": "9c2b77dd0fc2d7147b37b6b588ba0df0a9df59f190b93ed5e2f3f885d12c8257",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.dynamics.pth",
+      "dynamics_sha256": "fe5abecc758310be7edf57c861d4181922ea69603a8553bfd0f49f2a2afa58b3",
+      "step": 100000
+    },
+    "seed_5_step_124245": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_124245_steps.pth",
+      "model_sha256": "d101089bc59a831df3da7679ef1f245d3ceec82ba9745135f72aa77f17757fa4",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_124245_steps.dynamics.pth",
+      "dynamics_sha256": "7e21db27b9ad2c909fb38feac25400146976b7901a84d3505317f8b7a673feb1",
+      "step": 124245
+    },
+    "seed_5_step_150602": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_150602_steps.pth",
+      "model_sha256": "4c27ab7ab1c3cd3159976d17dfa95c9bd66f355475325fbace92fa3128f71ce0",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_150602_steps.dynamics.pth",
+      "dynamics_sha256": "d6833d79a781213ef569548857758596abe6917760525eaf60dbe19dec6ab8ab",
+      "step": 150602
+    },
+    "seed_5_step_178445": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_178445_steps.pth",
+      "model_sha256": "109e5d7e2b248b7f94dd0d4a1410caa2283c4ffb8b8505d6ac53ce7bb1ee3593",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_178445_steps.dynamics.pth",
+      "dynamics_sha256": "a15e7177c34e4d54c9f2160fa48d3a0ebabd244dd8923f1d21074abd59332d15",
+      "step": 178445
+    },
+    "seed_5_step_208144": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_208144_steps.pth",
+      "model_sha256": "08d759ea313c588a35163bd0cb39164f8353fc8d2472958e166d9cba403ab358",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_208144_steps.dynamics.pth",
+      "dynamics_sha256": "8dc4720fb2219742e1ee789d4763dfd36c0f7af10e64b69ecf7046b354b38e25",
+      "step": 208144
+    },
+    "seed_5_step_237735": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_237735_steps.pth",
+      "model_sha256": "e0371cd0fb4c77d587a5e460a23da252bd7d52f980633b09e8fc2a72fb836d34",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_237735_steps.dynamics.pth",
+      "dynamics_sha256": "5b944369155f1b7c0e33ef614d3c1f7a744c80dc8b998d73f9574671f3cb9558",
+      "step": 237735
+    },
+    "seed_5_step_267390": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267390_steps.pth",
+      "model_sha256": "6b9917ebc8da0038f4bc793d82a892f10c37475d7072a78fc7e53b46cd09c9ef",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267390_steps.dynamics.pth",
+      "dynamics_sha256": "9620d24c3aac63f94520139db401bafd7c865d9cfedb6d82c4af19ba189ecbcb",
+      "step": 267390
+    },
+    "seed_5_step_296891": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_296891_steps.pth",
+      "model_sha256": "099bb519b676bf50d086e9661eb7a25663dc938808bd7f25f8a8d6e562e43f19",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_296891_steps.dynamics.pth",
+      "dynamics_sha256": "5519e5f65efe740c320522214c7a916413fabb8ffe54e135ff7a151d771a48b0",
+      "step": 296891
+    },
+    "seed_5_step_326535": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_326535_steps.pth",
+      "model_sha256": "b5b62f3997c41913504d9e02a985432a1c1e2b5a83f6e737c47954157d7c0dd5",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_326535_steps.dynamics.pth",
+      "dynamics_sha256": "beaf1b06dc612c408d4daf858d3573f79b22470dabf3770c24f9444d1b4026b7",
+      "step": 326535
+    },
+    "seed_5_step_356413": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_356413_steps.pth",
+      "model_sha256": "a8e16575429219243ae82eaa5a65675bc916723b823f6f096be4ef9bc75f9e45",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_356413_steps.dynamics.pth",
+      "dynamics_sha256": "8ebf0c39bedfefcd55fe47800170a2a10bc92ddd158ecb77fc067207b1b81996",
+      "step": 356413
+    },
+    "seed_5_step_385696": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_385696_steps.pth",
+      "model_sha256": "779739cebd3f88f790fb5af8d3d71bed89777dad18e69c1132bb08f36738faa2",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_5/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_385696_steps.dynamics.pth",
+      "dynamics_sha256": "034b46fb8c60a7397677b47780886718cfcb1204d453459a10f115304ebf8c90",
+      "step": 385696
+    },
+    "seed_11_step_100000": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.pth",
+      "model_sha256": "0a12a24477333f67b4b29c303e6dbda0317f527ca3d76d1f827b0c78b2438c6b",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_100000_steps.dynamics.pth",
+      "dynamics_sha256": "bf4be769bee2e997b4cce280868204f851f01d2e775699858eed54a70c58df0a",
+      "step": 100000
+    },
+    "seed_11_step_125589": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_125589_steps.pth",
+      "model_sha256": "387ef908d97b165f4439f8772a922e9b3858d39afe4c87f0c2ec7aa8d304e7da",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_125589_steps.dynamics.pth",
+      "dynamics_sha256": "462db5c0ad6dbf6be8402e50ccb2639ccd364b3b7a3e9e5e3a3f1225766f3fa1",
+      "step": 125589
+    },
+    "seed_11_step_152440": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_152440_steps.pth",
+      "model_sha256": "e0f254479d1801d885899ba30d09154f553d88ebf0b417151467d751294cb047",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_152440_steps.dynamics.pth",
+      "dynamics_sha256": "48821d027abdd424fbe39605f01001575c5ef0b73e395717d9f7a9c24fa0ac88",
+      "step": 152440
+    },
+    "seed_11_step_179515": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_179515_steps.pth",
+      "model_sha256": "4a21c236b005382c666aa57d20c2da5532390704318a1a1058ad2714f9a17c6b",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_179515_steps.dynamics.pth",
+      "dynamics_sha256": "91151c1edbb702f1985a13bf22848e78f5c16586e599e0581874040818b369e3",
+      "step": 179515
+    },
+    "seed_11_step_209031": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_209031_steps.pth",
+      "model_sha256": "8ba4d80058927d2635f3dd9bcca60220f8aa4aabebe7ef04f5f873144b89745e",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_209031_steps.dynamics.pth",
+      "dynamics_sha256": "71dd2f384e9a41f1e32105e1eb74805ff446619d8f603bb240dc69c8197e0b90",
+      "step": 209031
+    },
+    "seed_11_step_238313": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_238313_steps.pth",
+      "model_sha256": "71bb4cd5e08b44e79c8025eff964196678bc5ffda9d6ea5631a8519c7707ec70",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_238313_steps.dynamics.pth",
+      "dynamics_sha256": "b2c9a4f34e909af8f8b7c2a4104aa938b49e48a8ae66b9427ee263ace55e3041",
+      "step": 238313
+    },
+    "seed_11_step_267724": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267724_steps.pth",
+      "model_sha256": "283137eca81cca76831cda8c585151bc807a254a8d517bf748b176bf23cedccf",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_267724_steps.dynamics.pth",
+      "dynamics_sha256": "287da0f2e75cfecd08884eb5855ec3a31d4f3114ae2c67aba3f5518024353bf0",
+      "step": 267724
+    },
+    "seed_11_step_296944": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_296944_steps.pth",
+      "model_sha256": "9c7abc2f71cc2e0bf712cc7489d34d10052069d764d5000c589bca8772bd3ede",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_296944_steps.dynamics.pth",
+      "dynamics_sha256": "3cfd0c7283bff12e85baee2b3e951b25b6177c8b66ab87803af95ac321a12ece",
+      "step": 296944
+    },
+    "seed_11_step_326464": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_326464_steps.pth",
+      "model_sha256": "d40b63fcbffd5cfe0aa0d57640b2644ad4b6f1da86b0b0d3cdb4fdb15699cc56",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_326464_steps.dynamics.pth",
+      "dynamics_sha256": "e003f905d4e4a7a7894e34bbf5ee02ae86fded3d1f857e7a91cc41fc1e0a48dc",
+      "step": 326464
+    },
+    "seed_11_step_355856": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_355856_steps.pth",
+      "model_sha256": "feacbb3b91c9b7ea443e72f775e819784cfa5aaa3afbffec12eea88159f0a4ee",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_355856_steps.dynamics.pth",
+      "dynamics_sha256": "1223b2ab89adcd2b2707fb93a19c8885d89a2f84ee847df722c330d3c3be639c",
+      "step": 355856
+    },
+    "seed_11_step_385116": {
+      "model_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_385116_steps.pth",
+      "model_sha256": "e95d9d62fd8a6681e0297da399e2e6de0fb88ff4b8bb4a6c76c05bec0193573f",
+      "dynamics_path": "saved_models/ct_sac/cartpole-swingup/mbq_structured_quad_roll/seed_11/dt_0_01_maxs_2000_cforce_grid_chain/ct_sac_cartpole-swingup_mbq_structured_quad_roll_385116_steps.dynamics.pth",
+      "dynamics_sha256": "cbad0c08cc01211d3bb167ae3812d78ca5014f98c67e129f99a72aa700de368f",
+      "step": 385116
+    }
+  }
+}
