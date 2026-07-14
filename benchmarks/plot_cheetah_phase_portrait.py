@@ -75,6 +75,24 @@ def plot_phase_portraits(portraits: List[Dict[str, Any]], labels: List[str],
     colors = colors or [_color_for(l) for l in labels]
     fig, axes = plt.subplots(2, n, figsize=(4.2 * n, 8), dpi=150, squeeze=False)
 
+    # Shared gait-portrait limits: every top-row panel uses the SAME theta and
+    # theta_dot range so the four policies' limit cycles are directly comparable
+    # in size (apples-to-apples). theta and theta_dot keep their own physical
+    # ranges (no equal-aspect distortion).
+    valid = [pd for pd in portraits if pd is not None]
+    theta_lim = theta_dot_lim = None
+    if valid:
+        th_all = np.concatenate([np.asarray(pd["theta"]) for pd in valid])
+        t, td_all = th_all, np.concatenate([np.asarray(pd["theta_dot"]) for pd in valid])
+        # also include the Poincaré crossings so the section markers stay in frame
+        td_all = np.concatenate(
+            [td_all] + [np.asarray(pd["cross_theta_dot"]) for pd in valid])
+        def _lim(a, frac=0.05):
+            lo, hi = float(np.min(a)), float(np.max(a))
+            pad = frac * (hi - lo + 1e-9)
+            return lo - pad, hi + pad
+        theta_lim, theta_dot_lim = _lim(th_all), _lim(td_all)
+
     for j, (pd, label, col) in enumerate(zip(portraits, labels, colors)):
         top, bot = axes[0][j], axes[1][j]
         if pd is None:
@@ -82,6 +100,8 @@ def plot_phase_portraits(portraits: List[Dict[str, Any]], labels: List[str],
                 ax.text(0.5, 0.5, "no steady gait", ha="center", va="center",
                         transform=ax.transAxes, color=MUT)
             top.set_title(label, color=INK)
+            if theta_lim is not None:
+                top.set_xlim(*theta_lim); top.set_ylim(*theta_dot_lim)
             continue
 
         theta, td = pd["theta"], pd["theta_dot"]
@@ -101,6 +121,8 @@ def plot_phase_portraits(portraits: List[Dict[str, Any]], labels: List[str],
         top.text(0.03, 0.97, note, transform=top.transAxes, va="top", ha="left",
                  fontsize=8.5, color=INK,
                  bbox=dict(boxstyle="round", fc="white", ec=MUT, alpha=0.8))
+        if theta_lim is not None:
+            top.set_xlim(*theta_lim); top.set_ylim(*theta_dot_lim)
 
         # --- Poincaré return map: θ̇ₙ₊₁ vs θ̇ₙ ---
         c = pd["cross_theta_dot"]
