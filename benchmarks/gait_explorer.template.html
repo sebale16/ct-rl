@@ -1,0 +1,934 @@
+<title>Cheetah gait explorer</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f2f3f0;
+    --surface:   #fbfbfa;
+    --ink:       #14171c;
+    --ink-2:     #565a62;
+    --muted:     #8b8f96;
+    --grid:      #e3e4df;
+    --axis:      #c6c8c4;
+    --rule:      rgba(20, 23, 28, 0.10);
+    --mf:        #0072B2;
+    --orc:       #D55E00;
+    --chip:      #ffffff;
+    --chip-on:   #14171c;
+    --chip-on-t: #fbfbfa;
+    --shadow:    0 1px 2px rgba(20,23,28,.05), 0 1px 8px rgba(20,23,28,.04);
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:    #0d0f12;
+      --surface: #171a1f;
+      --ink:     #eef0f3;
+      --ink-2:   #a4a8b0;
+      --muted:   #71757d;
+      --grid:    #262a30;
+      --axis:    #3a3f47;
+      --rule:    rgba(238, 240, 243, 0.12);
+      --mf:      #3D9BE0;
+      --orc:     #E2692E;
+      --chip:    #1e2228;
+      --chip-on: #eef0f3;
+      --chip-on-t: #0d0f12;
+      --shadow:  0 1px 2px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:    #0d0f12;
+    --surface: #171a1f;
+    --ink:     #eef0f3;
+    --ink-2:   #a4a8b0;
+    --muted:   #71757d;
+    --grid:    #262a30;
+    --axis:    #3a3f47;
+    --rule:    rgba(238, 240, 243, 0.12);
+    --mf:      #3D9BE0;
+    --orc:     #E2692E;
+    --chip:    #1e2228;
+    --chip-on: #eef0f3;
+    --chip-on-t: #0d0f12;
+    --shadow:  0 1px 2px rgba(0,0,0,.4);
+  }
+
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    margin: 0;
+    padding: 28px 24px 64px;
+  }
+  .wrap { max-width: 1360px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+  /* ---- header ---- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 6px;
+  }
+  h1 { font-size: 25px; line-height: 1.2; margin: 0 0 8px; text-wrap: balance; letter-spacing: -.01em; }
+  .lede { margin: 0; color: var(--ink-2); font-size: 14.5px; max-width: 76ch; }
+
+  /* ---- control rail ---- */
+  .rail {
+    display: flex; flex-wrap: wrap; gap: 20px 32px; align-items: flex-end;
+    padding: 14px 16px; background: var(--surface);
+    border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow);
+  }
+  .ctl { display: flex; flex-direction: column; gap: 7px; }
+  .ctl > .lbl {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  .seg button {
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
+    background: var(--chip); border: 1px solid var(--rule); border-radius: 7px;
+    padding: 6px 12px; cursor: pointer; min-height: 32px;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .seg button:hover { border-color: var(--axis); color: var(--ink); }
+  .seg button[aria-pressed="true"] {
+    background: var(--chip-on); color: var(--chip-on-t); border-color: var(--chip-on); font-weight: 600;
+  }
+  .seg button:focus-visible { outline: 2px solid var(--mf); outline-offset: 2px; }
+  .ctl-note { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .ctl-note b { color: var(--ink-2); font-weight: 600; }
+
+  /* ---- section ---- */
+  section { display: flex; flex-direction: column; gap: 12px; }
+  h2 { font-size: 15px; margin: 0; letter-spacing: -.005em; }
+  .sub { margin: 0; font-size: 13px; color: var(--ink-2); max-width: 84ch; }
+  .sec-head { display: flex; flex-direction: column; gap: 4px; }
+  /* Math variables are set in the mono face: the sans fallback parks the
+     combining dot of θ̇ beside the glyph instead of over it. */
+  .v { font-family: var(--mono); font-size: .95em; color: var(--ink); white-space: nowrap; }
+
+  /* ---- plot grid ---- */
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 1080px) { .grid4 { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px)  { .grid4 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 12px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .card-head { display: flex; align-items: baseline; gap: 8px; }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .card-title { font-size: 13px; font-weight: 600; }
+  .card-seed { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: auto; }
+  .plot { position: relative; width: 100%; }
+  canvas { display: block; width: 100%; height: 100%; }
+  .plot-cap {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .readout { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .readout b { color: var(--ink); font-weight: 600; }
+
+  /* ---- bars ---- */
+  .bars { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  @media (max-width: 1080px) { .bars { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 620px)  { .bars { grid-template-columns: repeat(2, 1fr); } }
+  .bar-card {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 11px 12px 8px; box-shadow: var(--shadow);
+  }
+  .bar-title { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .bar-dir { font-family: var(--mono); font-size: 10px; color: var(--muted); letter-spacing: .06em; }
+
+  /* ---- legend ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+  .lg { display: flex; align-items: center; gap: 6px; }
+  .lg svg { display: block; }
+
+  /* ---- table ---- */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: right; padding: 7px 12px; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--rule);
+  }
+  td { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  td:first-child { font-family: var(--sans); color: var(--ink); }
+  tbody tr + tr td { border-top: 1px solid var(--grid); }
+  .grp td {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); background: var(--page); padding-top: 8px; padding-bottom: 8px;
+  }
+  .best { color: var(--ink); font-weight: 600; }
+  .unit { color: var(--muted); font-size: 11px; }
+
+  /* ---- math section ---- */
+  .grp-head {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; align-items: center; gap: 10px; margin-top: 4px;
+  }
+  .grp-head::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+  .math-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 900px) { .math-grid { grid-template-columns: 1fr; } }
+  .mcard {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 13px 14px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 9px;
+  }
+  .mcard h3 { font-size: 13.5px; margin: 0; letter-spacing: -.005em; }
+  .mcard h3 .where {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); font-weight: 400; margin-left: 7px;
+  }
+  .eq {
+    font-family: var(--mono); font-size: 12px; line-height: 1.85; color: var(--ink);
+    background: var(--page); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 8px 10px; overflow-x: auto;
+  }
+  .eq > div { white-space: nowrap; }
+  .eq sub, .eq sup { font-size: .78em; }
+  .mcard p { margin: 0; font-size: 12.8px; color: var(--ink-2); }
+  .mcard p .lead { color: var(--ink); font-weight: 600; }
+
+  /* ---- tooltip ---- */
+  #tip {
+    position: fixed; pointer-events: none; z-index: 50; opacity: 0;
+    transition: opacity .1s; background: var(--chip-on); color: var(--chip-on-t);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.45;
+    padding: 6px 9px; border-radius: 6px; white-space: pre; box-shadow: var(--shadow);
+  }
+  footer { color: var(--muted); font-size: 12px; border-top: 1px solid var(--rule); padding-top: 14px; }
+  footer code { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">cheetah-run · structured dynamics for CT-SAC</p>
+    <h1>Gait explorer: phase portraits, return maps, and the metric battery</h1>
+    <p class="lede">
+      Four video-aligned best policies — model-free and oracle-in-loop, at 300k and 1M replay buffer — rolled out on both
+      time bases. Pick a time base and a reference leg joint; every panel and number below re-reads the same rollouts.
+    </p>
+  </header>
+
+  <div class="rail">
+    <div class="ctl">
+      <span class="lbl" id="tb-lbl">Control-interval sampling</span>
+      <div class="seg" id="tb-seg" role="group" aria-labelledby="tb-lbl"></div>
+    </div>
+    <div class="ctl">
+      <span class="lbl" id="jt-lbl">Reference leg joint (defines the Poincaré section)</span>
+      <div class="seg" id="jt-seg" role="group" aria-labelledby="jt-lbl"></div>
+    </div>
+    <div class="ctl">
+      <span class="lbl">Time base</span>
+      <span class="ctl-note" id="tb-note"></span>
+    </div>
+  </div>
+
+  <section>
+    <div class="sec-head">
+      <h2>Phase portraits — the reference joint's limit cycle</h2>
+      <p class="sub">
+        Each panel plots one leg joint against itself: its angle <span class="v">θ</span> along the horizontal, the
+        velocity <span class="v">θ̇</span> it carried at that angle along the vertical, traced over the steady-cruise
+        window (the first 2 s of acceleration dropped). A stride is one lap around the loop, so a whole episode of
+        running is drawn on top of itself — and how tightly the laps stack is the measurement.
+        Read it this way: a tight closed band is a clean limit-cycle gait, every stride retracing the last; a diffuse
+        cloud is limb motion that only incidentally moves the torso. All four panels share one
+        <span class="v">θ</span>/<span class="v">θ̇</span> range, so the cycles are comparable in size. The dashed line
+        is the Poincaré section (<span class="v">θ</span> crossing its own mean, upward); dots mark the crossings.
+      </p>
+    </div>
+    <div class="grid4" id="phase-grid"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Poincaré return maps — does the cycle come back to the same place?</h2>
+      <p class="sub">
+        Each lap of the phase portrait punches through the Poincaré section once, carrying some velocity
+        <span class="v">θ̇</span> as it goes. This plot keeps only those punctures and throws the rest of the
+        trajectory away: every dot pairs the velocity at one crossing (horizontal) with the velocity at the very next
+        one (vertical), so a dot answers the question <em>given this stride, what did the stride after it do?</em>
+        Both axes carry the same quantity over one shared range, which puts the diagonal — a stride repeating its
+        predecessor exactly — in the same place in every panel.
+        Read it this way: a stable cycle pierces the section at one point, so its dots cluster tight on the diagonal;
+        spread along the diagonal means the gait is periodic but drifts in speed, and scatter away from it is
+        stride-to-stride variability.
+      </p>
+    </div>
+    <div class="grid4" id="return-grid"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Metric battery — 8-episode means</h2>
+      <p class="sub" id="agg-sub"></p>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="bars" id="bars"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Per-joint gait metrics — the single displayed rollout</h2>
+      <p class="sub">
+        The numbers behind the panels above: one rollout per policy (the clearest of three), not the 8-episode mean.
+        Only the first group responds to the joint selector — the rest are whole-body aggregates over all six joints and
+        both feet, so they stay put when you switch reference joint.
+      </p>
+    </div>
+    <div class="tbl-wrap">
+      <table id="jt-tbl">
+        <thead><tr><th>Metric</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>The math behind each metric</h2>
+      <p class="sub">
+        Every number above, defined. The task reward reads one scalar — forward torso speed — with no control or energy
+        term and no dependence on <em>how</em> the speed is produced, so two policies at equal return can inject very
+        different energy and can reach that speed with a real gait or with motion that is only incidentally forward.
+        These two families measure what return cannot see. All of them read the MuJoCo physics directly, so any saved
+        policy is re-rolled and scored without retraining.
+      </p>
+    </div>
+
+    <div class="grp-head">Energy — what the gait cost</div>
+    <div class="math-grid">
+      <div class="mcard">
+        <h3>Actuator work <span class="where">feeds E⁺, CoT, return/joule</span></h3>
+        <div class="eq">
+          <div>τ<sub>j</sub> = gear<sub>j</sub> · u<sub>j</sub></div>
+          <div>W<sub>j</sub> = τ<sub>j</sub> · Δq<sub>j</sub></div>
+          <div>E⁺ = Σ<sub>steps</sub> Σ<sub>j</sub> max(W<sub>j</sub>, 0)</div>
+        </div>
+        <p>
+          The six leg motors are plain fixed-gain torque actuators, so the torque on joint <span class="v">j</span> is
+          its gear times the commanded action — exactly, and held constant across a control step under the zero-order
+          hold. The work it does over that step is therefore torque × angle change, <span class="lead">exact with no
+          sub-step integration</span>. Summing only the positive part over all six joints and every step gives the gross
+          energy the actuators delivered; these motors recover nothing from braking, so negative work is not a credit.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Cost of transport <span class="where">bar · lower is better</span></h3>
+        <div class="eq">
+          <div>CoT = E⁺ ⁄ (M · g · d)&nbsp;&nbsp;&nbsp;M = 14 kg</div>
+        </div>
+        <p>
+          Energy per unit weight per unit distance, with <span class="v">d</span> the forward root-<span class="v">x</span>
+          travel — dimensionless, and the headline efficiency number. Dividing by distance normalizes out the fact that a
+          faster policy covers more ground on the same clock. <span class="lead">Read it as: how many joules per
+          kilogram-metre does this gait cost?</span> The absolute value sits far above an animal's — raw positive work, a
+          2-D model, no regeneration, a speed-only reward — so it is read across policies, never against biology.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Return per joule <span class="where">bar · higher is better</span></h3>
+        <div class="eq">
+          <div>R ⁄ E⁺</div>
+        </div>
+        <p>
+          The task reward bought per joule injected. Where cost of transport asks the price of <em>distance</em>, this
+          asks the price of <em>reward</em> — the two can disagree, because return saturates at 10 m/s while the energy
+          bill does not. <span class="lead">Read it as efficiency in the task's own currency.</span>
+        </p>
+      </div>
+    </div>
+
+    <div class="grp-head">Spectral scan — is there a gait at all? (whole body, all six joints + both feet)</div>
+    <div class="math-grid">
+      <div class="mcard">
+        <h3>Spectrum and the stride band <span class="where">underlies every gait number</span></h3>
+        <div class="eq">
+          <div>x̃(t) = x(t) − (a·t + b)</div>
+          <div>P(f) = Welch{ x̃(t) }&nbsp;&nbsp;(Hann, 8 half-overlapping segments)</div>
+          <div>band = [0.5, 8] Hz&nbsp;&nbsp;(capped at 0.45·f<sub>s</sub>)</div>
+        </div>
+        <p>
+          Control intervals are irregular, so each signal is first interpolated onto a uniform grid at
+          <span class="v">f<sub>s</sub> = 1/median(Δt)</span>. Its least-squares linear trend is then removed, which
+          kills the slow posture drift that would otherwise dominate every phase and autocorrelation measure. Everything
+          spectral is read <span class="lead">only inside the plausible stride band</span>, so a drifting or standing
+          policy — all its power at DC — cannot be scored as periodic.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Stride-band power fraction <span class="where">table · the gate's evidence</span></h3>
+        <div class="eq">
+          <div>β = Σ<sub>f ∈ band</sub> P(f) &nbsp;⁄&nbsp; Σ<sub>f &gt; 0</sub> P(f)</div>
+        </div>
+        <p>
+          The share of a signal's motion — excluding DC, which is just where the limb sits — that happens at stride rate
+          at all. <span class="lead">Read it as: is this limb stepping, or merely trembling and drifting?</span> It is
+          the evidence the gate below relies on, and it stays reported even when everything else is suppressed.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Stride frequency <span class="where">bar · descriptive</span></h3>
+        <div class="eq">
+          <div>f<sub>0</sub> = argmax<sub>f ∈ band</sub> P(f)</div>
+          <div>stride freq = median over the 8 signals of f<sub>0</sub></div>
+        </div>
+        <p>
+          The dominant in-band frequency of each signal; the reported number is the median across all eight.
+          <span class="lead">Neither higher nor lower is better</span> — it says how fast the animal cycles its legs, not
+          how well, and it is here to characterize a gait rather than rank it.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Fundamental power fraction <span class="where">bar · higher is better</span></h3>
+        <div class="eq">
+          <div>δ = max(0.15·f<sub>0</sub>, 1.5·Δf)</div>
+          <div>ρ<sub>peak</sub> = Σ<sub>|f − f<sub>0</sub>| ≤ δ</sub> P(f) &nbsp;⁄&nbsp; Σ<sub>f ∈ band</sub> P(f)</div>
+        </div>
+        <p>
+          How much of the in-band power sits in the fundamental's main lobe, with <span class="v">Δf</span> the spectral
+          bin width — the <span class="v">1.5·Δf</span> floor keeps a windowed tone's lobe from being clipped.
+          <span class="lead">Near 1 means one clean frequency carries the motion.</span> Harmonics are deliberately
+          excluded: for a low fundamental they span the whole band, so counting them would saturate the measure. It also
+          picks the reference oscillator — the joint with the largest ρ<sub>peak</sub> is the cleanest one to build a
+          section on.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Spectral entropy <span class="where">table · diagnostic</span></h3>
+        <div class="eq">
+          <div>p<sub>k</sub> = P(f<sub>k</sub>) ⁄ Σ P&nbsp;&nbsp;(in-band)</div>
+          <div>H = −Σ<sub>k</sub> p<sub>k</sub> · log p<sub>k</sub> &nbsp;⁄&nbsp; log N</div>
+        </div>
+        <p>
+          Shannon entropy of the in-band spectrum, normalized by <span class="v">log N</span> over the
+          <span class="v">N</span> in-band bins so it lands in [0, 1]. <span class="lead">0 is a pure tone, 1 a flat
+          spectrum.</span> Retained as a diagnostic rather than a headline: in practice it does not discriminate these
+          policies — every one of them puts nearly all its power in the stride band — while the autocorrelation, stride
+          CV, and Poincaré measures do.
+        </p>
+      </div>
+    </div>
+
+    <div class="grp-head">Reference joint — how good is the gait? (these move with the joint selector)</div>
+    <div class="math-grid">
+      <div class="mcard">
+        <h3>Periodicity — autocorrelation peak <span class="where">bar · higher is better</span></h3>
+        <div class="eq">
+          <div>ρ(τ) = Σ<sub>t</sub> θ̃(t)·θ̃(t+τ) &nbsp;⁄&nbsp; Σ<sub>t</sub> θ̃(t)²</div>
+          <div>periodicity = max<sub>τ</sub> ρ(τ),&nbsp;&nbsp;τ ∈ [1/f<sub>max</sub>, 1/f<sub>min</sub>]</div>
+        </div>
+        <p>
+          The normalized autocorrelation asks how much of the waveform comes back after a lag <span class="v">τ</span>;
+          the score is the best lag inside the stride band. A signal that repeats exactly returns to 1.
+          <span class="lead">Read it as the strength of the single best repeat period</span> — it is the phase portrait's
+          band tightness expressed as one number.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Stride period and its CV <span class="where">bar · lower is better</span></h3>
+        <div class="eq">
+          <div>θ<sub>a</sub>(t) = θ̃(t) + i·ℋ{θ̃}(t)&nbsp;&nbsp;(FFT Hilbert)</div>
+          <div>φ(t) = unwrap arg θ<sub>a</sub>(t)</div>
+          <div>t<sub>k</sub> : φ(t<sub>k</sub>) = 2πk,&nbsp;&nbsp;T<sub>k</sub> = t<sub>k+1</sub> − t<sub>k</sub></div>
+          <div>CV = std(T<sub>k</sub>) ⁄ mean(T<sub>k</sub>)</div>
+        </div>
+        <p>
+          The analytic signal gives an instantaneous phase; one stride is one 2π of it, and the boundaries
+          <span class="v">t<sub>k</sub></span> are found by interpolating that phase. The coefficient of variation of the
+          resulting durations is <span class="lead">0 when every stride takes exactly the same time.</span>
+          Phase-based segmentation counts one cycle per 2π regardless of waveform shape, where a threshold-crossing
+          counter would double-count a multi-lobed stride.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Poincaré dispersion <span class="where">bar · lower is better</span></h3>
+        <div class="eq">
+          <div>Σ : θ̃ = 0, ascending&nbsp;&nbsp;(the section)</div>
+          <div>s<sub>k</sub> = (θ<sub>1..6</sub>, θ̇<sub>1..6</sub>) ∈ ℝ¹²&nbsp;&nbsp;at crossing k</div>
+          <div>d<sub>P</sub> = (1/K) · Σ<sub>k</sub> ‖ (s<sub>k</sub> − s̄) ⁄ σ ‖<sub>2</sub></div>
+        </div>
+        <p>
+          At each upward mean-crossing of the reference joint, the <span class="lead">full twelve-dimensional leg
+          state</span> — all six angles and all six velocities — is interpolated to the crossing instant, standardized
+          per coordinate by its own window std, and measured from the crossings' centroid. A stable limit cycle pierces
+          the section at one point, so d<sub>P</sub> → 0; a diffuse cloud is quasi-random limb motion that happens to
+          move the torso. Standardizing stops fast joints drowning slow ones, and taking the joint state of all six limbs
+          per crossing of one reference is what makes this a whole-gait measure rather than a one-joint one — it is the
+          return map's scatter, generalized from 2 dimensions to 12.
+        </p>
+      </div>
+
+      <div class="mcard">
+        <h3>Front/back phase-locking <span class="where">bar · higher is better</span></h3>
+        <div class="eq">
+          <div>PLV = | (1/T) · Σ<sub>t</sub> e<sup> i(φ<sub>b</sub>(t) − φ<sub>f</sub>(t))</sup> |</div>
+        </div>
+        <p>
+          With <span class="v">φ<sub>b</sub></span>, <span class="v">φ<sub>f</sub></span> the analytic phases of the back
+          and front thigh, this is <span class="lead">1 exactly when the inter-limb phase difference is constant</span> —
+          any fixed offset, as in a bound or gallop — and small when the two limbs wander independently. It is invariant
+          to <em>which</em> relative phase is held, so it scores coordination without presupposing a particular gait.
+          Being a back-vs-front comparison, it is the same number whichever reference joint you select.
+        </p>
+      </div>
+    </div>
+
+    <div class="grp-head">The gate — when the numbers are allowed to exist</div>
+    <div class="math-grid">
+      <div class="mcard" style="grid-column: 1 / -1">
+        <h3>Gait detection <span class="where">suppresses the four measures above</span></h3>
+        <div class="eq">
+          <div>gait_detected = (n_strides ≥ 3) ∧ (mean β &gt; 0.2)</div>
+        </div>
+        <p>
+          A near-stationary policy's low-amplitude jitter still has an analytic phase, so the Hilbert segmentation would
+          happily manufacture "strides" out of noise and then score them. Periodicity, stride CV, Poincaré dispersion and
+          PLV are therefore reported only when a gait is actually present: at least three stride cycles
+          <em>and</em> a real fraction of the limb-motion power inside the stride band. When the gate fails, those four
+          come back as NaN — shown as <span class="v">—</span> — and only β and the stride count survive, so
+          <span class="lead">the absence of a gait stays visible rather than being scored as a bad one.</span>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p style="margin:0 0 6px">
+      Data exported by <code>benchmarks/export_cheetah_gait.py</code>; metric definitions in
+      <code>evaluations/locomotion_metrics.py</code> (§6 of the cheetah note). Traces are decimated for display —
+      metrics are computed on the full-rate signals, never the decimated ones.
+    </p>
+    <p style="margin:0">
+      Stochastic actor, 10 s episodes, 2 s warm-up dropped. Bars show the 8-episode mean; the portraits and the
+      per-joint table show one representative rollout, so the two need not agree exactly.
+    </p>
+  </footer>
+</div>
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = __GAIT_DATA__;
+
+const MODES = DATA.meta.modes.map(m => m.key);
+const JOINTS = DATA.meta.joints;
+const JOINT_LABEL = { bthigh:"back thigh", bshin:"back shin", bfoot:"back foot",
+                      fthigh:"front thigh", fshin:"front shin", ffoot:"front foot" };
+const TB_LABEL = { regular: "regular", irregular: "irregular" };
+
+// Colour = family (matches the published figures); hatch = 300k buffer.
+const isOracle = m => m.startsWith("mbq");
+const is300k  = m => !m.endsWith("buf1m");
+const cssVar  = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const colorOf = m => cssVar(isOracle(m) ? "--orc" : "--mf");
+
+// Aggregate metrics: [key, label, decimals, lower_is_better|null(=descriptive)]
+const AGG = [
+  ["return",               "Return",              0, false],
+  ["mean_speed_mps",       "Speed",               2, false, "m/s"],
+  ["cost_of_transport",    "Cost of transport",   2, true],
+  ["return_per_joule",     "Return / joule",      3, false],
+  ["stride_freq_hz",       "Stride frequency",    2, null, "Hz"],
+  ["autocorr_peak",        "Periodicity",         2, false],
+  ["stride_cv",            "Stride-period CV",    3, true],
+  ["poincare_dispersion",  "Poincaré dispersion", 2, true],
+  ["limb_plv",             "Front/back phase-lock", 2, false],
+  ["peak_power_frac_mean", "Fundamental power frac", 2, false],
+];
+// Per-joint table rows, split by whether the joint selector moves them.
+const JOINT_DEP = [
+  ["autocorr_peak",       "Periodicity (autocorr peak)", 3],
+  ["stride_cv",           "Stride-period CV",            3],
+  ["poincare_dispersion", "Poincaré dispersion",         3],
+  ["stride_period_s",     "Stride period",               3, "s"],
+  ["n_strides",           "Strides detected",            0],
+];
+const JOINT_INDEP = [
+  ["limb_plv",              "Front/back phase-lock",   3],
+  ["stride_freq_hz",        "Stride frequency",        3, "Hz"],
+  ["spectral_entropy_mean", "Spectral entropy",        3],
+  ["peak_power_frac_mean",  "Fundamental power frac",  3],
+  ["band_power_frac_mean",  "Stride-band power frac",  3],
+];
+
+let tb = "irregular", joint = "bthigh";
+const tip = document.getElementById("tip");
+const fmt = (v, d) => (v === null || v === undefined || !isFinite(v)) ? "—" : Number(v).toFixed(d);
+
+function showTip(evt, text) {
+  tip.textContent = text;
+  tip.style.opacity = "1";
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + w > innerWidth - 8)  x = evt.clientX - w - pad;
+  if (y + h > innerHeight - 8) y = evt.clientY - h - pad;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => { tip.style.opacity = "0"; };
+
+/* ---------------- canvas helpers ---------------- */
+function fitCanvas(cv, cssW, cssH) {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+  cv.style.height = cssH + "px";
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+const nice = (lo, hi, n) => {
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw))), norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  const out = [];
+  for (let t = Math.ceil(lo / step) * step; t <= hi + step * 1e-9; t += step) out.push(t);
+  return out;
+};
+
+function drawFrame(ctx, W, H, M, xlim, ylim, xlab, ylab) {
+  const grid = cssVar("--grid"), axis = cssVar("--axis"), muted = cssVar("--muted");
+  const px = v => M.l + (v - xlim[0]) / (xlim[1] - xlim[0]) * (W - M.l - M.r);
+  const py = v => H - M.b - (v - ylim[0]) / (ylim[1] - ylim[0]) * (H - M.t - M.b);
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = "10px " + cssVar("--mono").split(",")[0] + ", monospace";
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = grid;
+  const xt = nice(xlim[0], xlim[1], 4), yt = nice(ylim[0], ylim[1], 4);
+  ctx.beginPath();
+  for (const t of xt) { ctx.moveTo(Math.round(px(t)) + .5, M.t); ctx.lineTo(Math.round(px(t)) + .5, H - M.b); }
+  for (const t of yt) { ctx.moveTo(M.l, Math.round(py(t)) + .5); ctx.lineTo(W - M.r, Math.round(py(t)) + .5); }
+  ctx.stroke();
+  ctx.strokeStyle = axis;
+  ctx.beginPath();
+  ctx.moveTo(M.l, M.t); ctx.lineTo(M.l, H - M.b); ctx.lineTo(W - M.r, H - M.b);
+  ctx.stroke();
+  ctx.fillStyle = muted;
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const t of xt) ctx.fillText(String(+t.toFixed(2)), px(t), H - M.b + 5);
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const t of yt) ctx.fillText(String(+t.toFixed(1)), M.l - 5, py(t));
+  ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  ctx.fillText(xlab, M.l + (W - M.l - M.r) / 2, H - 1);
+  ctx.save();
+  ctx.translate(9, M.t + (H - M.t - M.b) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textBaseline = "top"; ctx.fillText(ylab, 0, 0);
+  ctx.restore();
+  return { px, py };
+}
+
+/* ---------------- limits shared across the four modes ---------------- */
+function sharedLimits() {
+  let th = [Infinity, -Infinity], td = [Infinity, -Infinity], cr = [Infinity, -Infinity];
+  for (const m of MODES) {
+    const j = DATA.data[tb][m].joints[joint];
+    if (!j) continue;
+    for (const v of j.theta)     { if (v < th[0]) th[0] = v; if (v > th[1]) th[1] = v; }
+    for (const v of j.theta_dot) { if (v < td[0]) td[0] = v; if (v > td[1]) td[1] = v; }
+    for (const v of j.cross_theta_dot) {
+      if (v < td[0]) td[0] = v; if (v > td[1]) td[1] = v;
+      if (v < cr[0]) cr[0] = v; if (v > cr[1]) cr[1] = v;
+    }
+  }
+  const pad = (a, f = .05) => { const d = (a[1] - a[0]) || 1; return [a[0] - d * f, a[1] + d * f]; };
+  return { theta: pad(th), theta_dot: pad(td), cross: pad(cr, .08) };
+}
+
+/* ---------------- phase portrait ---------------- */
+function drawPhase(cv, mode, lim) {
+  const j = DATA.data[tb][mode].joints[joint];
+  const W = cv.clientWidth, H = 210;
+  const ctx = fitCanvas(cv, W, H);
+  const M = { l: 38, r: 10, t: 8, b: 26 };
+  if (!j) { ctx.fillStyle = cssVar("--muted"); ctx.textAlign = "center";
+            ctx.fillText("no steady gait", W / 2, H / 2); return; }
+  const { px, py } = drawFrame(ctx, W, H, M, lim.theta, lim.theta_dot, "θ  [rad]", "θ̇  [rad/s]");
+  // Poincaré section
+  ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = cssVar("--axis"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px(j.section_theta), M.t); ctx.lineTo(px(j.section_theta), H - M.b);
+  ctx.stroke(); ctx.restore();
+  // trajectory
+  ctx.save();
+  ctx.beginPath(); ctx.rect(M.l, M.t, W - M.l - M.r, H - M.t - M.b); ctx.clip();
+  ctx.strokeStyle = colorOf(mode); ctx.globalAlpha = .5; ctx.lineWidth = 1;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  for (let i = 0; i < j.theta.length; i++) {
+    const x = px(j.theta[i]), y = py(j.theta_dot[i]);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  // crossings, 2px surface ring so overlaps stay countable
+  ctx.globalAlpha = 1;
+  for (const v of j.cross_theta_dot) {
+    ctx.beginPath(); ctx.arc(px(j.section_theta), py(v), 3.4, 0, 7);
+    ctx.fillStyle = colorOf(mode); ctx.fill();
+    ctx.lineWidth = 1.6; ctx.strokeStyle = cssVar("--surface"); ctx.stroke();
+  }
+  ctx.restore();
+  cv._hit = { px, py, j, M, W, H, mode, kind: "phase" };
+}
+
+/* ---------------- return map ---------------- */
+function drawReturn(cv, mode, lim) {
+  const j = DATA.data[tb][mode].joints[joint];
+  const W = cv.clientWidth, H = 210;
+  const ctx = fitCanvas(cv, W, H);
+  const M = { l: 38, r: 10, t: 8, b: 26 };
+  if (!j || j.cross_theta_dot.length < 2) {
+    ctx.fillStyle = cssVar("--muted"); ctx.textAlign = "center";
+    ctx.fillText("no crossings", W / 2, H / 2); return;
+  }
+  const { px, py } = drawFrame(ctx, W, H, M, lim.cross, lim.cross, "θ̇ₙ  [rad/s]", "θ̇ₙ₊₁  [rad/s]");
+  ctx.save();
+  ctx.beginPath(); ctx.rect(M.l, M.t, W - M.l - M.r, H - M.t - M.b); ctx.clip();
+  // identity diagonal
+  ctx.strokeStyle = cssVar("--axis"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px(lim.cross[0]), py(lim.cross[0]));
+  ctx.lineTo(px(lim.cross[1]), py(lim.cross[1])); ctx.stroke();
+  const c = j.cross_theta_dot, pts = [];
+  for (let i = 0; i < c.length - 1; i++) {
+    const x = px(c[i]), y = py(c[i + 1]);
+    pts.push([x, y, c[i], c[i + 1], i]);
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 7);
+    ctx.fillStyle = colorOf(mode); ctx.globalAlpha = .85; ctx.fill();
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.6; ctx.strokeStyle = cssVar("--surface"); ctx.stroke();
+  }
+  ctx.restore();
+  cv._hit = { pts, mode, kind: "return" };
+}
+
+/* ---------------- hover ---------------- */
+function bindHover(cv, readout) {
+  const move = evt => {
+    const h = cv._hit; if (!h) return;
+    const r = cv.getBoundingClientRect();
+    const mx = evt.clientX - r.left, my = evt.clientY - r.top;
+    if (h.kind === "return") {
+      let best = null, bd = 24 * 24;
+      for (const p of h.pts) {
+        const d = (p[0] - mx) ** 2 + (p[1] - my) ** 2;
+        if (d < bd) { bd = d; best = p; }
+      }
+      if (!best) { hideTip(); readout.textContent = readout._idle; return; }
+      showTip(evt, `crossing ${best[4] + 1} → ${best[4] + 2}\nθ̇ₙ   ${best[2].toFixed(2)}\nθ̇ₙ₊₁ ${best[3].toFixed(2)}`);
+      readout.innerHTML = `crossing <b>${best[4] + 1}</b> → <b>${best[4] + 2}</b> · θ̇ <b>${best[2].toFixed(2)}</b> → <b>${best[3].toFixed(2)}</b>`;
+    } else {
+      const j = h.j; let best = -1, bd = Infinity;
+      for (let i = 0; i < j.theta.length; i++) {
+        const d = (h.px(j.theta[i]) - mx) ** 2 + (h.py(j.theta_dot[i]) - my) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0 || bd > 26 * 26) { hideTip(); readout.textContent = readout._idle; return; }
+      showTip(evt, `θ  ${j.theta[best].toFixed(3)} rad\nθ̇  ${j.theta_dot[best].toFixed(2)} rad/s`);
+      readout.innerHTML = `θ <b>${j.theta[best].toFixed(3)}</b> rad · θ̇ <b>${j.theta_dot[best].toFixed(2)}</b> rad/s`;
+    }
+  };
+  cv.addEventListener("mousemove", move);
+  cv.addEventListener("mouseleave", () => { hideTip(); readout.textContent = readout._idle; });
+}
+
+/* ---------------- bars ---------------- */
+function drawBars() {
+  const host = document.getElementById("bars");
+  host.innerHTML = "";
+  for (const [key, label, dec, lower, unit] of AGG) {
+    const vals = MODES.map(m => DATA.data[tb][m].aggregate[key]);
+    const finite = vals.filter(v => v !== null && isFinite(v));
+    const card = document.createElement("div");
+    card.className = "bar-card";
+    const dir = lower === null ? "descriptive" : (lower ? "↓ lower is better" : "↑ higher is better");
+    card.innerHTML = `<div class="bar-title">${label}${unit ? ` <span class="unit">${unit}</span>` : ""}</div>
+                      <div class="bar-dir">${dir}</div>`;
+    const W = 240, rowH = 26, H = rowH * MODES.length + 8;
+    const max = Math.max(...finite, 0), min = Math.min(...finite, 0);
+    const span = (max - min) || 1;
+    // Bars stop short of a reserved value column, so a full-width bar's label
+    // can never overflow the viewBox.
+    const x0 = 86, x1 = W - 44, xVal = W - 2;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `${label} by policy`);
+    svg.style.display = "block"; svg.style.marginTop = "6px";
+    // hatch pattern = 300k buffer, matching the published figures
+    svg.innerHTML = `<defs>
+      <pattern id="h-mf-${key}" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="5" height="5" fill="${cssVar("--mf")}" opacity=".30"/>
+        <line x1="0" y1="0" x2="0" y2="5" stroke="${cssVar("--mf")}" stroke-width="2.4"/></pattern>
+      <pattern id="h-orc-${key}" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="5" height="5" fill="${cssVar("--orc")}" opacity=".30"/>
+        <line x1="0" y1="0" x2="0" y2="5" stroke="${cssVar("--orc")}" stroke-width="2.4"/></pattern>
+    </defs>`;
+    const bestVal = lower === null ? null : (lower ? Math.min(...finite) : Math.max(...finite));
+    MODES.forEach((m, i) => {
+      const v = vals[i], y = 4 + i * rowH;
+      const lab = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      lab.setAttribute("x", x0 - 8); lab.setAttribute("y", y + 13);
+      lab.setAttribute("text-anchor", "end");
+      lab.setAttribute("fill", cssVar("--ink-2"));
+      lab.setAttribute("font-size", "10.5");
+      lab.setAttribute("font-family", "ui-monospace, monospace");
+      lab.textContent = DATA.data[tb][m].label;
+      svg.appendChild(lab);
+      if (v === null || !isFinite(v)) return;
+      const w = Math.max(1, (v - min) / span * (x1 - x0));
+      const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      r.setAttribute("x", x0); r.setAttribute("y", y + 3);
+      r.setAttribute("width", w); r.setAttribute("height", 13);
+      r.setAttribute("rx", 3);
+      const fam = isOracle(m) ? "orc" : "mf";
+      r.setAttribute("fill", is300k(m) ? `url(#h-${fam}-${key})` : cssVar(`--${fam}`));
+      r.style.cursor = "default";
+      r.addEventListener("mousemove", e => showTip(e,
+        `${DATA.data[tb][m].label}\n${label}  ${fmt(v, dec)}${unit ? " " + unit : ""}\n8-episode mean · ${TB_LABEL[tb]}`));
+      r.addEventListener("mouseleave", hideTip);
+      svg.appendChild(r);
+      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t.setAttribute("x", xVal); t.setAttribute("y", y + 13);
+      t.setAttribute("text-anchor", "end");
+      t.setAttribute("fill", v === bestVal ? cssVar("--ink") : cssVar("--ink-2"));
+      t.setAttribute("font-size", "10.5");
+      t.setAttribute("font-weight", v === bestVal ? "700" : "400");
+      t.setAttribute("font-family", "ui-monospace, monospace");
+      t.textContent = fmt(v, dec);
+      svg.appendChild(t);
+    });
+    card.appendChild(svg);
+    host.appendChild(card);
+  }
+}
+
+function drawLegend() {
+  const L = document.getElementById("legend");
+  const sw = (fill, hatch) => `<svg width="22" height="11">${hatch
+    ? `<rect width="22" height="11" rx="2" fill="${fill}" opacity=".3"/>
+       <rect width="22" height="11" rx="2" fill="none" stroke="${fill}" stroke-width="1"/>
+       <path d="M-2 11 L11 -2 M4 11 L17 -2 M10 11 L23 -2" stroke="${fill}" stroke-width="2.2"/>`
+    : `<rect width="22" height="11" rx="2" fill="${fill}"/>`}</svg>`;
+  L.innerHTML =
+    `<span class="lg">${sw(cssVar("--mf"), false)} model-free</span>
+     <span class="lg">${sw(cssVar("--orc"), false)} oracle (MuJoCo in-loop)</span>
+     <span class="lg">${sw(cssVar("--muted"), true)} 300k buffer &nbsp;·&nbsp; solid = 1M</span>`;
+}
+
+/* ---------------- per-joint table ---------------- */
+function drawTable() {
+  const tbl = document.getElementById("jt-tbl");
+  const head = tbl.querySelector("thead tr");
+  head.innerHTML = "<th>Metric</th>" + MODES.map(m =>
+    `<th>${DATA.data[tb][m].label}</th>`).join("");
+  const body = tbl.querySelector("tbody");
+  body.innerHTML = "";
+  const addGroup = txt => {
+    const tr = document.createElement("tr");
+    tr.className = "grp";
+    tr.innerHTML = `<td colspan="${MODES.length + 1}">${txt}</td>`;
+    body.appendChild(tr);
+  };
+  const addRows = rows => {
+    for (const [key, label, dec, unit] of rows) {
+      const tr = document.createElement("tr");
+      let html = `<td>${label}${unit ? ` <span class="unit">${unit}</span>` : ""}</td>`;
+      for (const m of MODES) {
+        const j = DATA.data[tb][m].joints[joint];
+        const v = j ? j.metrics[key] : null;
+        html += `<td>${fmt(v, dec)}</td>`;
+      }
+      tr.innerHTML = html;
+      body.appendChild(tr);
+    }
+  };
+  addGroup(`Reference joint — ${JOINT_LABEL[joint]} · moves with the joint selector`);
+  addRows(JOINT_DEP);
+  addGroup("Whole body — all six joints + both feet · independent of the selector");
+  addRows(JOINT_INDEP);
+}
+
+/* ---------------- build ---------------- */
+function buildGrids() {
+  const pg = document.getElementById("phase-grid"), rg = document.getElementById("return-grid");
+  pg.innerHTML = ""; rg.innerHTML = "";
+  for (const m of MODES) {
+    const blk = DATA.data[tb][m];
+    for (const [host, kind, cap] of [[pg, "phase", "θ̇ vs θ"], [rg, "return", "θ̇ₙ₊₁ vs θ̇ₙ"]]) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML =
+        `<div class="card-head">
+           <span class="swatch" style="background:${colorOf(m)}"></span>
+           <span class="card-title">${blk.label}</span>
+           <span class="card-seed">seed ${blk.seed}</span>
+         </div>
+         <div class="plot"><canvas></canvas></div>
+         <div class="readout"></div>`;
+      host.appendChild(card);
+      const cv = card.querySelector("canvas"), ro = card.querySelector(".readout");
+      ro._idle = cap + " · hover to read";
+      ro.textContent = ro._idle;
+      cv._mode = m; cv._kind = kind;
+      bindHover(cv, ro);
+    }
+  }
+}
+
+function render() {
+  const lim = sharedLimits();
+  for (const cv of document.querySelectorAll("#phase-grid canvas")) drawPhase(cv, cv._mode, lim);
+  for (const cv of document.querySelectorAll("#return-grid canvas")) drawReturn(cv, cv._mode, lim);
+  drawLegend(); drawBars(); drawTable();
+  const cfg = DATA.meta.configs[tb];
+  document.getElementById("tb-note").innerHTML = tb === "regular"
+    ? `uniform <b>dt = ${cfg.dt} s</b> · every control step the same length`
+    : `<b>dt ∈ [${cfg.min_dt}, ${cfg.max_dt}] s</b> · training-matched irregular sampling`;
+  document.getElementById("agg-sub").innerHTML =
+    `Mean over 8 episodes on the <b>${TB_LABEL[tb]}</b> time base, independent of the joint selector. ` +
+    `Return is a per-step sum, so its scale follows how many control steps an episode holds — ` +
+    `compare it within a time base, not across. <b>Speed</b> is the time-base-independent measure.`;
+}
+
+function rebuild() { buildGrids(); render(); }
+
+// controls
+function seg(hostId, items, get, set) {
+  const host = document.getElementById(hostId);
+  host.innerHTML = "";
+  for (const [val, label] of items) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = label;
+    b.setAttribute("aria-pressed", String(get() === val));
+    b.addEventListener("click", () => {
+      set(val);
+      for (const o of host.children) o.setAttribute("aria-pressed", String(o === b));
+      rebuild();
+    });
+    host.appendChild(b);
+  }
+}
+seg("tb-seg", DATA.meta.time_bases.map(t => [t, TB_LABEL[t]]), () => tb, v => tb = v);
+seg("jt-seg", JOINTS.map(j => [j, JOINT_LABEL[j]]), () => joint, v => joint = v);
+
+rebuild();
+
+let rt;
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(render, 120); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => setTimeout(render, 40));
+new MutationObserver(() => setTimeout(render, 40))
+  .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>

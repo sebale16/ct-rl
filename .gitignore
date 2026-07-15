@@ -215,5 +215,6 @@ cache/*
 experimental/*
 benchmarks/*
 !benchmarks/*.py
+!benchmarks/*.template.html
 !benchmarks/hyperparams/
 !benchmarks/hyperparams/*
