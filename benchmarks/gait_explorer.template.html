@@ -168,55 +168,39 @@
   .unit { color: var(--muted); font-size: 11px; }
 
   /* ---- math section ---- */
+  /* KaTeX ships its own stylesheet (inlined, with data-URI faces) in the
+     generated fragment; everything here is the surrounding list layout. */
   .grp-head {
     font-family: var(--mono); font-size: 10.5px; letter-spacing: .11em;
     text-transform: uppercase; color: var(--muted);
-    display: flex; align-items: center; gap: 10px; margin-top: 4px;
+    display: flex; align-items: center; gap: 10px; margin: 18px 0 2px;
   }
   .grp-head::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
-  .math-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; align-items: start; }
-  @media (max-width: 900px) { .math-grid { grid-template-columns: 1fr; } }
-  .mcard {
-    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
-    padding: 13px 14px; box-shadow: var(--shadow);
-    display: flex; flex-direction: column; gap: 9px;
+  .mathlist { display: flex; flex-direction: column; }
+  .mrow {
+    display: grid; grid-template-columns: 190px 1fr; gap: 8px 22px;
+    padding: 15px 0; border-top: 1px solid var(--grid); align-items: baseline;
   }
-  .mcard h3 { font-size: 13.5px; margin: 0; letter-spacing: -.005em; }
-  .mcard h3 .where {
-    font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
-    text-transform: uppercase; color: var(--muted); font-weight: 400; margin-left: 7px;
+  .mname { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .mbody { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+  .mbody p { margin: 0; font-size: 12.8px; color: var(--ink-2); max-width: 74ch; }
+  /* Long equations scroll inside their own box rather than widening the page. */
+  .mtex { overflow-x: auto; overflow-y: hidden; padding: 1px 0; }
+  .mtex .katex-display { margin: 0; }
+  /* KaTeX centres display math on the inner .katex, so left-aligning the
+     wrapper alone does nothing — the child has to be targeted directly. */
+  .mtex .katex-display > .katex { text-align: left; display: block; }
+  .mtex .katex { font-size: 1.02em; color: var(--ink); }
+  @media (max-width: 760px) {
+    .mrow { grid-template-columns: 1fr; gap: 8px; }
   }
-  .eq {
-    font-family: var(--mono); font-size: 12px; line-height: 1.85; color: var(--ink);
-    background: var(--page); border: 1px solid var(--rule); border-radius: 6px;
-    padding: 8px 10px; overflow-x: auto;
-  }
-  .eq > div { white-space: nowrap; }
-  .eq sub, .eq sup { font-size: .78em; }
-  .mcard p { margin: 0; font-size: 12.8px; color: var(--ink-2); }
-  .mcard p .lead { color: var(--ink); font-weight: 600; }
-  /* "ranks" chip — marks the one number in a group that separates the policies */
+  /* "ranks" chip — marks a number that separates the four policies */
   .chip-rank {
     font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
     background: var(--chip-on); color: var(--chip-on-t); border-radius: 4px;
-    padding: 2px 6px; margin-left: 7px; font-weight: 600; vertical-align: 1px;
+    padding: 2px 6px; margin-left: 6px; font-weight: 600; vertical-align: 1px;
   }
-  /* demoted supporting numbers inside a mechanism card */
-  .sup-head {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
-    color: var(--muted); border-top: 1px solid var(--grid); padding-top: 10px; margin-top: 1px;
-  }
-  .sup { display: flex; flex-direction: column; gap: 12px; }
-  .sup-row { display: flex; flex-direction: column; gap: 4px; }
-  .sup-eq {
-    font-family: var(--mono); font-size: 11.5px; color: var(--ink);
-    overflow-x: auto; white-space: nowrap; padding-bottom: 1px;
-  }
-  .sup-row p { font-size: 12.4px; }
-  .spread {
-    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
+  .sp { font-family: var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
 
   /* ---- tooltip ---- */
   #tip {
@@ -328,227 +312,7 @@
       </p>
     </div>
 
-    <div class="grp-head">Energy — what the gait cost</div>
-    <div class="math-grid">
-      <div class="mcard">
-        <h3>Actuator work <span class="where">feeds E⁺, CoT, return/joule</span></h3>
-        <div class="eq">
-          <div>τ<sub>j</sub> = gear<sub>j</sub> · u<sub>j</sub></div>
-          <div>W<sub>j</sub> = τ<sub>j</sub> · Δq<sub>j</sub></div>
-          <div>E⁺ = Σ<sub>steps</sub> Σ<sub>j</sub> max(W<sub>j</sub>, 0)</div>
-        </div>
-        <p>
-          The six leg motors are plain fixed-gain torque actuators, so the torque on joint <span class="v">j</span> is
-          its gear times the commanded action — exactly, and held constant across a control step under the zero-order
-          hold. The work it does over that step is therefore torque × angle change, <span class="lead">exact with no
-          sub-step integration</span>. Summing only the positive part over all six joints and every step gives the gross
-          energy the actuators delivered; these motors recover nothing from braking, so negative work is not a credit.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Cost of transport <span class="where">bar · lower is better</span></h3>
-        <div class="eq">
-          <div>CoT = E⁺ ⁄ (M · g · d)&nbsp;&nbsp;&nbsp;M = 14 kg</div>
-        </div>
-        <p>
-          Energy per unit weight per unit distance, with <span class="v">d</span> the forward root-<span class="v">x</span>
-          travel — dimensionless, and the headline efficiency number. Dividing by distance normalizes out the fact that a
-          faster policy covers more ground on the same clock. <span class="lead">Read it as: how many joules per
-          kilogram-metre does this gait cost?</span> The absolute value sits far above an animal's — raw positive work, a
-          2-D model, no regeneration, a speed-only reward — so it is read across policies, never against biology.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Return per joule <span class="where">bar · higher is better</span></h3>
-        <div class="eq">
-          <div>R ⁄ E⁺</div>
-        </div>
-        <p>
-          The task reward bought per joule injected. Where cost of transport asks the price of <em>distance</em>, this
-          asks the price of <em>reward</em> — the two can disagree, because return saturates at 10 m/s while the energy
-          bill does not. <span class="lead">Read it as efficiency in the task's own currency.</span>
-        </p>
-      </div>
-    </div>
-
-    <div class="grp-head">Spectral scan — finding the gait (whole body: all six joints + both feet)</div>
-    <div class="math-grid">
-      <div class="mcard">
-        <h3>How the curve is made <span class="where">underlies every number in this group</span></h3>
-        <p>
-          Take one joint's angle over the cruise window — a squiggle in time. Any squiggle can be rebuilt by adding
-          together sine waves, and the power spectrum <span class="v">P(f)</span> is the recipe: how much of the wiggle
-          happens at each rate. A joint swinging cleanly three times a second gives a tall spike at 3 Hz and little
-          else; a joint trembling randomly gives a low flat smear across every rate.
-          <span class="lead">Every number in this group is one question asked of that curve.</span>
-        </p>
-        <div class="eq">
-          <div>x̃(t) = x(t) − (a·t + b)</div>
-          <div>P(f) = Welch{ x̃(t) }&nbsp;&nbsp;(Hann, 8 half-overlapping segments)</div>
-          <div>band = [0.5, 8] Hz&nbsp;&nbsp;(capped at 0.45·f<sub>s</sub>)</div>
-        </div>
-        <p>
-          Control intervals are irregular, so each signal is first interpolated onto a uniform grid at
-          <span class="v">f<sub>s</sub> = 1/median(Δt)</span>. <span class="lead">Detrending</span> then subtracts the
-          best-fit line, killing the slow posture creep that would otherwise swamp the spectrum and every phase measure
-          downstream. <span class="lead">Welch's method</span> chops the signal into eight half-overlapping chunks and
-          averages their FFTs: a single FFT of a real signal stays noisy however long you record, because extra data
-          buys more frequency bins rather than a cleaner estimate in each one — and the Hann taper stops each chunk's
-          hard edges from smearing a fake jump across all frequencies. Reading only inside the
-          <span class="lead">stride band</span> is what stops a standing policy from scoring: a motionless limb's power
-          all sits at DC (<span class="v">f = 0</span>), the constant offset that says where the limb rests rather than
-          that it moves.
-        </p>
-        <div class="sup-head">Three numbers this produces — all supporting, none of them ranking</div>
-        <div class="sup">
-          <div class="sup-row">
-            <div class="sup-eq">β = Σ<sub>f ∈ band</sub> P(f) ⁄ Σ<sub>f &gt; 0</sub> P(f)</div>
-            <p>
-              <span class="lead">Of the motion that exists, how much is stride-rate motion?</span> DC is kept out of the
-              denominator for the reason above. This is the gate's evidence that a gait exists at all, built to catch a
-              policy that stands and jitters — so it ranks nothing here, which is the intended outcome.
-              <span class="spread">All four: 0.98, spread 0.006.</span>
-            </p>
-          </div>
-          <div class="sup-row">
-            <div class="sup-eq">f<sub>0</sub> = argmax<sub>f ∈ band</sub> P(f)&nbsp;&nbsp;·&nbsp;&nbsp;stride freq = median over the 8 signals</div>
-            <p>
-              <span class="lead">Where is the tallest spike?</span> That is the stride rate — 3 Hz means three strides a
-              second — taken as the median across the eight signals so one odd joint cannot drag it. Purely descriptive:
-              3.68 Hz and 3.00 Hz are both perfectly good gaits.
-              <span class="spread">Range 3.00–3.68 Hz.</span>
-            </p>
-          </div>
-          <div class="sup-row">
-            <div class="sup-eq">p<sub>k</sub> = P(f<sub>k</sub>) ⁄ Σ P&nbsp;&nbsp;·&nbsp;&nbsp;H = −Σ<sub>k</sub> p<sub>k</sub> · log p<sub>k</sub> ⁄ log N</div>
-            <p>
-              <span class="lead">How spread out is the whole curve?</span> Treat the in-band spectrum as a probability
-              distribution over frequency and take its Shannon entropy, normalized by log N over the N in-band bins: 0
-              is a pure tone, 1 an even smear. Kept as an honest record of a measure that was tried and did not work —
-              entropy counts every bin, and a real gait has a long tail of small-but-nonzero bins that pin it at a
-              middling value however clean the fundamental is.
-              <span class="spread">0.696–0.751, spread 0.055.</span>
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div class="mcard">
-        <h3>Fundamental power fraction <span class="chip-rank">ranks</span>
-          <span class="where">bar + table · higher is better</span></h3>
-        <div class="eq">
-          <div>δ = max(0.15·f<sub>0</sub>, 1.5·Δf)</div>
-          <div>ρ<sub>peak</sub> = Σ<sub>|f − f<sub>0</sub>| ≤ δ</sub> P(f) &nbsp;⁄&nbsp; Σ<sub>f ∈ band</sub> P(f)</div>
-        </div>
-        <p>
-          <span class="lead">How much of the in-band power is concentrated at that one spike?</span> Near 1 means the
-          motion is essentially a single clean sine wave; lower means the power is smeared across many frequencies —
-          a messier wiggle. This is the one number in the group that separates the policies.
-          <span class="spread">0.73 → 0.86, spread 0.129.</span>
-        </p>
-        <p>
-          Two details look arbitrary and are not. <span class="lead">δ</span> sets how wide "at the spike" counts: a
-          windowed sine never gives an infinitely thin spike, because the Hann taper spreads it into a main lobe a couple
-          of bins wide (<span class="v">Δf</span> = bin width). The <span class="v">1.5·Δf</span> floor guarantees δ is
-          never narrower than that lobe, which would slice off part of the peak and score even a perfect tone as impure.
-          And <span class="lead">harmonics are excluded</span>: a real gait is periodic without being sinusoidal, so it
-          puts energy at <span class="v">f<sub>0</sub></span> and also at 2f<sub>0</sub>, 3f<sub>0</sub>, … Counting
-          those would let a 3 Hz fundamental's harmonics fill the whole 0.5–8 Hz band and saturate the measure near 1
-          for every policy.
-        </p>
-        <p>
-          It carries a second job: the joint with the largest ρ<sub>peak</sub> is the cleanest oscillator in the body, so
-          it is the one the Poincaré section gets built on — which is what the reference-joint group below measures
-          against.
-        </p>
-      </div>
-    </div>
-
-    <div class="grp-head">Reference joint — how good is the gait? (these move with the joint selector)</div>
-    <div class="math-grid">
-      <div class="mcard">
-        <h3>Periodicity — autocorrelation peak <span class="where">bar · higher is better</span></h3>
-        <div class="eq">
-          <div>ρ(τ) = Σ<sub>t</sub> θ̃(t)·θ̃(t+τ) &nbsp;⁄&nbsp; Σ<sub>t</sub> θ̃(t)²</div>
-          <div>periodicity = max<sub>τ</sub> ρ(τ),&nbsp;&nbsp;τ ∈ [1/f<sub>max</sub>, 1/f<sub>min</sub>]</div>
-        </div>
-        <p>
-          The normalized autocorrelation asks how much of the waveform comes back after a lag <span class="v">τ</span>;
-          the score is the best lag inside the stride band. A signal that repeats exactly returns to 1.
-          <span class="lead">Read it as the strength of the single best repeat period</span> — it is the phase portrait's
-          band tightness expressed as one number.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Stride period and its CV <span class="where">bar · lower is better</span></h3>
-        <div class="eq">
-          <div>θ<sub>a</sub>(t) = θ̃(t) + i·ℋ{θ̃}(t)&nbsp;&nbsp;(FFT Hilbert)</div>
-          <div>φ(t) = unwrap arg θ<sub>a</sub>(t)</div>
-          <div>t<sub>k</sub> : φ(t<sub>k</sub>) = 2πk,&nbsp;&nbsp;T<sub>k</sub> = t<sub>k+1</sub> − t<sub>k</sub></div>
-          <div>CV = std(T<sub>k</sub>) ⁄ mean(T<sub>k</sub>)</div>
-        </div>
-        <p>
-          The analytic signal gives an instantaneous phase; one stride is one 2π of it, and the boundaries
-          <span class="v">t<sub>k</sub></span> are found by interpolating that phase. The coefficient of variation of the
-          resulting durations is <span class="lead">0 when every stride takes exactly the same time.</span>
-          Phase-based segmentation counts one cycle per 2π regardless of waveform shape, where a threshold-crossing
-          counter would double-count a multi-lobed stride.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Poincaré dispersion <span class="where">bar · lower is better</span></h3>
-        <div class="eq">
-          <div>Σ : θ̃ = 0, ascending&nbsp;&nbsp;(the section)</div>
-          <div>s<sub>k</sub> = (θ<sub>1..6</sub>, θ̇<sub>1..6</sub>) ∈ ℝ¹²&nbsp;&nbsp;at crossing k</div>
-          <div>d<sub>P</sub> = (1/K) · Σ<sub>k</sub> ‖ (s<sub>k</sub> − s̄) ⁄ σ ‖<sub>2</sub></div>
-        </div>
-        <p>
-          At each upward mean-crossing of the reference joint, the <span class="lead">full twelve-dimensional leg
-          state</span> — all six angles and all six velocities — is interpolated to the crossing instant, standardized
-          per coordinate by its own window std, and measured from the crossings' centroid. A stable limit cycle pierces
-          the section at one point, so d<sub>P</sub> → 0; a diffuse cloud is quasi-random limb motion that happens to
-          move the torso. Standardizing stops fast joints drowning slow ones, and taking the joint state of all six limbs
-          per crossing of one reference is what makes this a whole-gait measure rather than a one-joint one — it is the
-          return map's scatter, generalized from 2 dimensions to 12.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Front/back phase-locking <span class="where">bar · higher is better</span></h3>
-        <div class="eq">
-          <div>PLV = | (1/T) · Σ<sub>t</sub> e<sup> i(φ<sub>b</sub>(t) − φ<sub>f</sub>(t))</sup> |</div>
-        </div>
-        <p>
-          With <span class="v">φ<sub>b</sub></span>, <span class="v">φ<sub>f</sub></span> the analytic phases of the back
-          and front thigh, this is <span class="lead">1 exactly when the inter-limb phase difference is constant</span> —
-          any fixed offset, as in a bound or gallop — and small when the two limbs wander independently. It is invariant
-          to <em>which</em> relative phase is held, so it scores coordination without presupposing a particular gait.
-          Being a back-vs-front comparison, it is the same number whichever reference joint you select.
-        </p>
-      </div>
-    </div>
-
-    <div class="grp-head">The gate — when the numbers are allowed to exist</div>
-    <div class="math-grid">
-      <div class="mcard" style="grid-column: 1 / -1">
-        <h3>Gait detection <span class="where">suppresses the four measures above</span></h3>
-        <div class="eq">
-          <div>gait_detected = (n_strides ≥ 3) ∧ (mean β &gt; 0.2)</div>
-        </div>
-        <p>
-          A near-stationary policy's low-amplitude jitter still has an analytic phase, so the Hilbert segmentation would
-          happily manufacture "strides" out of noise and then score them. Periodicity, stride CV, Poincaré dispersion and
-          PLV are therefore reported only when a gait is actually present: at least three stride cycles
-          <em>and</em> a real fraction of the limb-motion power inside the stride band. When the gate fails, those four
-          come back as NaN — shown as <span class="v">—</span> — and only β and the stride count survive, so
-          <span class="lead">the absence of a gait stays visible rather than being scored as a bad one.</span>
-        </p>
-      </div>
-    </div>
+__GAIT_MATH__
   </section>
 
   <footer>

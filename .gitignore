@@ -215,6 +215,9 @@ cache/*
 experimental/*
 benchmarks/*
 !benchmarks/*.py
+!benchmarks/*.js
 !benchmarks/*.template.html
+!benchmarks/*.generated.html
 !benchmarks/hyperparams/
 !benchmarks/hyperparams/*
+benchmarks/node_modules/
