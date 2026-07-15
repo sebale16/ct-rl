@@ -37,6 +37,15 @@ from torch import nn
 from torch.func import grad, jacfwd, vmap
 
 
+class FlowIntegrationError(RuntimeError):
+    """A numerical flow failure explicitly detected by ``integrate_drift``.
+
+    The type deliberately excludes arbitrary exceptions raised by ``drift_fn``.
+    Callers may recover from a detected non-finite flow without accidentally
+    swallowing OOMs, tensor-shape bugs, or other programming errors.
+    """
+
+
 def _inverse_softplus(value: float) -> float:
     """Stable scalar inverse of softplus for positive parameter initializers."""
     x = max(float(value), 1e-8)
@@ -73,11 +82,13 @@ def integrate_drift(
     ``clamp_final=False`` guards only intermediate states and leaves the endpoint
     loss unsaturated, so a bad prediction still receives a corrective gradient.
     ``check_finite=True`` performs one healthy-path endpoint check. If the
-    endpoint is non-finite (or a drift evaluation raises), the integration is
-    replayed once with stepwise checks to report the first failing internal
-    step. This avoids an accelerator synchronization after every substep while
-    retaining actionable failure diagnostics. ``check_finite="step"`` requests
-    the historical eager stepwise checking explicitly; ``False`` disables it.
+    endpoint is non-finite, the integration is replayed once with stepwise
+    checks to report the first failing internal step. Exceptions raised by
+    ``drift_fn`` propagate unchanged; in particular, OOMs and programming errors
+    are never relabelled as recoverable numerical flow failures. This avoids an
+    accelerator synchronization after every substep while retaining actionable
+    failure diagnostics. ``check_finite="step"`` requests the historical eager
+    stepwise checking explicitly; ``False`` disables it.
     """
     x = obs if isinstance(obs, th.Tensor) else th.as_tensor(obs, dtype=th.float32)
     if not x.is_floating_point():
@@ -167,22 +178,14 @@ def integrate_drift(
                 break
             x_k = x_hat.index_select(0, active)
             a_k = a_seed.index_select(0, active)
-            try:
-                b_k = drift_fn(x_k, a_k)
-            except RuntimeError as exc:
-                if check_steps:
-                    raise RuntimeError(
-                        "drift evaluation failed at internal flow step "
-                        f"{k + 1}/{max_n} ({active.numel()} active samples): {exc}"
-                    ) from exc
-                raise
+            b_k = drift_fn(x_k, a_k)
             b_k = th.as_tensor(b_k, dtype=x.dtype, device=x.device)
             if b_k.shape != x_k.shape:
                 raise ValueError(
                     f"drift must return shape {tuple(x_k.shape)}, got {tuple(b_k.shape)}"
                 )
             if check_steps and not bool(th.all(th.isfinite(b_k))):
-                raise RuntimeError(
+                raise FlowIntegrationError(
                     "non-finite drift at internal flow step "
                     f"{k + 1}/{max_n} ({active.numel()} active samples)"
                 )
@@ -200,7 +203,7 @@ def integrate_drift(
                     ).unsqueeze(-1)
                     x_next = th.where(is_final, x_next, bounded)
             if check_steps and not bool(th.all(th.isfinite(x_next))):
-                raise RuntimeError(
+                raise FlowIntegrationError(
                     "non-finite state at internal flow step "
                     f"{k + 1}/{max_n} ({active.numel()} active samples)"
                 )
@@ -217,7 +220,7 @@ def integrate_drift(
     original_error = None
     try:
         endpoint = _run(x, a, limit, check_steps=False)
-    except RuntimeError as exc:
+    except FlowIntegrationError as exc:
         original_error = exc
         endpoint = None
     if endpoint is not None and bool(th.all(th.isfinite(endpoint))):
@@ -232,22 +235,22 @@ def integrate_drift(
                 check_steps=True,
             )
             if not bool(th.all(th.isfinite(diagnostic_endpoint))):
-                raise RuntimeError(
+                raise FlowIntegrationError(
                     "non-finite state at diagnostic flow endpoint "
                     f"after {max_n} internal steps"
                 )
-    except RuntimeError as diagnostic_error:
-        raise RuntimeError(
+    except FlowIntegrationError as diagnostic_error:
+        raise FlowIntegrationError(
             "flow integration failed; diagnostic replay found: "
             f"{diagnostic_error}"
         ) from (original_error or diagnostic_error)
 
     if original_error is not None:
-        raise RuntimeError(
+        raise FlowIntegrationError(
             "flow integration failed, but the stepwise diagnostic replay was finite: "
             f"{original_error}"
         ) from original_error
-    raise RuntimeError(
+    raise FlowIntegrationError(
         "flow endpoint is non-finite, but the stepwise diagnostic replay was finite"
     )
 

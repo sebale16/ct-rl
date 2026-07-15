@@ -384,6 +384,40 @@ class TestDynamicsPublication(unittest.TestCase):
         self.assertEqual(len(agent.dynamics_optimizer.state), 0)
         self.assertEqual(agent._dynamics_rollbacks, 1)
 
+    def test_quality_check_rejects_only_typed_flow_failures(self):
+        env, agent = self._agent()
+        batch = 4
+        obs = th.zeros(batch, int(env.observation_space.shape[0]))
+        actions = th.zeros(batch, int(env.action_space.shape[0]))
+        next_obs = obs.clone()
+        dt = th.full((batch, 1), 0.02)
+
+        agent.dynamics_model.drift = (
+            lambda x, _a: th.full_like(x, float("nan"))
+        )
+        accepted, _, reason = agent._post_fit_flow_quality(
+            obs, actions, next_obs, dt, 0.0
+        )
+        self.assertFalse(accepted)
+        self.assertIn("flow evaluation failed", reason)
+
+        for exc in (
+            RuntimeError("synthetic programming failure"),
+            th.OutOfMemoryError("synthetic OOM"),
+        ):
+            with self.subTest(exc_type=type(exc).__name__):
+                _, agent = self._agent()
+
+                def boom(*args, _exc=exc, **kwargs):
+                    raise _exc
+
+                agent.dynamics_model.drift = boom
+                with self.assertRaises(type(exc)) as caught:
+                    agent._post_fit_flow_quality(
+                        obs, actions, next_obs, dt, 0.0
+                    )
+                self.assertIs(caught.exception, exc)
+
     def test_skipped_optimizer_update_cannot_count_as_publication(self):
         env, agent = self._agent()
         batch = 4

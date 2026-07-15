@@ -8,7 +8,12 @@ from environment.dmc import DMCContinuousEnv
 from algorithms.ct_sac import CTSAC
 from common.buffers import ReplayBuffer
 from models.actor_q_critic import ActorQCriticModel
-from models.port_hamiltonian import DOFLayout, PortHamiltonianModel, integrate_drift
+from models.port_hamiltonian import (
+    DOFLayout,
+    FlowIntegrationError,
+    PortHamiltonianModel,
+    integrate_drift,
+)
 
 
 def _corr_slope(pred: th.Tensor, target: th.Tensor):
@@ -139,7 +144,7 @@ class TestVariableDurationIntegration(unittest.TestCase):
             # the same first failure after the healthy-path endpoint check.
             return th.where(x >= 0.003, th.full_like(x, float("inf")), 1.0)
 
-        with self.assertRaisesRegex(RuntimeError, "internal flow step 3/5"):
+        with self.assertRaisesRegex(FlowIntegrationError, "internal flow step 3/5"):
             integrate_drift(
                 failing_drift,
                 th.zeros(2, 1),
@@ -151,6 +156,31 @@ class TestVariableDurationIntegration(unittest.TestCase):
         # Five unchecked production steps, then three diagnostic steps through
         # the first failure. Healthy calls do not pay for that replay.
         self.assertEqual(calls, 8)
+
+    def test_drift_runtime_and_oom_propagate_without_replay_or_wrapping(self):
+        for exc in (
+            RuntimeError("synthetic programming failure"),
+            th.OutOfMemoryError("synthetic OOM"),
+        ):
+            with self.subTest(exc_type=type(exc).__name__):
+                calls = 0
+
+                def failing_drift(x, _a, *, _exc=exc):
+                    nonlocal calls
+                    calls += 1
+                    raise _exc
+
+                with self.assertRaises(type(exc)) as caught:
+                    integrate_drift(
+                        failing_drift,
+                        th.zeros(2, 1),
+                        th.zeros(2, 1),
+                        0.01,
+                        max_step=0.002,
+                        check_finite=True,
+                    )
+                self.assertIs(caught.exception, exc)
+                self.assertEqual(calls, 1)
 
     def test_finite_endpoint_check_has_no_healthy_replay(self):
         calls = 0
@@ -189,7 +219,7 @@ class TestVariableDurationIntegration(unittest.TestCase):
                 finite_drift, th.zeros(1, 1), th.zeros(1, 1), 0.002,
                 check_finite="sometimes",
             )
-        with self.assertRaisesRegex(RuntimeError, "diagnostic flow endpoint"):
+        with self.assertRaisesRegex(FlowIntegrationError, "diagnostic flow endpoint"):
             integrate_drift(
                 finite_drift, th.full((1, 1), float("nan")), th.zeros(1, 1),
                 0.0, check_finite=True,

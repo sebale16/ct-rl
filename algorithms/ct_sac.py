@@ -12,7 +12,16 @@ from .off_policy import OffPolicyAlgorithm
 from common.schedules import Schedule
 from common.buffers import ReplayBatch
 from models.actor_q_critic import ActorQCriticModel
-from models.port_hamiltonian import integrate_drift
+from models.port_hamiltonian import FlowIntegrationError, integrate_drift
+
+
+class ModelBasedTargetNumericalError(RuntimeError):
+    """A model-based critic target failure safe for guarded fallback.
+
+    This deliberately excludes arbitrary ``RuntimeError`` instances. Only
+    explicitly detected non-finite target/flow conditions use this type, so an
+    OOM or programming error cannot be mistaken for learned-model divergence.
+    """
 
 
 class CTSAC(OffPolicyAlgorithm):
@@ -151,8 +160,12 @@ class CTSAC(OffPolicyAlgorithm):
         # the learned-dynamics target causally halves recovery in model-poor
         # windows via magnitude/tail outliers while its action ordering stays
         # correct. See _guarded_model_based_target.
-        self.target_guard_kappa = float(target_guard_kappa or 0.0)
-        self.target_guard_cap = float(target_guard_cap or 0.0)
+        self.target_guard_kappa = self._coerce_target_guard_parameter(
+            "target_guard_kappa", target_guard_kappa
+        )
+        self.target_guard_cap = self._coerce_target_guard_parameter(
+            "target_guard_cap", target_guard_cap
+        )
         # Maximum internal step used to turn the instantaneous drift into a
         # finite-duration flow. Replay keeps every irregular transition duration;
         # this only controls the numerical solver inside the fit/critic target.
@@ -337,6 +350,23 @@ class CTSAC(OffPolicyAlgorithm):
         self._n_updates = 0
 
     @staticmethod
+    def _coerce_target_guard_parameter(name: str, value: Any) -> float:
+        """Parse an optional CSV guard value and reject unsafe settings."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 0.0
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name} must be finite and >= 0, got {value!r}"
+            ) from exc
+        if not np.isfinite(parsed) or parsed < 0.0:
+            raise ValueError(
+                f"{name} must be finite and >= 0, got {value!r}"
+            )
+        return parsed
+
+    @staticmethod
     def _infer_physics_step(env) -> Optional[float]:
         """Read a physics-solver step through vector/wrapper layers when available."""
         current = env.envs[0] if hasattr(env, "envs") and env.envs else env
@@ -449,21 +479,21 @@ class CTSAC(OffPolicyAlgorithm):
         fit_failure = self._live_dynamics_fit_failure_reason(dynamics_loss)
         if fit_failure is not None:
             return False, float("inf"), fit_failure
-        if hasattr(self.dynamics_model, "mass_diagnostics"):
-            try:
-                diagnostics = self.dynamics_model.mass_diagnostics(
-                    obs[: min(self.dynamics_publish_batch_size, obs.shape[0])]
-                )
-                self._last_dynamics_mass_diagnostics = diagnostics
-                for name, value in diagnostics.items():
-                    if not np.isfinite(value):
-                        return (
-                            False,
-                            float("inf"),
-                            f"non-finite mass diagnostic: {name}",
-                        )
-            except (RuntimeError, ValueError) as exc:
-                return False, float("inf"), f"mass diagnostics failed: {exc}"
+        if (
+            hasattr(self.dynamics_model, "mass_diagnostics")
+            and getattr(self.dynamics_model, "mode", "structured") == "structured"
+        ):
+            diagnostics = self.dynamics_model.mass_diagnostics(
+                obs[: min(self.dynamics_publish_batch_size, obs.shape[0])]
+            )
+            self._last_dynamics_mass_diagnostics = diagnostics
+            for name, value in diagnostics.items():
+                if not np.isfinite(value):
+                    return (
+                        False,
+                        float("inf"),
+                        f"non-finite mass diagnostic: {name}",
+                    )
         try:
             with th.no_grad():
                 check_n = min(self.dynamics_publish_batch_size, obs.shape[0])
@@ -497,7 +527,7 @@ class CTSAC(OffPolicyAlgorithm):
                 ratio = float(
                     (flow_rmse / displacement_rms.clamp_min(1e-6)).detach()
                 )
-        except RuntimeError as exc:
+        except FlowIntegrationError as exc:
             return False, float("inf"), f"flow evaluation failed: {exc}"
 
         if not np.isfinite(ratio):
@@ -579,7 +609,7 @@ class CTSAC(OffPolicyAlgorithm):
             float(finite_values.abs().max()) if finite_values.numel() else float("nan")
         )
         bad = int((~finite).sum())
-        raise RuntimeError(
+        raise ModelBasedTargetNumericalError(
             "Model-based critic target is non-finite: "
             f"component={name}; bad={bad}/{value.numel()}, shape={tuple(value.shape)}, "
             f"max_abs_finite={max_abs_finite:.6g}."
@@ -1075,8 +1105,8 @@ class CTSAC(OffPolicyAlgorithm):
                     *flow_args,
                     **flow_kwargs,
                 )
-            except RuntimeError as exc:
-                # An exceptional linalg/drift failure gets an eager diagnostic
+            except FlowIntegrationError as exc:
+                # An explicitly detected flow failure gets an eager diagnostic
                 # replay; the healthy path performs no integration-time sync.
                 try:
                     integrate_drift(
@@ -1084,9 +1114,9 @@ class CTSAC(OffPolicyAlgorithm):
                         **flow_kwargs,
                         check_finite="step",
                     )
-                except RuntimeError as diagnostic:
+                except FlowIntegrationError as diagnostic:
                     exc = diagnostic
-                raise RuntimeError(
+                raise ModelBasedTargetNumericalError(
                     "Model-based critic target is non-finite or invalid: "
                     f"component=rolled_state; integration error: {exc}"
                 ) from exc
@@ -1105,7 +1135,7 @@ class CTSAC(OffPolicyAlgorithm):
                             ("q_fast_target", q_fast_target),
                         )
                     )
-            except RuntimeError as component_error:
+            except ModelBasedTargetNumericalError as component_error:
                 # Recover internal-step detail only on the failed path. If the
                 # flow is finite, preserve the original value-component error.
                 try:
@@ -1114,8 +1144,8 @@ class CTSAC(OffPolicyAlgorithm):
                         **flow_kwargs,
                         check_finite="step",
                     )
-                except RuntimeError as diagnostic:
-                    raise RuntimeError(
+                except FlowIntegrationError as diagnostic:
+                    raise ModelBasedTargetNumericalError(
                         "Model-based critic target is non-finite or invalid: "
                         "component=rolled_state; integration error: "
                         f"{diagnostic}"
@@ -1181,38 +1211,62 @@ class CTSAC(OffPolicyAlgorithm):
             )
             self._require_finite_target_components((("guard_anchor", t_mf),))
             try:
-                t_model = self._model_based_target(
-                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
-                    check=False,
-                )
-            except RuntimeError:
+                # The first-order generator needs autograd with respect to the
+                # observation even though all guard arithmetic is no-grad.
+                with th.enable_grad():
+                    t_model = self._model_based_target(
+                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
+                        check=False,
+                    )
+            except ModelBasedTargetNumericalError:
                 t_model = None  # integration failure: whole batch to the anchor
             if t_model is None:
-                delta = th.zeros_like(t_mf)
+                delta = th.full_like(t_mf, float("nan"))
+                finite = th.zeros_like(delta, dtype=th.bool)
                 nonfinite_frac = 1.0
             else:
+                if t_model.shape != t_mf.shape:
+                    raise ValueError(
+                        "guard model target shape must match its anchor, got "
+                        f"{tuple(t_model.shape)} and {tuple(t_mf.shape)}"
+                    )
                 delta = t_model - t_mf
-                bad = ~th.isfinite(delta)
-                nonfinite_frac = float(bad.float().mean())
-                delta = th.where(bad, th.zeros_like(delta), delta)
+                finite = th.isfinite(delta)
+                nonfinite_frac = float((~finite).float().mean())
 
-            med = delta.median()
-            centered = delta - med
-            mad = centered.abs().median() * 1.4826
+            if bool(finite.any()):
+                finite_delta = delta[finite]
+                med = finite_delta.median()
+                finite_centered = finite_delta - med
+                mad = finite_centered.abs().median() * 1.4826
+                # Exclude bad elements from both the robust statistics and the
+                # arithmetic. They are restored exactly to their anchors below.
+                safe_delta = th.where(finite, delta, med)
+                centered = safe_delta - med
+            else:
+                med = delta.new_zeros(())
+                mad = delta.new_zeros(())
+                safe_delta = th.zeros_like(delta)
+                centered = th.zeros_like(delta)
+
             clamp_frac = 0.0
-            t = t_mf + delta
+            t = t_mf + safe_delta
             if self.target_guard_kappa > 0.0:
                 # scale floor keeps the trust radius nondegenerate when the
                 # model and the anchor agree to numerical precision
                 floor = 1e-3 * (1.0 + t_mf.abs().median())
                 radius = self.target_guard_kappa * th.clamp(mad, min=floor)
-                clamp_frac = float((centered.abs() > radius).float().mean())
+                clamped = finite & (centered.abs() > radius)
+                clamp_frac = float(clamped.float().mean())
                 t = t_mf + med + centered.clamp(-radius, radius)
+            t = th.where(finite, t, t_mf)
             cap_frac = 0.0
             if self.target_guard_cap > 0.0:
                 cap = self.target_guard_cap
                 cap_frac = float((t.abs() > cap).float().mean())
                 t = t.clamp(-cap, cap)
+
+            self._require_finite_target_components((("guard_target", t),))
 
             self.logger.record("train/guard_delta_med", float(med))
             self.logger.record("train/guard_delta_mad", float(mad))

@@ -103,7 +103,7 @@ def build_one(name, seed, K, rng):
     pos = min(int(k_actual), int(bnz["pos"]))
     updates = max(0, int(k_actual) - LEARNING_STARTS)
     log_alpha = th.tensor(float(np.log(max(alpha_at(seed, k_actual), 1e-6))))
-    # counters identical across all four branches -> identical, V-head-ready
+    # counters identical across all five branches -> identical, V-head-ready
     # start. (_dynamics_updates left to CTSAC.load, identical for base/sham.)
     state = {"optimizers": {},
              "counters": {"num_timesteps": int(k_actual),
