@@ -195,6 +195,28 @@
   .eq sub, .eq sup { font-size: .78em; }
   .mcard p { margin: 0; font-size: 12.8px; color: var(--ink-2); }
   .mcard p .lead { color: var(--ink); font-weight: 600; }
+  /* "ranks" chip — marks the one number in a group that separates the policies */
+  .chip-rank {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    background: var(--chip-on); color: var(--chip-on-t); border-radius: 4px;
+    padding: 2px 6px; margin-left: 7px; font-weight: 600; vertical-align: 1px;
+  }
+  /* demoted supporting numbers inside a mechanism card */
+  .sup-head {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); border-top: 1px solid var(--grid); padding-top: 10px; margin-top: 1px;
+  }
+  .sup { display: flex; flex-direction: column; gap: 12px; }
+  .sup-row { display: flex; flex-direction: column; gap: 4px; }
+  .sup-eq {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+    overflow-x: auto; white-space: nowrap; padding-bottom: 1px;
+  }
+  .sup-row p { font-size: 12.4px; }
+  .spread {
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
 
   /* ---- tooltip ---- */
   #tip {
@@ -351,10 +373,17 @@
       </div>
     </div>
 
-    <div class="grp-head">Spectral scan — is there a gait at all? (whole body, all six joints + both feet)</div>
+    <div class="grp-head">Spectral scan — finding the gait (whole body: all six joints + both feet)</div>
     <div class="math-grid">
       <div class="mcard">
-        <h3>Spectrum and the stride band <span class="where">underlies every gait number</span></h3>
+        <h3>How the curve is made <span class="where">underlies every number in this group</span></h3>
+        <p>
+          Take one joint's angle over the cruise window — a squiggle in time. Any squiggle can be rebuilt by adding
+          together sine waves, and the power spectrum <span class="v">P(f)</span> is the recipe: how much of the wiggle
+          happens at each rate. A joint swinging cleanly three times a second gives a tall spike at 3 Hz and little
+          else; a joint trembling randomly gives a low flat smear across every rate.
+          <span class="lead">Every number in this group is one question asked of that curve.</span>
+        </p>
         <div class="eq">
           <div>x̃(t) = x(t) − (a·t + b)</div>
           <div>P(f) = Welch{ x̃(t) }&nbsp;&nbsp;(Hann, 8 half-overlapping segments)</div>
@@ -362,66 +391,77 @@
         </div>
         <p>
           Control intervals are irregular, so each signal is first interpolated onto a uniform grid at
-          <span class="v">f<sub>s</sub> = 1/median(Δt)</span>. Its least-squares linear trend is then removed, which
-          kills the slow posture drift that would otherwise dominate every phase and autocorrelation measure. Everything
-          spectral is read <span class="lead">only inside the plausible stride band</span>, so a drifting or standing
-          policy — all its power at DC — cannot be scored as periodic.
+          <span class="v">f<sub>s</sub> = 1/median(Δt)</span>. <span class="lead">Detrending</span> then subtracts the
+          best-fit line, killing the slow posture creep that would otherwise swamp the spectrum and every phase measure
+          downstream. <span class="lead">Welch's method</span> chops the signal into eight half-overlapping chunks and
+          averages their FFTs: a single FFT of a real signal stays noisy however long you record, because extra data
+          buys more frequency bins rather than a cleaner estimate in each one — and the Hann taper stops each chunk's
+          hard edges from smearing a fake jump across all frequencies. Reading only inside the
+          <span class="lead">stride band</span> is what stops a standing policy from scoring: a motionless limb's power
+          all sits at DC (<span class="v">f = 0</span>), the constant offset that says where the limb rests rather than
+          that it moves.
         </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Stride-band power fraction <span class="where">table · the gate's evidence</span></h3>
-        <div class="eq">
-          <div>β = Σ<sub>f ∈ band</sub> P(f) &nbsp;⁄&nbsp; Σ<sub>f &gt; 0</sub> P(f)</div>
+        <div class="sup-head">Three numbers this produces — all supporting, none of them ranking</div>
+        <div class="sup">
+          <div class="sup-row">
+            <div class="sup-eq">β = Σ<sub>f ∈ band</sub> P(f) ⁄ Σ<sub>f &gt; 0</sub> P(f)</div>
+            <p>
+              <span class="lead">Of the motion that exists, how much is stride-rate motion?</span> DC is kept out of the
+              denominator for the reason above. This is the gate's evidence that a gait exists at all, built to catch a
+              policy that stands and jitters — so it ranks nothing here, which is the intended outcome.
+              <span class="spread">All four: 0.98, spread 0.006.</span>
+            </p>
+          </div>
+          <div class="sup-row">
+            <div class="sup-eq">f<sub>0</sub> = argmax<sub>f ∈ band</sub> P(f)&nbsp;&nbsp;·&nbsp;&nbsp;stride freq = median over the 8 signals</div>
+            <p>
+              <span class="lead">Where is the tallest spike?</span> That is the stride rate — 3 Hz means three strides a
+              second — taken as the median across the eight signals so one odd joint cannot drag it. Purely descriptive:
+              3.68 Hz and 3.00 Hz are both perfectly good gaits.
+              <span class="spread">Range 3.00–3.68 Hz.</span>
+            </p>
+          </div>
+          <div class="sup-row">
+            <div class="sup-eq">p<sub>k</sub> = P(f<sub>k</sub>) ⁄ Σ P&nbsp;&nbsp;·&nbsp;&nbsp;H = −Σ<sub>k</sub> p<sub>k</sub> · log p<sub>k</sub> ⁄ log N</div>
+            <p>
+              <span class="lead">How spread out is the whole curve?</span> Treat the in-band spectrum as a probability
+              distribution over frequency and take its Shannon entropy, normalized by log N over the N in-band bins: 0
+              is a pure tone, 1 an even smear. Kept as an honest record of a measure that was tried and did not work —
+              entropy counts every bin, and a real gait has a long tail of small-but-nonzero bins that pin it at a
+              middling value however clean the fundamental is.
+              <span class="spread">0.696–0.751, spread 0.055.</span>
+            </p>
+          </div>
         </div>
-        <p>
-          The share of a signal's motion — excluding DC, which is just where the limb sits — that happens at stride rate
-          at all. <span class="lead">Read it as: is this limb stepping, or merely trembling and drifting?</span> It is
-          the evidence the gate below relies on, and it stays reported even when everything else is suppressed.
-        </p>
       </div>
 
       <div class="mcard">
-        <h3>Stride frequency <span class="where">bar · descriptive</span></h3>
-        <div class="eq">
-          <div>f<sub>0</sub> = argmax<sub>f ∈ band</sub> P(f)</div>
-          <div>stride freq = median over the 8 signals of f<sub>0</sub></div>
-        </div>
-        <p>
-          The dominant in-band frequency of each signal; the reported number is the median across all eight.
-          <span class="lead">Neither higher nor lower is better</span> — it says how fast the animal cycles its legs, not
-          how well, and it is here to characterize a gait rather than rank it.
-        </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Fundamental power fraction <span class="where">bar · higher is better</span></h3>
+        <h3>Fundamental power fraction <span class="chip-rank">ranks</span>
+          <span class="where">bar + table · higher is better</span></h3>
         <div class="eq">
           <div>δ = max(0.15·f<sub>0</sub>, 1.5·Δf)</div>
           <div>ρ<sub>peak</sub> = Σ<sub>|f − f<sub>0</sub>| ≤ δ</sub> P(f) &nbsp;⁄&nbsp; Σ<sub>f ∈ band</sub> P(f)</div>
         </div>
         <p>
-          How much of the in-band power sits in the fundamental's main lobe, with <span class="v">Δf</span> the spectral
-          bin width — the <span class="v">1.5·Δf</span> floor keeps a windowed tone's lobe from being clipped.
-          <span class="lead">Near 1 means one clean frequency carries the motion.</span> Harmonics are deliberately
-          excluded: for a low fundamental they span the whole band, so counting them would saturate the measure. It also
-          picks the reference oscillator — the joint with the largest ρ<sub>peak</sub> is the cleanest one to build a
-          section on.
+          <span class="lead">How much of the in-band power is concentrated at that one spike?</span> Near 1 means the
+          motion is essentially a single clean sine wave; lower means the power is smeared across many frequencies —
+          a messier wiggle. This is the one number in the group that separates the policies.
+          <span class="spread">0.73 → 0.86, spread 0.129.</span>
         </p>
-      </div>
-
-      <div class="mcard">
-        <h3>Spectral entropy <span class="where">table · diagnostic</span></h3>
-        <div class="eq">
-          <div>p<sub>k</sub> = P(f<sub>k</sub>) ⁄ Σ P&nbsp;&nbsp;(in-band)</div>
-          <div>H = −Σ<sub>k</sub> p<sub>k</sub> · log p<sub>k</sub> &nbsp;⁄&nbsp; log N</div>
-        </div>
         <p>
-          Shannon entropy of the in-band spectrum, normalized by <span class="v">log N</span> over the
-          <span class="v">N</span> in-band bins so it lands in [0, 1]. <span class="lead">0 is a pure tone, 1 a flat
-          spectrum.</span> Retained as a diagnostic rather than a headline: in practice it does not discriminate these
-          policies — every one of them puts nearly all its power in the stride band — while the autocorrelation, stride
-          CV, and Poincaré measures do.
+          Two details look arbitrary and are not. <span class="lead">δ</span> sets how wide "at the spike" counts: a
+          windowed sine never gives an infinitely thin spike, because the Hann taper spreads it into a main lobe a couple
+          of bins wide (<span class="v">Δf</span> = bin width). The <span class="v">1.5·Δf</span> floor guarantees δ is
+          never narrower than that lobe, which would slice off part of the peak and score even a perfect tone as impure.
+          And <span class="lead">harmonics are excluded</span>: a real gait is periodic without being sinusoidal, so it
+          puts energy at <span class="v">f<sub>0</sub></span> and also at 2f<sub>0</sub>, 3f<sub>0</sub>, … Counting
+          those would let a 3 Hz fundamental's harmonics fill the whole 0.5–8 Hz band and saturate the measure near 1
+          for every policy.
+        </p>
+        <p>
+          It carries a second job: the joint with the largest ρ<sub>peak</sub> is the cleanest oscillator in the body, so
+          it is the one the Poincaré section gets built on — which is what the reference-joint group below measures
+          against.
         </p>
       </div>
     </div>
