@@ -13,6 +13,15 @@ from gymnasium import spaces
 from .utils import get_device, get_obs_shape, get_action_dim
 
 
+def _draw_ints(rng, high: int, size: int) -> np.ndarray:
+    """Draw ``size`` integers in ``[0, high)``. ``rng is None`` uses the global
+    ``np.random`` stream (unchanged default behaviour); a ``numpy.random.
+    Generator`` draws from its own isolated stream instead."""
+    if rng is None:
+        return np.random.randint(0, high, size=size)
+    return rng.integers(0, high, size=size)
+
+
 @dataclass
 class ReplayBatch:
     observations: th.Tensor
@@ -200,15 +209,15 @@ class ReplayBuffer(BaseBuffer):
             self.full = True
             self.pos = 0
 
-    def sample(self, batch_size: int) -> ReplayBatch:
+    def sample(self, batch_size: int, rng=None) -> ReplayBatch:
         upper = self.buffer_size if self.full else self.pos
         assert upper > 0, "Cannot sample from an empty ReplayBuffer"
-        batch_inds = np.random.randint(0, upper, size=batch_size)
-        return self._get_samples(batch_inds)
+        batch_inds = _draw_ints(rng, upper, batch_size)
+        return self._get_samples(batch_inds, rng=rng)
 
-    def _get_samples(self, batch_inds: np.ndarray) -> ReplayBatch:
+    def _get_samples(self, batch_inds: np.ndarray, rng=None) -> ReplayBatch:
         # Sample env index too
-        env_inds = np.random.randint(0, self.n_envs, size=batch_inds.shape[0])
+        env_inds = _draw_ints(rng, self.n_envs, batch_inds.shape[0])
 
         obs = self.observations[batch_inds, env_inds, :]
         next_obs = self.next_observations[batch_inds, env_inds, :]
@@ -237,16 +246,24 @@ class ReplayBuffer(BaseBuffer):
             dt=self.to_torch(dt),
         )
 
-    def sample_sequences(self, batch_size: int, horizon: int) -> ReplaySequenceBatch:
+    def sample_sequences(
+        self, batch_size: int, horizon: int, rng=None
+    ) -> ReplaySequenceBatch:
         """Sample ``batch_size`` length-``horizon`` transition windows for the
         multi-step (rollout) dynamics fit. Steps that cross an episode end or
         the ring seam are masked out (see ``ReplaySequenceBatch``); the first
         step of every window is always valid, so ``horizon=1`` with the mask
-        applied is equivalent to ``sample``."""
+        applied is equivalent to ``sample``.
+
+        ``rng`` (a ``numpy.random.Generator``) draws the indices from a
+        dedicated stream instead of the global ``np.random`` one. This is used
+        to isolate the learned-dynamics fit's sampling so it never advances the
+        stream the critic/actor minibatches are drawn from (paired-continuation
+        experiments)."""
         upper = self.buffer_size if self.full else self.pos
         assert upper > 0, "Cannot sample from an empty ReplayBuffer"
-        start_inds = np.random.randint(0, upper, size=batch_size)
-        env_inds = np.random.randint(0, self.n_envs, size=batch_size)
+        start_inds = _draw_ints(rng, upper, batch_size)
+        env_inds = _draw_ints(rng, self.n_envs, batch_size)
         return self._get_sequence_samples(start_inds, env_inds, int(horizon))
 
     def _get_sequence_samples(

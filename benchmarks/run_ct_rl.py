@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import random
 from datetime import datetime
 from functools import partial
 import argparse
 from pathlib import Path
 
 import numpy as np
+import torch as th
 
 from environment.dmc import DMCContinuousEnv
 from environment.monitor import Monitor
@@ -170,6 +172,7 @@ def run_algorithm(
     max_seconds: float | None = None,
     checkpoint_dir: str | None = None,
     run_id: str | None = None,
+    continuation_rng_seed: int | None = None,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -445,6 +448,38 @@ def run_algorithm(
             flush=True,
         )
 
+    # Paired-continuation reseeding (optional). When --continuation_rng_seed is
+    # set on a resumed run, re-seed the global python/numpy/torch RNGs to a value
+    # that is IDENTICAL across target treatments -- so their critic/actor
+    # minibatches and exploration noise are paired -- but differs across
+    # replicate seeds, and give the learned-dynamics fit its OWN isolated
+    # sampling stream so a treatment that fits dynamics never advances the shared
+    # minibatch stream. The global reseed is applied ONCE (first chunk); a
+    # sibling marker records that so later chunks continue the stream instead of
+    # restarting it, while the dynamics-fit stream is re-isolated every chunk.
+    if resume_active and continuation_rng_seed is not None:
+        algorithm._dynamics_sample_rng = np.random.default_rng(
+            int(continuation_rng_seed) + 999983
+        )
+        marker = str(ckpt_dir).rstrip("/") + ".continuation_seeded"
+        if not os.path.exists(marker):
+            random.seed(int(continuation_rng_seed))
+            np.random.seed(int(continuation_rng_seed))
+            th.manual_seed(int(continuation_rng_seed))
+            with open(marker, "w") as f:
+                f.write(f"continuation_rng_seed={int(continuation_rng_seed)}\n")
+            print(
+                f"[continuation] one-time global reseed to {continuation_rng_seed}; "
+                f"dynamics-fit sampling isolated on a dedicated stream.",
+                flush=True,
+            )
+        else:
+            print(
+                "[continuation] resume chunk: kept checkpoint RNG; "
+                "dynamics-fit sampling re-isolated on its dedicated stream.",
+                flush=True,
+            )
+
     callbacks = [checkpoint_callback, eval_callback]
 
     # Wall-clock checkpoint: near the time budget, write a resumable checkpoint
@@ -622,6 +657,15 @@ def parse_args():
         "wall-clock timestamp. Give all chunks of a resubmission chain the same "
         "run_id so they share one log/save/checkpoint directory.",
     )
+    parser.add_argument(
+        "--continuation_rng_seed",
+        type=int,
+        default=None,
+        help="Paired-continuation replicate seed. On a resumed run, re-seeds the "
+        "global RNGs identically across target treatments (paired minibatches / "
+        "exploration) and isolates the learned-dynamics fit's sampling. Applied "
+        "once per chain via a sibling '.continuation_seeded' marker.",
+    )
     return parser.parse_args()
 
 
@@ -657,6 +701,7 @@ def main():
                 max_seconds=args.max_seconds,
                 checkpoint_dir=args.checkpoint_dir,
                 run_id=args.run_id,
+                continuation_rng_seed=args.continuation_rng_seed,
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:

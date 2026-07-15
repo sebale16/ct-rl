@@ -251,6 +251,13 @@ class CTSAC(OffPolicyAlgorithm):
         self._last_dynamics_mass_diagnostics: Dict[str, float] = {}
         self._train_dynamics = False
         self.dynamics_optimizer = None
+        # Optional dedicated RNG for the learned-dynamics fit's replay sampling.
+        # When None (default) the fit draws from the global np.random stream, as
+        # before. Setting it to a numpy Generator isolates the fit's sampling so
+        # it never advances the stream the critic/actor minibatches use -- this
+        # keeps critic minibatches paired across target treatments that do or do
+        # not fit dynamics (paired-continuation experiments).
+        self._dynamics_sample_rng = None
         self.dynamics_target_model = self.dynamics_model
         if self.dynamics_model is not None:
             dyn_params = [
@@ -689,7 +696,7 @@ class CTSAC(OffPolicyAlgorithm):
                     # Multi-step rollout fit over a replay window: the model is
                     # rolled along its own predictions and every step regressed.
                     seq = self.replay_buffer.sample_sequences(
-                        batch_size, fit_horizon
+                        batch_size, fit_horizon, rng=self._dynamics_sample_rng
                     )
                     dynamics_loss = self.dynamics_model.fit_step_rollout(
                         seq.observations, seq.actions, seq.next_observations,
@@ -733,7 +740,8 @@ class CTSAC(OffPolicyAlgorithm):
                     # Validate on a separate replay batch so publication never
                     # relies only on the data just optimized.
                     quality_batch = self.replay_buffer.sample(
-                        min(batch_size, self.dynamics_publish_batch_size)
+                        min(batch_size, self.dynamics_publish_batch_size),
+                        rng=self._dynamics_sample_rng,
                     )
                     accepted, flow_ratio, reason = self._post_fit_flow_quality(
                         quality_batch.observations,
