@@ -7,6 +7,19 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
+# Initialize PyTorch's compiler subsystem BEFORE dm_control/MuJoCo is loaded.
+# On torch 2.12.0+cu130, importing ``torch._dynamo`` *after* MuJoCo's shared
+# libraries are resident segfaults (a BLAS/threading symbol conflict during
+# dynamo's C-extension init). That lazy import is triggered by both
+# ``torch.optim.Adam.__init__`` (via ``torch._compile``) and ``torch.func``
+# (functorch), so any structured/learned CT-SAC run built after the env would
+# crash at optimizer construction or the first mass-matrix Jacobian. Forcing the
+# import here (env is imported before the algorithm/model everywhere) makes the
+# later lazy imports no-ops, so both paths work. Harmless on torch builds
+# without the conflict.
+import torch as _torch  # noqa: F401
+import torch._dynamo  # noqa: F401
+
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
