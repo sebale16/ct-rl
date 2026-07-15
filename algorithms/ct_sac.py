@@ -70,6 +70,8 @@ class CTSAC(OffPolicyAlgorithm):
         generator_gate_scale: float = 0.0,
         value_warmup: int = 0,
         generator_substeps: int = 0,
+        target_guard_kappa: float = 0.0,
+        target_guard_cap: float = 0.0,
         dynamics_publish_interval: int = 1,
         dynamics_train_interval: int = 1,
         dynamics_rollout_interval: int = 1,
@@ -139,6 +141,18 @@ class CTSAC(OffPolicyAlgorithm):
         # An exposed finer physics/integration step takes precedence.
         # 0 (default) => first-order autograd generator. >=1 => quadrature.
         self.generator_substeps = int(generator_substeps)
+        # EXPLICIT guard mode for the model-based target (both default 0 = off;
+        # every pre-existing mode is bit-identical with them off). kappa > 0
+        # winsorizes the model-based target around the model-free finite-
+        # difference anchor (per-sample outlier suppression relative to the
+        # batch-consensus discrepancy); cap > 0 bounds |target| absolutely
+        # (value-scale circuit breaker, ~3 x r_max/beta). Justified by the
+        # corrected paired continuation (results/cartpole_fork_continuation2):
+        # the learned-dynamics target causally halves recovery in model-poor
+        # windows via magnitude/tail outliers while its action ordering stays
+        # correct. See _guarded_model_based_target.
+        self.target_guard_kappa = float(target_guard_kappa or 0.0)
+        self.target_guard_cap = float(target_guard_cap or 0.0)
         # Maximum internal step used to turn the instantaneous drift into a
         # finite-duration flow. Replay keeps every irregular transition duration;
         # this only controls the numerical solver inside the fit/critic target.
@@ -817,12 +831,18 @@ class CTSAC(OffPolicyAlgorithm):
                 and self.dynamics_model is not None
                 and dynamics_ready
             ):
-                q_fast_target = self._model_based_target(
-                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor
-                )
+                if self._target_guard_enabled:
+                    q_fast_target = self._guarded_model_based_target(
+                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+                    )
+                else:
+                    q_fast_target = self._model_based_target(
+                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+                    )
                 # Each model-based construction performs one aggregate finite
                 # check and diagnoses the first bad component only on failure.
-                # There is deliberately no model-free fallback.
+                # There is deliberately no model-free fallback outside the
+                # explicit, separately-labeled guard mode (target_guard_*).
             else:
                 q_fast_target = self._finite_difference_target(
                     obs, next_obs, rewards, dones, dt, alpha_tensor
@@ -930,7 +950,8 @@ class CTSAC(OffPolicyAlgorithm):
         return q_fast_target
 
     def _model_based_target(
-        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
+        check: bool = True,
     ) -> th.Tensor:
         """Model-based target: the generator is evaluated analytically from the
         port-Hamiltonian drift b(x,a), so no sampled next state is required.
@@ -962,7 +983,7 @@ class CTSAC(OffPolicyAlgorithm):
         """
         if self.generator_substeps >= 1:
             return self._substep_quadrature_target(
-                obs, actions, rewards, dones, alpha_tensor
+                obs, actions, rewards, dones, alpha_tensor, check=check
             )
 
         target_dynamics = self.dynamics_target_model
@@ -1009,20 +1030,21 @@ class CTSAC(OffPolicyAlgorithm):
             lf = lf + self.dt_default * 0.5 * hess.detach()
 
         q_fast_target = (rewards + (1 - dones) * (V_det + lf.detach())).detach()
-        self._require_finite_target_components(
-            (
-                ("V_cur", V_det),
-                ("drift", b),
-                ("value_gradient", gV),
-                ("value_increment", lf),
-                ("q_fast_target", q_fast_target),
+        if check:
+            self._require_finite_target_components(
+                (
+                    ("V_cur", V_det),
+                    ("drift", b),
+                    ("value_gradient", gV),
+                    ("value_increment", lf),
+                    ("q_fast_target", q_fast_target),
+                )
             )
-        )
         self.logger.record("train/fraction", th.max(th.abs(lf)).item())
         return q_fast_target
 
     def _substep_quadrature_target(
-        self, obs, actions, rewards, dones, alpha_tensor
+        self, obs, actions, rewards, dones, alpha_tensor, check: bool = True
     ) -> th.Tensor:
         """Sub-step quadrature generator target (``generator_substeps = m``).
 
@@ -1073,15 +1095,16 @@ class CTSAC(OffPolicyAlgorithm):
             lf = (V_next - V_cur) - self.beta * V_cur
             q_fast_target = (rewards + (1 - dones) * (V_cur + lf)).detach()
             try:
-                self._require_finite_target_components(
-                    (
-                        ("rolled_state", x_hat),
-                        ("V_cur", V_cur),
-                        ("V_next", V_next),
-                        ("value_increment", lf),
-                        ("q_fast_target", q_fast_target),
+                if check:
+                    self._require_finite_target_components(
+                        (
+                            ("rolled_state", x_hat),
+                            ("V_cur", V_cur),
+                            ("V_next", V_next),
+                            ("value_increment", lf),
+                            ("q_fast_target", q_fast_target),
+                        )
                     )
-                )
             except RuntimeError as component_error:
                 # Recover internal-step detail only on the failed path. If the
                 # flow is finite, preserve the original value-component error.
@@ -1106,3 +1129,94 @@ class CTSAC(OffPolicyAlgorithm):
             )
             self.logger.record("train/fraction", th.max(th.abs(lf)).item())
         return q_fast_target
+
+    @property
+    def _target_guard_enabled(self) -> bool:
+        return self.target_guard_kappa > 0.0 or self.target_guard_cap > 0.0
+
+    def _guarded_model_based_target(
+        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+    ) -> th.Tensor:
+        """Winsorized model-based target -- the EXPLICIT guard mode
+        (``target_guard_kappa`` / ``target_guard_cap`` > 0; both default off).
+
+        The corrected paired continuation (results/cartpole_fork_continuation2)
+        showed the learned-dynamics target causally degrading recovery in
+        model-poor windows -- return halved, variance doubled, critic loss
+        ~100x -- while the within-state action ORDERING it induces stays
+        correct (results/cartpole_action_grid_*). The harmful channel is
+        magnitude/tail outliers inflating the critic/value scale, so the guard
+        suppresses exactly that channel and passes everything else through:
+
+          anchor     t_mf = model-free finite-difference target on the same
+                            batch (realized next state; V-head read at data
+                            points only, never at model predictions)
+          discrepancy d   = t_model - t_mf                          (per sample)
+          winsorize   t   = t_mf + med(d) + clip(d - med(d), +-kappa*MAD(d))
+          cap        |t| <= target_guard_cap
+
+        The batch median of d is kept, so the systematic higher-order
+        correction the quadrature target carries over the finite difference
+        survives; only per-sample outliers relative to the batch-consensus
+        discrepancy are clamped. MAD is robust to the observed window
+        contamination (a model-poor pocket is a minority of a uniform replay
+        batch); the absolute cap backstops whole-batch corruption and the
+        value-scale runaway (healthy cartpole targets are bounded by
+        ~r_max/beta ~= 50; seed-1-style runaways sit orders of magnitude
+        above). Non-finite model targets fall to the anchor and are counted;
+        a non-finite anchor still raises -- the guard never invents a target.
+
+        This is deliberately a separate, labeled mode: benchmark modes without
+        ``target_guard_*`` keep the pure model-based-or-fail contract, and a
+        guarded run is not a pure model-based result. The guard consumes no
+        RNG (anchor and clamp are deterministic), so a guarded branch stays
+        minibatch-paired with an unguarded one under the paired-continuation
+        harness. Pairing assumes the V-head is ready (true whenever the
+        quadrature target is active in the benchmark configs); an unready
+        V-head would sample the soft value inside the anchor.
+        """
+        with th.no_grad():
+            t_mf = self._finite_difference_target(
+                obs, next_obs, rewards, dones, dt, alpha_tensor
+            )
+            self._require_finite_target_components((("guard_anchor", t_mf),))
+            try:
+                t_model = self._model_based_target(
+                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
+                    check=False,
+                )
+            except RuntimeError:
+                t_model = None  # integration failure: whole batch to the anchor
+            if t_model is None:
+                delta = th.zeros_like(t_mf)
+                nonfinite_frac = 1.0
+            else:
+                delta = t_model - t_mf
+                bad = ~th.isfinite(delta)
+                nonfinite_frac = float(bad.float().mean())
+                delta = th.where(bad, th.zeros_like(delta), delta)
+
+            med = delta.median()
+            centered = delta - med
+            mad = centered.abs().median() * 1.4826
+            clamp_frac = 0.0
+            t = t_mf + delta
+            if self.target_guard_kappa > 0.0:
+                # scale floor keeps the trust radius nondegenerate when the
+                # model and the anchor agree to numerical precision
+                floor = 1e-3 * (1.0 + t_mf.abs().median())
+                radius = self.target_guard_kappa * th.clamp(mad, min=floor)
+                clamp_frac = float((centered.abs() > radius).float().mean())
+                t = t_mf + med + centered.clamp(-radius, radius)
+            cap_frac = 0.0
+            if self.target_guard_cap > 0.0:
+                cap = self.target_guard_cap
+                cap_frac = float((t.abs() > cap).float().mean())
+                t = t.clamp(-cap, cap)
+
+            self.logger.record("train/guard_delta_med", float(med))
+            self.logger.record("train/guard_delta_mad", float(mad))
+            self.logger.record("train/guard_clamp_frac", clamp_frac)
+            self.logger.record("train/guard_cap_frac", cap_frac)
+            self.logger.record("train/guard_nonfinite_frac", nonfinite_frac)
+        return t.detach()

@@ -18,6 +18,16 @@ dynamics-fit RNG + a one-time paired global reseed via
   * add a ``sham`` branch: a second copy of the learned baseline. Run under the
     same paired RNG it must reproduce ``base`` (an A/A null that measures the
     residual float-nondeterminism floor the target contrasts are judged against).
+  * add a ``guarded`` branch (mode ``fork_guarded``): the learned baseline with
+    the explicit target guard (winsorize the model-based target around the
+    model-free anchor, kappa=6 * batch MAD, plus an absolute target cap 150
+    ~= 3 x r_max/beta). This is the causal test of the guard the corrected
+    continuation justified. Predictions: tracks oracle/mf on seed11 (the
+    magnitude/tail channel is what it suppresses), stays inert relative to
+    base wherever base is healthy (clamp_frac ~ 0), and does NOT rescue seed1
+    (the runaway is already stored in the critic/value/alpha state; the anchor
+    itself reads the exploded V-head). The guard consumes no RNG, so it stays
+    minibatch-paired with base/sham.
 
 Counters (train_freq=1, gradient_steps=1, learning_starts=10000):
   _n_updates = _value_updates = K - learning_starts  (>> value_warmup=5000).
@@ -38,7 +48,7 @@ LEARNED = "mbq_structured_quad_roll"
 SAVED = f"saved_models/ct_sac/cartpole-swingup/{LEARNED}"
 CHAIN = f".chain_mbq_cforce_grid/cartpole-swingup__{LEARNED}"
 FORK_ROOT = ".chain_fork2"
-BRANCHES = ["base", "oracle", "mf", "sham"]   # -> fork_base/fork_oracle/fork_mf/fork_sham
+BRANCHES = ["base", "oracle", "mf", "sham", "guarded"]  # -> fork_<branch> modes
 N_CONT = 120_000                              # continuation length beyond K
 LEARNING_STARTS = 10_000
 RNG_SEED = 12345                              # placeholder; overridden at run time
