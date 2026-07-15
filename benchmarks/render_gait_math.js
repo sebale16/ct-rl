@@ -2,8 +2,13 @@
 /**
  * Render the gait-explorer math section to a static HTML fragment.
  *
- *   node benchmarks/render_gait_math.js
+ *   cd benchmarks && npm ci && npm run render
  *   -> benchmarks/gait_math.generated.html   (committed; injected by build_gait_explorer.py)
+ *
+ * `npm ci` installs the exact tree in package-lock.json, so the fragment is
+ * byte-reproducible: KaTeX is pinned to an exact version because its emitted
+ * markup and stylesheet are what get committed here, and a minor bump would
+ * silently rewrite them.
  *
  * Why pre-render: the page is published as an artifact, where a strict CSP blocks
  * every external request -- no CDN for katex.js, its stylesheet, or the ~20 font
@@ -13,7 +18,8 @@
  * result is committed. Only the fonts the output actually uses are inlined
  * (detected below, not guessed), and no KaTeX JS reaches the page.
  *
- * Requires katex at render time only:  npm install katex@0.16.11
+ * Node is a render-time dependency only. Building the page from the committed
+ * fragment (benchmarks/build_gait_explorer.py) needs nothing but Python.
  */
 const fs = require("fs");
 const path = require("path");

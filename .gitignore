@@ -218,6 +218,9 @@ benchmarks/*
 !benchmarks/*.js
 !benchmarks/*.template.html
 !benchmarks/*.generated.html
+!benchmarks/package.json
+!benchmarks/package-lock.json
 !benchmarks/hyperparams/
 !benchmarks/hyperparams/*
+#  render-time only (see benchmarks/package.json); benchmarks/* already covers it
 benchmarks/node_modules/

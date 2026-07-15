@@ -1,0 +1,16 @@
+{
+  "name": "ct-rl-gait-math",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Renders the cheetah gait-explorer math section to a static, CSP-safe HTML fragment (KaTeX pre-rendered, font faces inlined). Node is needed only to regenerate the math; building the page itself is pure Python.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "render": "node render_gait_math.js"
+  },
+  "dependencies": {
+    "katex": "0.16.11"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
