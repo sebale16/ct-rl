@@ -29,11 +29,14 @@ dynamics-fit RNG + a one-time paired global reseed via
     itself reads the exploded V-head). The guard consumes no RNG, so it stays
     minibatch-paired with base/sham.
   * add a ``reanchor`` branch (mode ``fork_reanchor``): the learned baseline
-    with the re-anchored quadrature target + innovation gate (rho0=1), no
-    guard. The observed x' is transported across the duration mismatch instead
-    of re-predicting the measured segment, cancelling per sample the
-    systematic pocket bias the guard's winsorizer deliberately passes through
-    as batch consensus -- the suspected source of the guarded arm's remaining
+    with the re-anchored quadrature target + transport-aware innovation gate
+    (provisional rho0=1), no guard. The raw innovation ratio is scaled by the
+    relative duration mismatch, so dt=T forces lambda=1 and skips the learned
+    flow: the measured x' already is the requested endpoint. The observed x'
+    is transported across nonzero duration mismatch instead
+    of re-predicting the measured segment. This can reduce the batch-common
+    target offset the guard's winsorizer deliberately preserves -- the
+    suspected source of the guarded arm's remaining
     seed11 deficit (guarded ~869 vs oracle/mf ~1200). Predictions: at or above
     guarded on seed11 (target: the oracle/mf band), indistinguishable from
     base wherever base is healthy (lambda ~ 1, endpoints nearly coincide when
@@ -42,7 +45,8 @@ dynamics-fit RNG + a one-time paired global reseed via
     the same head). Deterministic, so minibatch-paired with base/sham. Offline
     validation first: evaluations/cartpole_reanchor_audit.py scores the same
     construction against oracle targets on the window checkpoints with no
-    training.
+    training. Because mismatch scaling weakens the old raw-innovation gate,
+    rho0=1 is an initial calibration point rather than a settled threshold.
 
 Counters (train_freq=1, gradient_steps=1, learning_starts=10000):
   _n_updates = _value_updates = K - learning_starts  (>> value_warmup=5000).

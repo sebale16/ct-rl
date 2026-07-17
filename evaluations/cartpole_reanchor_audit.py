@@ -9,17 +9,18 @@ the oracle target (MuJoCo endpoint at dt_default):
   quad     x_hat = Phi_hat^a_{T}(x)          -- current pure model roll
   re       x_re  = reanchored_endpoint(...)  -- data-anchored transport of x'
                                                 across the duration mismatch
-  gate     lambda-blend of re with fd by the per-sample innovation rate
-                                                (exactly the trainer's formula)
+  gate     lambda-blend of re with fd by the transport-aware innovation rate,
+           using the trainer's minibatch size and finite fallback semantics
   fd       model-free finite difference over the sampled x'
 
 The decisive comparison is eps_* = t_* - t_oracle on the seed-5/11 window
 checkpoints: the re-anchor is validated if it collapses the eps tails
 (p95/p99) where the pure roll is poor while matching it where the model is
-healthy. All constructions share the logged reward and done flag, so eps
-isolates the endpoint substitution. Per-probe RNG is isolated via SeedSequence
-keys and checkpoint hashes are recorded (cartpole_action_grid_audit
-conventions).
+healthy. Endpoint errors, their non-finite fractions, and their normalization
+exclude terminal rows: all constructions collapse to the logged reward there,
+so including them would only dilute the endpoint comparison. Per-probe RNG is
+isolated via SeedSequence keys and checkpoint hashes are recorded
+(cartpole_action_grid_audit conventions).
 
     python -m evaluations.cartpole_reanchor_audit --out results/cartpole_reanchor_audit
     python -m evaluations.cartpole_reanchor_audit --trajectory \
@@ -36,7 +37,7 @@ import os
 import numpy as np
 import torch as th
 
-from algorithms.ct_sac import reanchored_endpoint
+from algorithms.ct_sac import reanchor_gate_statistics, reanchored_endpoint
 from models.port_hamiltonian import integrate_drift
 from models.noise import OrnsteinUhlenbeckActionNoise
 from evaluations.hamiltonian_recovery import mujoco_transition
@@ -105,6 +106,81 @@ def ou_action_fn(env, seed, sigma=0.4):
     return fn
 
 
+def _chunked_gate(
+    algo, O, NO, innovation, DT, T, gate_rho, t_re, t_fd,
+):
+    """Apply the trainer's re-anchor gate in training-sized minibatches.
+
+    The gate scale is a batch median, so evaluating an entire audit dataset as
+    one batch does not reproduce training.  Preserve input order and use the
+    configured training batch size, including a final short chunk when needed.
+    Non-finite re-anchored rows receive exactly the trainer's finite-difference
+    fallback; a non-finite anchor remains visible in the returned target and is
+    reported by the audit instead of being silently discarded.
+    """
+    n = int(O.shape[0])
+    batch_size = max(1, int(getattr(algo, "batch_size", n or 1)))
+    rho_chunks = []
+    innovation_rho_chunks = []
+    mismatch_chunks = []
+    lambda_chunks = []
+    gate_chunks = []
+    fallback_chunks = []
+
+    for start in range(0, n, batch_size):
+        stop = min(start + batch_size, n)
+        sl = slice(start, stop)
+        rho, innovation_rho, mismatch = reanchor_gate_statistics(
+            O[sl], NO[sl], innovation[sl], DT[sl], T,
+        )
+        rho_chunks.append(rho)
+        innovation_rho_chunks.append(innovation_rho)
+        mismatch_chunks.append(mismatch)
+
+        if gate_rho > 0:
+            finite = th.isfinite(t_re[sl]) & th.isfinite(rho)
+            lam = th.where(
+                finite,
+                th.exp(-(rho / gate_rho).square()),
+                th.zeros_like(rho),
+            )
+            gated = th.where(
+                finite,
+                lam * t_re[sl] + (1.0 - lam) * t_fd[sl],
+                t_fd[sl],
+            )
+            lambda_chunks.append(lam)
+            gate_chunks.append(gated)
+            fallback_chunks.append(~finite)
+
+    empty = DT.new_empty((0, 1))
+    aux = {
+        "rho": th.cat(rho_chunks) if rho_chunks else empty,
+        "innovation_rho": (
+            th.cat(innovation_rho_chunks) if innovation_rho_chunks else empty
+        ),
+        "mismatch_fraction": (
+            th.cat(mismatch_chunks) if mismatch_chunks else empty
+        ),
+        "gate_batch_size": batch_size,
+        "gate_chunks": (n + batch_size - 1) // batch_size,
+    }
+    if gate_rho > 0:
+        aux.update({
+            "lam": th.cat(lambda_chunks) if lambda_chunks else empty,
+            "gate_fallback": (
+                th.cat(fallback_chunks)
+                if fallback_chunks
+                else empty.to(dtype=th.bool)
+            ),
+        })
+        target = th.cat(gate_chunks) if gate_chunks else empty
+    else:
+        aux.update({"lam": None, "gate_fallback": None})
+        target = None
+    return target, aux
+
+
 def build_targets(algo, env, O, A, R, NO, DN, DT, gate_rho):
     """All four target constructions + the oracle, through the target V-head."""
     dev = algo.device
@@ -115,7 +191,8 @@ def build_targets(algo, env, O, A, R, NO, DN, DT, gate_rho):
     NO_t = th.as_tensor(NO, dtype=th.float32, device=dev)
     R_t = th.as_tensor(R, dtype=th.float32, device=dev)
     DT_t = th.as_tensor(DT, dtype=th.float32, device=dev)
-    keep = 1.0 - th.as_tensor(DN, dtype=th.float32, device=dev)
+    DN_t = th.as_tensor(DN, dtype=th.float32, device=dev)
+    keep = 1.0 - DN_t
     x_mj = th.as_tensor(mujoco_transition(env, O, A, T),
                         dtype=th.float32, device=dev)
     with th.no_grad():
@@ -136,29 +213,39 @@ def build_targets(algo, env, O, A, R, NO, DN, DT, gate_rho):
         t_re = tgt(V(x_re))
 
         # model-free finite difference (rescaled-time convention)
-        u = (DT_t / T).clamp_min(1e-8)
-        frac = (th.exp(-beta * u) * V(NO_t) - v_cur) / u
+        # Match CTSAC._finite_difference_target exactly, including the additive
+        # denominator epsilon rather than clamping the rescaled duration.
+        u = DT_t * float(algo.time_rescale)
+        frac = (th.exp(-beta * u) * V(NO_t) - v_cur) / (u + 1e-8)
         t_fd = R_t + keep * (v_cur + frac)
 
-        # the trainer's innovation gate, verbatim
-        dt_col = DT_t.clamp_min(1e-8)
-        rate_scale = ((NO_t - O_t).norm(dim=-1, keepdim=True) / dt_col
-                      ).median() + 1e-8
-        rho = (innov.norm(dim=-1, keepdim=True) / dt_col) / rate_scale
-        lam = th.exp(-(rho / gate_rho).square()) if gate_rho > 0 else None
-        t_gate = (lam * t_re + (1 - lam) * t_fd) if lam is not None else None
+        t_gate, gate_aux = _chunked_gate(
+            algo, O_t, NO_t, innov, DT_t, T, gate_rho, t_re, t_fd,
+        )
 
     out = {"or": t_or, "quad": t_quad, "re": t_re, "fd": t_fd}
     if t_gate is not None:
         out["gate"] = t_gate
-    aux = {"dv_or": dv_or, "rho": rho, "model_seconds": model_seconds,
-           "lam": lam}
+    aux = {
+        "dv_or": dv_or,
+        "model_seconds": model_seconds,
+        "dt": DT_t,
+        "nonterminal": DN_t < 0.5,
+        "fd_anchor_finite": th.isfinite(t_fd),
+        **gate_aux,
+    }
     return out, aux
 
 
-def _estats(eps, dv_or, prefix, d):
-    e = eps.cpu().numpy().ravel().astype(np.float64)
-    e = e[np.isfinite(e)]
+def _estats(eps, dv_or, nonterminal, prefix, d):
+    active = nonterminal.cpu().numpy().ravel().astype(bool)
+    e_all = eps.cpu().numpy().ravel().astype(np.float64)[active]
+    finite = np.isfinite(e_all)
+    d[f"{prefix}_nonfinite_frac"] = (
+        round(float(np.mean(~finite)), 6) if len(e_all) else float("nan")
+    )
+    d[f"{prefix}_finite_n"] = int(finite.sum())
+    e = e_all[finite]
     if not len(e):
         for k in ("rms", "bias", "p95", "p99", "rel"):
             d[f"{prefix}_{k}"] = float("nan")
@@ -167,22 +254,107 @@ def _estats(eps, dv_or, prefix, d):
     d[f"{prefix}_bias"] = round(float(np.mean(e)), 4)
     d[f"{prefix}_p95"] = round(float(np.percentile(np.abs(e), 95)), 4)
     d[f"{prefix}_p99"] = round(float(np.percentile(np.abs(e), 99)), 4)
-    d[f"{prefix}_rel"] = round(rms(e) / (rms(dv_or.cpu().numpy()) + 1e-9), 4)
+    dv_all = dv_or.cpu().numpy().ravel().astype(np.float64)[active]
+    paired = finite & np.isfinite(dv_all)
+    e_rel = e_all[paired]
+    dv = dv_all[paired]
+    d[f"{prefix}_rel"] = (
+        round(rms(e_rel) / (rms(dv) + 1e-9), 4)
+        if len(dv)
+        else float("nan")
+    )
+
+
+def _tensor_fraction(mask, active=None):
+    values = mask.reshape(-1)
+    if active is not None:
+        values = values[active.reshape(-1)]
+    return float(values.float().mean()) if values.numel() else float("nan")
 
 
 def audit_transitions(algo, env, tup, gate_rho):
     targets, aux = build_targets(algo, env, *tup, gate_rho=gate_rho)
-    d = {"n": len(tup[0])}
+    nonterminal = aux["nonterminal"]
+    d = {
+        "n": len(tup[0]),
+        "n_nonterminal": int(nonterminal.sum().item()),
+        "terminal_frac": _tensor_fraction(~nonterminal),
+        "gate_batch_size": aux["gate_batch_size"],
+        "gate_chunks": aux["gate_chunks"],
+        "fd_anchor_nonfinite_frac": _tensor_fraction(
+            ~aux["fd_anchor_finite"]
+        ),
+        "fd_anchor_nonfinite_nonterminal_frac": _tensor_fraction(
+            ~aux["fd_anchor_finite"], nonterminal,
+        ),
+    }
+    finite_dv = th.isfinite(aux["dv_or"])
+    d["oracle_increment_nonfinite_frac"] = _tensor_fraction(
+        ~finite_dv, nonterminal,
+    )
     for name in ("quad", "re", "gate", "fd"):
         if name in targets:
-            _estats(targets[name] - targets["or"], aux["dv_or"], f"eps_{name}", d)
-    rho = aux["rho"].cpu().numpy().ravel()
-    rho = rho[np.isfinite(rho)]
-    d["rho_med"] = round(float(np.median(rho)), 4) if len(rho) else float("nan")
-    d["rho_p95"] = round(float(np.percentile(rho, 95)), 4) if len(rho) else float("nan")
+            _estats(
+                targets[name] - targets["or"], aux["dv_or"], nonterminal,
+                f"eps_{name}", d,
+            )
+    rho_all = aux["rho"].cpu().numpy().ravel()
+    rho_finite = rho_all[np.isfinite(rho_all)]
+    d["rho_nonfinite_frac"] = (
+        round(float(np.mean(~np.isfinite(rho_all))), 6)
+        if len(rho_all)
+        else float("nan")
+    )
+    d["rho_med"] = (
+        round(float(np.median(rho_finite)), 4)
+        if len(rho_finite)
+        else float("nan")
+    )
+    d["rho_p95"] = (
+        round(float(np.percentile(rho_finite, 95)), 4)
+        if len(rho_finite)
+        else float("nan")
+    )
+    mismatch = aux["mismatch_fraction"]
+    innovation_rho = aux["innovation_rho"].cpu().numpy().ravel()
+    innovation_valid = mismatch.cpu().numpy().ravel() > 0.0
+    innovation_rho = innovation_rho[
+        innovation_valid & np.isfinite(innovation_rho)
+    ]
+    d["innovation_rho_med"] = (
+        round(float(np.median(innovation_rho)), 4)
+        if len(innovation_rho)
+        else float("nan")
+    )
+    d["mismatch_fraction_mean"] = (
+        round(float(mismatch.mean()), 6)
+        if mismatch.numel()
+        else float("nan")
+    )
+    d["innovation_valid_frac"] = _tensor_fraction(mismatch > 0.0)
     if aux["lam"] is not None:
         d["lambda_mean"] = round(float(aux["lam"].mean()), 4)
-    d["model_seconds_mean"] = round(float(aux["model_seconds"].mean()), 6)
+        d["gate_fallback_frac"] = _tensor_fraction(aux["gate_fallback"])
+        d["gate_fallback_nonterminal_frac"] = _tensor_fraction(
+            aux["gate_fallback"], nonterminal,
+        )
+        # Trainer-compatible name plus the more descriptive audit name above.
+        d["reanchor_nonfinite_frac"] = d["gate_fallback_frac"]
+        d["reanchor_nonfinite_nonterminal_frac"] = (
+            d["gate_fallback_nonterminal_frac"]
+        )
+    d["transport_seconds_mean"] = round(
+        float(aux["model_seconds"].mean()), 6
+    )
+    innovation_seconds = th.where(
+        mismatch > 0.0, aux["dt"], th.zeros_like(aux["dt"])
+    )
+    d["model_seconds_mean"] = round(
+        float((innovation_seconds + aux["model_seconds"]).mean()), 6
+    )
+    d["long_frac"] = round(
+        float((aux["dt"] > float(algo.dt_default)).float().mean()), 6
+    )
     return d
 
 
@@ -190,7 +362,10 @@ def _print_row(tag, m):
     print(f"{tag}: rel quad={m['eps_quad_rel']:.3f} re={m['eps_re_rel']:.3f} "
           f"gate={m.get('eps_gate_rel', float('nan')):.3f} "
           f"fd={m['eps_fd_rel']:.3f} | p99 quad={m['eps_quad_p99']:.3f} "
-          f"re={m['eps_re_p99']:.3f} | rho_med={m['rho_med']:.3f}", flush=True)
+          f"re={m['eps_re_p99']:.3f} | rho_med={m['rho_med']:.3f} "
+          f"fallback={m.get('gate_fallback_frac', float('nan')):.3f} "
+          f"nf(re/gate)={m['eps_re_nonfinite_frac']:.3f}/"
+          f"{m.get('eps_gate_nonfinite_frac', float('nan')):.3f}", flush=True)
 
 
 def run_final(algo, env, args, seeds):
@@ -270,6 +445,19 @@ def _summary(rows):
         med = lambda k: float(np.nanmedian([r.get(k, np.nan) for r in sub]))
         print(f"{name:10s}" + "".join(f"{med(k):10.3f}" for k in keys))
 
+    print("\n=== median audit health fractions, by distribution ===")
+    health_keys = [
+        "gate_fallback_frac", "eps_quad_nonfinite_frac",
+        "eps_re_nonfinite_frac", "eps_gate_nonfinite_frac",
+        "eps_fd_nonfinite_frac", "fd_anchor_nonfinite_frac",
+    ]
+    health_hdr = ["fallback", "nf_quad", "nf_re", "nf_gate", "nf_fd", "nf_anchor"]
+    print(f"{'dist':10s}" + "".join(f"{h:>10s}" for h in health_hdr))
+    for name in dists:
+        sub = [r for r in rows if r["distribution"] == name]
+        med = lambda k: float(np.nanmedian([r.get(k, np.nan) for r in sub]))
+        print(f"{name:10s}" + "".join(f"{med(k):10.3f}" for k in health_keys))
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -292,6 +480,8 @@ def main():
     meta = {"mode": "trajectory" if args.trajectory else "final",
             "chain": CHAIN, "seeds": seeds, "n": args.n,
             "gate_rho": args.gate_rho, "dataset_seed": args.dataset_seed,
+            "gate_batch_size": int(algo.batch_size),
+            "gate_chunking": "contiguous_input_order",
             "beta": float(algo.beta), "dt_default": float(algo.dt_default),
             "checkpoints": meta_ckpts}
     _write(rows, meta, args.out)
