@@ -28,6 +28,21 @@ dynamics-fit RNG + a one-time paired global reseed via
     (the runaway is already stored in the critic/value/alpha state; the anchor
     itself reads the exploded V-head). The guard consumes no RNG, so it stays
     minibatch-paired with base/sham.
+  * add a ``reanchor`` branch (mode ``fork_reanchor``): the learned baseline
+    with the re-anchored quadrature target + innovation gate (rho0=1), no
+    guard. The observed x' is transported across the duration mismatch instead
+    of re-predicting the measured segment, cancelling per sample the
+    systematic pocket bias the guard's winsorizer deliberately passes through
+    as batch consensus -- the suspected source of the guarded arm's remaining
+    seed11 deficit (guarded ~869 vs oracle/mf ~1200). Predictions: at or above
+    guarded on seed11 (target: the oracle/mf band), indistinguishable from
+    base wherever base is healthy (lambda ~ 1, endpoints nearly coincide when
+    the innovation is small), and does NOT rescue seed1 (exact states through
+    an exploded V-head are still exploded targets; the gate's fd anchor reads
+    the same head). Deterministic, so minibatch-paired with base/sham. Offline
+    validation first: evaluations/cartpole_reanchor_audit.py scores the same
+    construction against oracle targets on the window checkpoints with no
+    training.
 
 Counters (train_freq=1, gradient_steps=1, learning_starts=10000):
   _n_updates = _value_updates = K - learning_starts  (>> value_warmup=5000).
@@ -48,7 +63,7 @@ LEARNED = "mbq_structured_quad_roll"
 SAVED = f"saved_models/ct_sac/cartpole-swingup/{LEARNED}"
 CHAIN = f".chain_mbq_cforce_grid/cartpole-swingup__{LEARNED}"
 FORK_ROOT = ".chain_fork2"
-BRANCHES = ["base", "oracle", "mf", "sham", "guarded"]  # -> fork_<branch> modes
+BRANCHES = ["base", "oracle", "mf", "sham", "guarded", "reanchor"]  # -> fork_<branch> modes
 N_CONT = 120_000                              # continuation length beyond K
 LEARNING_STARTS = 10_000
 RNG_SEED = 12345                              # placeholder; overridden at run time

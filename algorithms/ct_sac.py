@@ -24,6 +24,69 @@ class ModelBasedTargetNumericalError(RuntimeError):
     """
 
 
+def reanchored_endpoint(
+    drift_fn,
+    obs: th.Tensor,
+    actions: th.Tensor,
+    next_obs: th.Tensor,
+    dt: th.Tensor,
+    nominal_duration: float,
+    *,
+    max_step: Optional[float] = None,
+    check_finite: bool | str = False,
+) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+    """Endpoint of the nominal-duration orbit, transported from the observed
+    next state instead of re-predicted from scratch.
+
+    The critic target needs the orbit point of (x, a) at the nominal duration
+    T = ``nominal_duration``; the replay transition already measured the true
+    orbit point x' at its recorded duration ``dt``. The model's irreducible job
+    is therefore only the duration mismatch:
+
+      dt <= T:  x_re = Phi_hat^a_{T - dt}(x')        (data covers [0, dt]; the
+                model rolls only the residual segment, starting on-manifold)
+      dt  > T:  x_re = Phi_hat^a_T(x) + (T/dt) e     (x' lies past the horizon;
+                the endpoint innovation is interpolated along the path, which
+                avoids an anti-dissipative backward roll)
+
+    with the innovation e = x' - Phi_hat^a_dt(x) measured by rolling the model
+    over the recorded duration. ``e`` is a per-sample, state-space, realized
+    sample of the model's flow error (the per-sample analogue of the
+    publication audit's rho numerator), returned for gating and logging.
+
+    Returns ``(x_re, innovation, model_seconds)`` where ``model_seconds`` is
+    the per-sample model exposure of the endpoint: ``T - dt`` on the short
+    branch, ``T`` on the long branch. Shared by the CT-SAC target and the
+    offline checkpoint audit so both evaluate the identical construction.
+    Deterministic: consumes no RNG.
+    """
+    dt_col = th.as_tensor(dt, dtype=obs.dtype, device=obs.device).reshape(-1, 1)
+    T = float(nominal_duration)
+    resid = (T - dt_col).clamp_min(0.0)
+    long_rows = (dt_col > T).squeeze(1)
+
+    x_meas = integrate_drift(
+        drift_fn, obs, actions, dt_col, max_step=max_step,
+        check_finite=check_finite,
+    )
+    innovation = next_obs - x_meas
+    x_re = integrate_drift(
+        drift_fn, next_obs, actions, resid, max_step=max_step,
+        check_finite=check_finite,
+    )
+    if bool(long_rows.any()):
+        x_nom = integrate_drift(
+            drift_fn, obs[long_rows], actions[long_rows], T,
+            max_step=max_step, check_finite=check_finite,
+        )
+        x_re = x_re.clone()
+        x_re[long_rows] = (
+            x_nom + (T / dt_col[long_rows]) * innovation[long_rows]
+        )
+    model_seconds = th.where(long_rows.unsqueeze(1), th.full_like(resid, T), resid)
+    return x_re, innovation, model_seconds
+
+
 class CTSAC(OffPolicyAlgorithm):
     """
     Continuous-time SAC using ActorQCriticModel using our theoretical work.
@@ -81,6 +144,8 @@ class CTSAC(OffPolicyAlgorithm):
         generator_substeps: int = 0,
         target_guard_kappa: float = 0.0,
         target_guard_cap: float = 0.0,
+        target_reanchor: bool = False,
+        target_reanchor_gate_rho: float = 0.0,
         dynamics_publish_interval: int = 1,
         dynamics_train_interval: int = 1,
         dynamics_rollout_interval: int = 1,
@@ -165,6 +230,24 @@ class CTSAC(OffPolicyAlgorithm):
         )
         self.target_guard_cap = self._coerce_target_guard_parameter(
             "target_guard_cap", target_guard_cap
+        )
+        # EXPLICIT re-anchored quadrature mode (off by default; pre-existing
+        # modes are bit-identical with it off). The observed next state x' is
+        # an exact orbit measurement, so the model's only irreducible job in
+        # the target is transporting x' across the duration mismatch
+        # |dt_default - dt| (see reanchored_endpoint). Motivated by the
+        # fork_guarded residue: the winsorizer removes tail outliers but
+        # passes the batch-consensus systematic pocket bias through; the
+        # re-anchor cancels the systematic component per sample against data.
+        # gate_rho > 0 additionally blends toward the model-free target per
+        # sample by the innovation size (lambda = exp(-(rho/rho0)^2), rho the
+        # per-sample flow-error rate relative to the batch-median realized
+        # drift rate).
+        if isinstance(target_reanchor, str):
+            target_reanchor = target_reanchor.strip().lower() in ("1", "true", "yes")
+        self.target_reanchor = bool(target_reanchor)
+        self.target_reanchor_gate_rho = self._coerce_target_guard_parameter(
+            "target_reanchor_gate_rho", target_reanchor_gate_rho
         )
         # Maximum internal step used to turn the instantaneous drift into a
         # finite-duration flow. Replay keeps every irregular transition duration;
@@ -344,6 +427,12 @@ class CTSAC(OffPolicyAlgorithm):
                 "Learned-dynamics quadrature requires an explicit V-head when "
                 "dynamics_require_value_head=True; configure model_v_net_arch or "
                 "set dynamics_require_value_head=False."
+            )
+
+        if self.target_reanchor and self.generator_substeps < 1:
+            raise ValueError(
+                "target_reanchor is a quadrature-form construction and requires "
+                "generator_substeps >= 1."
             )
 
         # For logging how many gradient updates we’ve done
@@ -1012,6 +1101,11 @@ class CTSAC(OffPolicyAlgorithm):
         docs/ct_sac_substep_quadrature.md.
         """
         if self.generator_substeps >= 1:
+            if self.target_reanchor:
+                return self._reanchored_quadrature_target(
+                    obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
+                    check=check,
+                )
             return self._substep_quadrature_target(
                 obs, actions, rewards, dones, alpha_tensor, check=check
             )
@@ -1159,6 +1253,144 @@ class CTSAC(OffPolicyAlgorithm):
             )
             self.logger.record("train/fraction", th.max(th.abs(lf)).item())
         return q_fast_target
+
+    def _reanchored_quadrature_target(
+        self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
+        check: bool = True,
+    ) -> th.Tensor:
+        """Re-anchored quadrature target -- the EXPLICIT ``target_reanchor``
+        mode (off by default).
+
+        Identical to the sub-step quadrature target except for where the
+        nominal-duration endpoint comes from: ``reanchored_endpoint`` starts
+        the roll at the observed x' and lets the model cover only the duration
+        mismatch |dt_default - dt|, instead of re-predicting from x the segment
+        the data already measured. The systematic component of the model's
+        flow error over the measured segment -- exactly what the guard's
+        winsorizer deliberately passes through as batch consensus -- is
+        cancelled per sample against data, and the roll starts on-manifold.
+
+          lf = (V(x_re) - V(x)) - beta * V(x),   y_re = r + keep * (V(x) + lf)
+
+        With ``target_reanchor_gate_rho`` = rho0 > 0, each sample is
+        additionally blended toward the model-free finite-difference target by
+        its innovation rate: rho_i = (||e_i||/dt_i) / med_batch(||x'-x||/dt)
+        (the per-sample, duration-normalized analogue of the publication
+        audit's flow-error ratio -- rho ~ 1 means the model's flow error over
+        the measured segment is as large as the typical realized motion; the
+        median scale is robust to corrupted rows), lambda_i =
+        exp(-(rho_i/rho0)^2), and
+
+          y_i = lambda_i * y_re,i + (1 - lambda_i) * y_fd,i .
+
+        A sample whose innovation says the model cannot even reproduce the
+        measured segment does not get to transport it either. With the gate on,
+        non-finite re-anchored entries fall to the finite-difference target and
+        are counted; the anchor itself must be finite or the construction
+        raises. With the gate off the strict model-based-or-fail contract of
+        the quadrature target applies unchanged. Deterministic throughout: no
+        RNG is consumed, so a re-anchored branch stays minibatch-paired under
+        the continuation harness (V-head-ready assumed, as for the guard).
+        Like the guard, this is a separately-labeled mode: with the gate on the
+        target carries a model-free component and is not a pure model-based
+        result.
+        """
+        with th.no_grad():
+            drift = self.dynamics_target_model.drift
+            max_step = self._integration_max_step()
+            try:
+                x_re, innovation, model_seconds = reanchored_endpoint(
+                    drift, obs.detach(), actions, next_obs.detach(), dt,
+                    self.dt_default, max_step=max_step,
+                )
+            except FlowIntegrationError as exc:
+                # Explicitly detected flow failure: eager diagnostic replay,
+                # then the typed error the guard may catch.
+                try:
+                    reanchored_endpoint(
+                        drift, obs.detach(), actions, next_obs.detach(), dt,
+                        self.dt_default, max_step=max_step,
+                        check_finite="step",
+                    )
+                except FlowIntegrationError as diagnostic:
+                    exc = diagnostic
+                raise ModelBasedTargetNumericalError(
+                    "Model-based critic target is non-finite or invalid: "
+                    f"component=reanchored_state; integration error: {exc}"
+                ) from exc
+
+            V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
+            V_re = self._state_value(x_re, alpha_tensor)  # (B, 1)
+            lf = (V_re - V_cur) - self.beta * V_cur
+            y_re = (rewards + (1 - dones) * (V_cur + lf)).detach()
+
+            # Per-second flow-error rate against the batch-median realized
+            # drift rate: duration-normalized, and robust to corrupted rows
+            # (an outlier inflates only its own numerator, never the scale).
+            dt_col = th.as_tensor(
+                dt, dtype=obs.dtype, device=obs.device
+            ).reshape(-1, 1).clamp_min(1e-8)
+            drift_rate = (next_obs - obs).norm(dim=-1, keepdim=True) / dt_col
+            rate_scale = drift_rate.median() + 1e-8
+            innov_rate = innovation.norm(dim=-1, keepdim=True) / dt_col
+            rho = innov_rate / rate_scale  # (B, 1)
+
+            rho0 = self.target_reanchor_gate_rho
+            if rho0 > 0.0:
+                y_fd = self._finite_difference_target(
+                    obs, next_obs, rewards, dones, dt, alpha_tensor
+                )
+                self._require_finite_target_components(
+                    (("reanchor_anchor", y_fd),)
+                )
+                finite = th.isfinite(y_re) & th.isfinite(rho)
+                nonfinite_frac = float((~finite).float().mean())
+                lam = th.where(
+                    finite,
+                    th.exp(-(rho / rho0).square()),
+                    th.zeros_like(rho),
+                )
+                y = th.where(
+                    finite, lam * y_re + (1.0 - lam) * y_fd, y_fd
+                ).detach()
+                self.logger.record("train/reanchor_lambda_mean", lam.mean().item())
+                self.logger.record(
+                    "train/reanchor_nonfinite_frac", nonfinite_frac
+                )
+                if check:
+                    self._require_finite_target_components(
+                        (("q_fast_target", y),)
+                    )
+            else:
+                y = y_re
+                if check:
+                    self._require_finite_target_components(
+                        (
+                            ("reanchored_state", x_re),
+                            ("V_cur", V_cur),
+                            ("V_reanchored", V_re),
+                            ("value_increment", lf),
+                            ("q_fast_target", y),
+                        )
+                    )
+
+            finite_rho = rho[th.isfinite(rho)]
+            if finite_rho.numel():
+                self.logger.record(
+                    "train/reanchor_rho_med", finite_rho.median().item()
+                )
+            self.logger.record(
+                "train/reanchor_model_seconds_mean", model_seconds.mean().item()
+            )
+            self.logger.record(
+                "train/reanchor_long_frac",
+                (model_seconds >= self.dt_default).float().mean().item(),
+            )
+            self.logger.record(
+                "train/model_value_next_max_abs", V_re.abs().max().item()
+            )
+            self.logger.record("train/fraction", th.max(th.abs(lf)).item())
+        return y
 
     @property
     def _target_guard_enabled(self) -> bool:
