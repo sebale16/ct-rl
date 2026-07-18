@@ -64,13 +64,35 @@ class BaseAlgorithm(ABC):
         self.device: th.device = get_device(device)
         self.seed = seed
 
+        # Model parameters must be rooted in the requested run seed.  Seeding
+        # only after construction made nominally identical fresh runs start
+        # from unrelated actor/critic weights.
+        if seed is not None:
+            set_seed(seed)
         self._setup_model(model, self.model_kwargs)
+
+        # Restart the runtime RNG stream after initialization so modes with
+        # different architectures consume the same subsequent random stream.
+        if seed is not None:
+            set_seed(seed)
 
         # Configure logger
         self.logger = logger
 
         if seed is not None:
-            set_seed(seed)
+            # Gym spaces own a separate Generator.  This controls the random
+            # warm-up actions used before ``learning_starts``.
+            seeded_spaces = set()
+            candidates = [(env, int(seed))]
+            candidates.extend(
+                (candidate, int(seed) + index)
+                for index, candidate in enumerate(getattr(env, "envs", ()))
+            )
+            for candidate, action_seed in candidates:
+                action_space = getattr(candidate, "action_space", None)
+                if action_space is not None and id(action_space) not in seeded_spaces:
+                    action_space.seed(action_seed)
+                    seeded_spaces.add(id(action_space))
             # Gymnasium-style API
             try:
                 self.env.reset(seed=seed)

@@ -485,7 +485,12 @@ def generate_irregular_time_grid(
                 if physics_dt is None or float(physics_dt) <= 0:
                     break
                 pd = float(physics_dt)
-                n = int(np.floor(remaining / pd + 1e-12))
+                # ``t`` is the sum of many quantized intervals.  Division by
+                # ``pd`` can therefore put an exact final physics step just
+                # below the next integer (for example 0.999999999998).  Scale
+                # the grid tolerance into step units before flooring so that
+                # a representational error cannot shorten the episode.
+                n = int(np.floor((remaining + eps) / pd))
                 dt = float(n * pd)
                 if dt < lo - eps:
                     break
@@ -493,7 +498,7 @@ def generate_irregular_time_grid(
             else:
                 dt = float(np.clip(remaining, lo, hi))
 
-            t += dt
+            t = min(T, t + dt)
             times.append(t)
             break
 

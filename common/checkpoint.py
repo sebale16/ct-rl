@@ -127,6 +127,9 @@ def save_checkpoint(
             th.cuda.get_rng_state_all() if th.cuda.is_available() else None
         ),
     }
+    dynamics_rng = getattr(algorithm, "_dynamics_sample_rng", None)
+    if isinstance(dynamics_rng, np.random.Generator):
+        state["dynamics_sample_rng_state"] = dynamics_rng.bit_generator.state
     state["extra"] = extra
     th.save(state, os.path.join(tmp_dir, _STATE_NAME))
 
@@ -210,6 +213,12 @@ def load_checkpoint(
             th.cuda.set_rng_state_all(rng["torch_cuda"])
         except Exception:
             pass
+    if "dynamics_sample_rng_state" in state and hasattr(
+        algorithm, "_dynamics_sample_rng"
+    ):
+        dynamics_rng = np.random.default_rng()
+        dynamics_rng.bit_generator.state = state["dynamics_sample_rng_state"]
+        algorithm._dynamics_sample_rng = dynamics_rng
 
     algorithm._resumed_from_checkpoint = True
     return state.get("extra", {})

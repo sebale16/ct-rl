@@ -423,6 +423,40 @@ class DOFLayout:
         )
 
     @classmethod
+    def acrobot(
+        cls,
+        *,
+        joint_damping: float = 0.05,
+        base_damping_reg: float = 1e-3,
+    ) -> "DOFLayout":
+        """Mechanics-aware layout for dm_control's raw-state Acrobot.
+
+        The state is ``[shoulder, relative_elbow, shoulder_velocity,
+        elbow_velocity]``.  Both hinges are periodic, the mass matrix is
+        invariant to absolute shoulder rotation, gravity keeps the potential
+        shoulder-dependent, and the sole motor applies torque only at the
+        elbow.  ``cyclic_cfg`` remains empty because both positions are observed;
+        in this layout it denotes omitted coordinates, not physical periodicity.
+        """
+        joint_damping = float(joint_damping)
+        if not np.isfinite(joint_damping) or joint_damping <= 0.0:
+            raise ValueError("joint_damping must be finite and > 0")
+        return cls(
+            obs_dim=4,
+            pos_slice=(0, 2),
+            vel_slice=(2, 4),
+            cyclic_cfg=(),
+            obs_pos_to_cfg=(0, 1),
+            act_to_cfg=(1,),
+            m_invariant_pos=(0,),
+            enforce_m_invariance=True,
+            potential_invariant_pos=(),
+            periodic_pos=(0, 1),
+            damping_log_init=_inverse_softplus(joint_damping),
+            base_damping_reg=float(base_damping_reg),
+        )
+
+    @classmethod
     def cheetah(cls, obs_dim: int = 17, action_dim: int = 6) -> "DOFLayout":
         # obs = [qpos[1:] (8), qvel (9)]; root x (config DOF 0) is cyclic (dropped
         # from qpos, kept in qvel). Dense G_a(6->9) reproduces the validated prototype.

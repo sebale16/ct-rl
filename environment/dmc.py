@@ -26,6 +26,7 @@ import torch._dynamo  # noqa: F401
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
+from .acrobot_v2 import swingup_v2
 from .base import ContinuousEnv
 
 
@@ -166,6 +167,12 @@ class DMCContinuousEnv(ContinuousEnv):
             time_sampling_kwargs=time_sampling_kwargs,
             return_reward_increment=return_reward_increment,
         )
+        # The dm_control task and the irregular-time grid intentionally use
+        # independent RNGs, but both must be rooted in the constructor seed.
+        # Previously the first timing grid was entropy-seeded whenever trainers
+        # called reset() without passing the seed again.
+        if seed is not None:
+            self._np_random, _ = gym.utils.seeding.np_random(seed)
 
         # Validate the drift controls before constructing the comparatively
         # expensive dm_control environment. ``None`` sizes the native pool to
@@ -204,12 +211,18 @@ class DMCContinuousEnv(ContinuousEnv):
         environment_kwargs = dict(environment_kwargs or {})
         environment_kwargs.setdefault("flat_observation", flat_observation)
 
-        self._env = suite.load(
-            domain_name=domain_name,
-            task_name=task_name,
-            task_kwargs=task_kwargs,
-            environment_kwargs=environment_kwargs,
-        )
+        if domain_name == "acrobot" and task_name == "swingup-v2":
+            self._env = swingup_v2(
+                environment_kwargs=environment_kwargs,
+                **task_kwargs,
+            )
+        else:
+            self._env = suite.load(
+                domain_name=domain_name,
+                task_name=task_name,
+                task_kwargs=task_kwargs,
+                environment_kwargs=environment_kwargs,
+            )
 
         if hasattr(self._env, "_step_limit"):
             if max_steps is not None:
@@ -238,6 +251,9 @@ class DMCContinuousEnv(ContinuousEnv):
 
         # Last observation for physics error handling
         self._last_obs_dmc: Optional[np.ndarray] = None
+        self._acrobot_episode_steps = 0
+        self._acrobot_success_steps = 0
+        self._acrobot_max_tip_height = float("-inf")
 
         self.action_space = _spec_to_box(self._action_spec)
 
@@ -411,19 +427,56 @@ class DMCContinuousEnv(ContinuousEnv):
         seed: Optional[int],
         options: Optional[Dict[str, Any]],
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        # dm_control uses its own random seeding at construction; reset() ignores seed here.
-        del seed, options  # unused for now
+        del options  # unused for now
         with self._drift_rollout_lock:
             # Some suite tasks mutate dynamics-bearing model arrays on reset
             # (point_mass-hard randomizes actuator directions, for example).
             # A cached private model must never cross that mutation boundary.
             self._close_drift_rollout()
+            if seed is not None:
+                task = self._env.task
+                if hasattr(task, "reseed"):
+                    task.reseed(int(seed))
+                elif hasattr(task, "_random"):
+                    # Make the Gym reset(seed=...) contract meaningful for the
+                    # stock suite tasks as well as the local Acrobot variant.
+                    task._random = np.random.RandomState(int(seed) % (2**32))
             ts = self._env.reset()
             self._elapsed_time = 0.0
+            self._acrobot_episode_steps = 0
+            self._acrobot_success_steps = 0
+            self._acrobot_max_tip_height = float("-inf")
             obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
             self._last_obs_dmc = obs
-            info: Dict[str, Any] = {}
+            info: Dict[str, Any] = self._acrobot_reward_info(update=False)
             return obs, info
+
+    def _acrobot_reward_info(self, *, update: bool) -> Dict[str, Any]:
+        """Expose reward-independent Acrobot-v2 evaluation diagnostics."""
+        task = self._env.task
+        if not hasattr(task, "reward_terms"):
+            return {}
+        terms = task.reward_terms(self._env.physics)
+        if update:
+            self._acrobot_episode_steps += 1
+            self._acrobot_success_steps += int(bool(terms["success"]))
+        self._acrobot_max_tip_height = max(
+            self._acrobot_max_tip_height, float(terms["tip_height"])
+        )
+        success_fraction = (
+            self._acrobot_success_steps / self._acrobot_episode_steps
+            if self._acrobot_episode_steps
+            else 0.0
+        )
+        return {
+            "acrobot_tip_distance": float(terms["tip_distance"]),
+            "acrobot_tip_height": float(terms["tip_height"]),
+            "acrobot_progress": float(terms["progress"]),
+            "acrobot_precision": float(terms["precision"]),
+            "acrobot_success": float(terms["success"]),
+            "acrobot_max_tip_height": float(self._acrobot_max_tip_height),
+            "acrobot_success_fraction": float(success_fraction),
+        }
 
     def _step_physics(
         self,
@@ -481,6 +534,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "dt_requested": float(dt),
             "dt_used": float(actual_dt),
         }
+        info.update(self._acrobot_reward_info(update=True))
 
         return obs, reward, terminated, truncated, info, float(actual_dt)
 

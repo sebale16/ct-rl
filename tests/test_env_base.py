@@ -102,6 +102,25 @@ class TestTimeGrids(unittest.TestCase):
         )
         self.assertGreater(dt, 0)
 
+    def test_quantized_irregular_grid_does_not_drop_final_physics_step(self):
+        kwargs = {
+            "dist": "two_tail_uniform",
+            "tail_p": 0.99,
+            "tail_split": 0.9,
+        }
+        for seed in range(100):
+            times = generate_irregular_time_grid(
+                10.0,
+                5001,
+                min_dt=0.002,
+                max_dt=0.03,
+                mean_dt=0.01,
+                physics_dt=0.002,
+                time_sampling_kwargs=kwargs,
+                rng=np.random.default_rng(seed),
+            )
+            self.assertAlmostEqual(times[-1], 10.0)
+
 
 class TestDummyLinearEnv(unittest.TestCase):
     def test_uniform_grid_and_step_dt(self):

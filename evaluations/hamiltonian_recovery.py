@@ -1141,10 +1141,10 @@ def _select_recovery_dof_layout(
 ):
     """Select the audit model layout, retaining old-sidecar compatibility.
 
-    New raw cartpole runs use the mechanics-aware sparse actuator map. Sidecars
-    produced before that layout have a dense ``G_a`` with two output rows; use
-    the historical generic raw layout for those files so their already-recorded
-    recovery reports remain reproducible.
+    New raw CartPole and Acrobot runs use mechanics-aware sparse actuator maps.
+    Sidecars produced before those layouts have a dense ``G_a`` with one output
+    row per generalized coordinate; use the historical generic raw layout for
+    those files so their already-recorded recovery reports remain reproducible.
     """
     if not raw_state_obs:
         return None
@@ -1153,6 +1153,11 @@ def _select_recovery_dof_layout(
         if ga is not None and int(ga.shape[0]) != 1:
             return DOFLayout.raw_state(nv=int(obs_dim) // 2)
         return DOFLayout.cartpole()
+    if domain == "acrobot":
+        ga = dynamics_state.get("G_a.weight") if dynamics_state is not None else None
+        if ga is not None and int(ga.shape[0]) != 1:
+            return DOFLayout.raw_state(nv=int(obs_dim) // 2)
+        return DOFLayout.acrobot()
     return DOFLayout.raw_state(nv=int(obs_dim) // 2)
 
 

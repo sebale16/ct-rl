@@ -331,6 +331,12 @@ def load_ct_hyperparams_from_table(
                 model_kwargs[model_key] = _parse_net_arch(val)
             elif model_key == "activation_fn":
                 model_kwargs["activation_fn"] = _normalize_activation_fn(val)
+            elif model_key == "periodic_obs_indices":
+                model_kwargs[model_key] = tuple(
+                    int(part.strip())
+                    for part in re.split(r"[,;]", str(val))
+                    if part.strip()
+                )
             elif model_key in ["deterministic_policy", "use_actor_target"]:
                 model_kwargs[model_key] = bool(val.lower() == "true")
             else:

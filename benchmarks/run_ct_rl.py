@@ -43,6 +43,7 @@ from common.utils import (
     build_save_path,
     normalize_eval_range,
     get_eval_episode_count,
+    set_seed,
 )
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 
@@ -135,6 +136,8 @@ def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
         return None
     if getattr(current, "domain_name", None) == "cartpole":
         return layout_cls.cartpole()
+    if getattr(current, "domain_name", None) == "acrobot":
+        return layout_cls.acrobot()
     return layout_cls.raw_state(nv=int(obs_dim) // 2)
 
 
@@ -184,6 +187,11 @@ def run_algorithm(
     the loop exits cleanly; passing ``resume=True`` on a later run reloads the
     latest checkpoint and continues from the exact timestep.
     """
+    # Root every fresh-run object -- including structured dynamics constructed
+    # before the algorithm -- in the requested seed.  BaseAlgorithm separately
+    # restarts the policy/runtime stream after model construction.
+    set_seed(int(seed))
+
     print(
         f"\n{'='*50}\nRunning: {algo} on {env_id} (mode: {mode}, eval_mode: {eval_mode or mode}, seed: {seed})\n{'='*50}"
     )
@@ -393,6 +401,11 @@ def run_algorithm(
         seed=seed,
         **algo_kwargs,
     )
+    # Learned-dynamics replay sampling has its own stream.  Without this,
+    # structured fitting advances global NumPy state and changes later critic
+    # minibatches relative to MF/oracle arms for reasons unrelated to data.
+    if hasattr(algorithm, "_dynamics_sample_rng"):
+        algorithm._dynamics_sample_rng = np.random.default_rng(int(seed) + 999983)
 
     # Setup callbacks
     save_freq = log_kwargs.get("save_freq", 100000)
@@ -404,6 +417,7 @@ def run_algorithm(
         eval_freq=max(eval_freq // n_envs, 1),
         n_eval_episodes=n_eval_episodes,
         deterministic=True,
+        reset_seed=seed + 1000,
         best_model_save_path=str(save_dir / "best_model"),
         log_path=str(log_dir / "eval"),
         verbose=1,
@@ -543,8 +557,11 @@ def run_algorithm(
             )
 
     if finished:
+        final_model_path = save_dir / "final_model.pth"
+        algorithm.save(final_model_path)
         print(
-            f"Training finished: reached {algorithm.num_timesteps}/{total_timesteps} steps.",
+            f"Training finished: reached {algorithm.num_timesteps}/{total_timesteps} "
+            f"steps; saved exact endpoint to {final_model_path}.",
             flush=True,
         )
     else:

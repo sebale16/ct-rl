@@ -415,6 +415,7 @@ class EvalCallback(EventCallback):
         eval_freq: int = 10_000,
         n_eval_episodes: int = 5,
         deterministic: bool = True,
+        reset_seed: Optional[int] = None,
         log_path: Optional[str] = None,
         best_model_save_path: Optional[str] = None,
         verbose: int = 1,
@@ -426,6 +427,7 @@ class EvalCallback(EventCallback):
         self.eval_freq = int(eval_freq)
         self.n_eval_episodes = int(n_eval_episodes)
         self.deterministic = bool(deterministic)
+        self.reset_seed = None if reset_seed is None else int(reset_seed)
 
         self.log_path = log_path
         self.best_model_save_path = best_model_save_path
@@ -486,6 +488,7 @@ class EvalCallback(EventCallback):
             env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
             deterministic=self.deterministic,
+            reset_seed=self.reset_seed,
         )
 
         rewards = np.asarray(rewards, dtype=float)

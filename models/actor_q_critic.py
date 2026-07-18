@@ -11,7 +11,12 @@ from gymnasium import spaces
 from torch import nn
 
 from models.base import Model
-from models.actor import StochasticActor, DeterministicActor
+from models.actor import (
+    DeterministicActor,
+    StochasticActor,
+    encode_periodic_observations,
+    validate_periodic_obs_indices,
+)
 from common.torch_layers import create_mlp, get_flattened_obs_dim
 
 
@@ -46,6 +51,7 @@ class ActorQCriticModel(Model):
         log_std_init: float = -0.5,
         n_critics: int = 2,
         v_net_arch: Optional[Sequence[int]] = None,
+        periodic_obs_indices: Optional[Sequence[int]] = None,
         deterministic_policy: bool = False,
         use_actor_target: bool = False,
         device: str = "auto",
@@ -59,7 +65,11 @@ class ActorQCriticModel(Model):
         self.deterministic_policy = bool(deterministic_policy)
         self.use_actor_target = use_actor_target
 
-        obs_dim = get_flattened_obs_dim(observation_space)
+        raw_obs_dim = get_flattened_obs_dim(observation_space)
+        self.periodic_obs_indices = validate_periodic_obs_indices(
+            raw_obs_dim, periodic_obs_indices
+        )
+        obs_dim = raw_obs_dim + len(self.periodic_obs_indices)
         action_dim = _get_action_dim(action_space)
 
         # Critics Q_i(s,a)
@@ -77,11 +87,32 @@ class ActorQCriticModel(Model):
             self.q_nets.append(q_net)
             self.q_target_nets.append(q_target)
 
-        # Optional state-only value head V(s). When present, the model-based
-        # generator reads V and grad V from this smooth scalar MLP instead of
-        # differentiating through E_a[min-Q - alpha log pi] (the twin-min and
-        # stochastic policy), giving a clean, sample-free value gradient.
-        # Off by default (v_net_arch=None) -> exact legacy behavior.
+        # Actor
+        if deterministic_policy:
+            self.actor = DeterministicActor(
+                observation_space=observation_space,
+                action_space=action_space,
+                net_arch=pi_net_arch,
+                activation_fn=activation_fn,
+                periodic_obs_indices=self.periodic_obs_indices,
+                squash_output=True,
+                device=self.device,
+            )
+        else:
+            self.actor = StochasticActor(
+                observation_space=observation_space,
+                action_space=action_space,
+                net_arch=pi_net_arch,
+                activation_fn=activation_fn,
+                log_std_init=log_std_init,
+                periodic_obs_indices=self.periodic_obs_indices,
+                squash_output=True,
+                device=self.device,
+            )
+
+        # Build the optional value head after the shared actor/critic pieces.
+        # This keeps their seeded initialization identical between the plain-MF
+        # and MF+V architecture-control arms.
         self.has_v_head = v_net_arch is not None
         if self.has_v_head:
             self.v_net = create_mlp(
@@ -93,27 +124,6 @@ class ActorQCriticModel(Model):
             self.v_target_net = deepcopy(self.v_net)
             for p in self.v_target_net.parameters():
                 p.requires_grad = False
-
-        # Actor
-        if deterministic_policy:
-            self.actor = DeterministicActor(
-                observation_space=observation_space,
-                action_space=action_space,
-                net_arch=pi_net_arch,
-                activation_fn=activation_fn,
-                squash_output=True,
-                device=self.device,
-            )
-        else:
-            self.actor = StochasticActor(
-                observation_space=observation_space,
-                action_space=action_space,
-                net_arch=pi_net_arch,
-                activation_fn=activation_fn,
-                log_std_init=log_std_init,
-                squash_output=True,
-                device=self.device,
-            )
 
         self.actor_target = None
         if self.use_actor_target:
@@ -181,7 +191,8 @@ class ActorQCriticModel(Model):
             obs = th.as_tensor(obs, dtype=th.float32, device=self.device)
         else:
             obs = obs.to(self.device)
-        return obs.view(obs.shape[0], -1)
+        obs = obs.view(obs.shape[0], -1)
+        return encode_periodic_observations(obs, self.periodic_obs_indices)
 
     def _process_act(self, act: th.Tensor | np.ndarray) -> th.Tensor:
         if not isinstance(act, th.Tensor):

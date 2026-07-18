@@ -56,6 +56,7 @@ def evaluate_policy_per_episode(
     env: Union[ContinuousEnv, VecContinuousEnv],
     n_eval_episodes: int = 10,
     deterministic: bool = True,
+    reset_seed: Optional[int] = None,
 ) -> Tuple[List[float], List[int]]:
     """
     Episodic eval for continuous-time model.
@@ -70,7 +71,10 @@ def evaluate_policy_per_episode(
     is_vec_env = _is_vec_env(env)
     n_envs = int(getattr(env, "num_envs", 1)) if is_vec_env else 1
 
-    obs, _ = env.reset()
+    # A fixed initial reset makes every callback invocation evaluate the same
+    # episode/reset and irregular-time streams.  Subsequent episode resets
+    # advance those freshly rooted local streams deterministically.
+    obs, _ = env.reset(seed=reset_seed)
     if not is_vec_env:
         obs = np.asarray(obs, dtype=np.float32)
 
@@ -371,12 +375,11 @@ def create_evaluation_env_and_model(
         if hyperparams_dir is None:
             hyperparams_dir = "benchmarks/hyperparams"
         try:
-            # mode = "top" to help load model kwargs
             _, loaded_env_kwargs, loaded_model_kwargs, _, _ = (
                 load_ct_hyperparams_from_table(
                     algo=algo,
                     env_id=env_id,
-                    mode="top",
+                    mode=mode,
                     hyperparams_dir=hyperparams_dir,
                 )
             )
@@ -394,7 +397,7 @@ def create_evaluation_env_and_model(
             print(
                 f"[WARN] Failed to load hyperparams for (algo={algo}, env={env_id}, mode={mode}): {e}"
             )
-            print("[WARN] Falling back to mode='regular' env defaults.")
+            print("[WARN] Falling back to caller-provided evaluation defaults.")
             env_kwargs = dict(env_kwargs or {})
             model_kwargs = dict(model_kwargs or {})
     else:

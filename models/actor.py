@@ -16,6 +16,39 @@ from models.distribution import (
 from common.torch_layers import create_mlp, get_flattened_obs_dim
 
 
+def validate_periodic_obs_indices(
+    obs_dim: int, indices: Optional[Sequence[int]]
+) -> tuple[int, ...]:
+    """Normalize indices of scalar angles that should use sine/cosine features."""
+    if indices is None:
+        return ()
+    normalized = tuple(int(index) for index in indices)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("periodic_obs_indices must not contain duplicates")
+    if any(index < 0 or index >= int(obs_dim) for index in normalized):
+        raise ValueError(
+            f"periodic_obs_indices must be in [0, {int(obs_dim)}), got {normalized}"
+        )
+    return tuple(sorted(normalized))
+
+
+def encode_periodic_observations(
+    obs: th.Tensor, periodic_obs_indices: Sequence[int]
+) -> th.Tensor:
+    """Replace selected raw angles by differentiable ``sin``/``cos`` pairs."""
+    if not periodic_obs_indices:
+        return obs
+    periodic = set(int(index) for index in periodic_obs_indices)
+    features = []
+    for index in range(obs.shape[-1]):
+        value = obs[..., index : index + 1]
+        if index in periodic:
+            features.extend((th.sin(value), th.cos(value)))
+        else:
+            features.append(value)
+    return th.cat(features, dim=-1)
+
+
 def squashed_gaussian_log_prob_from_env_actions(
     *,
     actions_env: th.Tensor,
@@ -57,6 +90,7 @@ class StochasticActor(nn.Module):
         net_arch: Sequence[int],
         activation_fn: Type[nn.Module] = nn.ReLU,
         log_std_init: float = -0.5,
+        periodic_obs_indices: Optional[Sequence[int]] = None,
         squash_output: bool = True,
         device: str = "auto",
     ) -> None:
@@ -74,7 +108,11 @@ class StochasticActor(nn.Module):
         self.action_space = action_space
         self.squash_output = squash_output
 
-        obs_dim = get_flattened_obs_dim(observation_space)
+        raw_obs_dim = get_flattened_obs_dim(observation_space)
+        self.periodic_obs_indices = validate_periodic_obs_indices(
+            raw_obs_dim, periodic_obs_indices
+        )
+        obs_dim = raw_obs_dim + len(self.periodic_obs_indices)
         action_dim = int(np.prod(action_space.shape))
 
         # Body MLP
@@ -135,7 +173,8 @@ class StochasticActor(nn.Module):
             obs = th.as_tensor(obs, dtype=th.float32, device=self.device)
         else:
             obs = obs.to(self.device)
-        return obs.view(obs.shape[0], -1)
+        obs = obs.view(obs.shape[0], -1)
+        return encode_periodic_observations(obs, self.periodic_obs_indices)
 
     def log_prob(
         self, obs: th.Tensor | np.ndarray, actions: th.Tensor | np.ndarray
@@ -216,6 +255,7 @@ class DeterministicActor(nn.Module):
         action_space: spaces.Box,
         net_arch: Sequence[int],
         activation_fn: Type[nn.Module] = nn.ReLU,
+        periodic_obs_indices: Optional[Sequence[int]] = None,
         squash_output: bool = True,
         device: str = "auto",
     ) -> None:
@@ -233,7 +273,11 @@ class DeterministicActor(nn.Module):
         self.action_space = action_space
         self.squash_output = squash_output
 
-        obs_dim = get_flattened_obs_dim(observation_space)
+        raw_obs_dim = get_flattened_obs_dim(observation_space)
+        self.periodic_obs_indices = validate_periodic_obs_indices(
+            raw_obs_dim, periodic_obs_indices
+        )
+        obs_dim = raw_obs_dim + len(self.periodic_obs_indices)
         action_dim = int(np.prod(action_space.shape))
 
         self.net = create_mlp(
@@ -262,7 +306,8 @@ class DeterministicActor(nn.Module):
             obs = th.as_tensor(obs, dtype=th.float32, device=self.device)
         else:
             obs = obs.to(self.device)
-        return obs.view(obs.shape[0], -1)
+        obs = obs.view(obs.shape[0], -1)
+        return encode_periodic_observations(obs, self.periodic_obs_indices)
 
     def forward(self, obs: th.Tensor | np.ndarray) -> th.Tensor:
         obs_flat = self._process_obs(obs)

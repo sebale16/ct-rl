@@ -60,11 +60,15 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
         self.assertEqual(selected, "cartpole-layout")
         self.assertEqual(calls, [("cartpole", None)])
 
-    def test_runner_keeps_generic_raw_and_nonraw_fallbacks(self):
+    def test_runner_selects_acrobot_and_keeps_nonraw_fallback(self):
         class LayoutStub:
             @staticmethod
             def cartpole():
                 raise AssertionError("cartpole layout should not be selected")
+
+            @staticmethod
+            def acrobot():
+                return "acrobot-layout"
 
             @staticmethod
             def raw_state(nv):
@@ -77,8 +81,8 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
             raw_state_obs=False, domain_name="cheetah"
         )
         self.assertEqual(
-            _select_structured_dof_layout(acrobot, 8, LayoutStub),
-            ("raw", 4),
+            _select_structured_dof_layout(acrobot, 4, LayoutStub),
+            "acrobot-layout",
         )
         self.assertIsNone(
             _select_structured_dof_layout(native, 17, LayoutStub)
