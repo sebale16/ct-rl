@@ -7,6 +7,8 @@
   "n": 2000,
   "gate_rho": 0.5,
   "dataset_seed": 20260713,
+  "gate_batch_size": 256,
+  "gate_chunking": "contiguous_input_order",
   "beta": 0.020202707317519466,
   "dt_default": 0.01,
   "checkpoints": {
