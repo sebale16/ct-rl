@@ -1,6 +1,9 @@
 # ctrllib/env/dmc.py
 from __future__ import annotations
 
+import os
+import threading
+import weakref
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -24,6 +27,50 @@ from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
 from .base import ContinuousEnv
+
+
+_DRIFT_ROLLOUT_ENVS: "weakref.WeakSet[DMCContinuousEnv]" = weakref.WeakSet()
+
+
+def _close_drift_rollouts_before_fork() -> None:
+    """Shut native worker pools down while their threads still exist.
+
+    A C++ ``mujoco.rollout.Rollout`` inherited across ``fork()`` cannot be used
+    or destroyed safely: the child has a copy of the pool bookkeeping but none
+    of its worker threads.  Closing active pools before the fork lets both the
+    parent and child lazily create a process-local pool on their next drift call.
+    """
+    for env in list(_DRIFT_ROLLOUT_ENVS):
+        env._close_drift_rollout()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(before=_close_drift_rollouts_before_fork)
+
+
+def _default_drift_rollout_threads() -> int:
+    """Choose a conservative pool size within the current CPU allocation."""
+    limits = [8]
+    try:
+        affinity = os.sched_getaffinity(0)
+    except (AttributeError, OSError):
+        affinity = None
+    if affinity:
+        limits.append(len(affinity))
+    else:
+        cpu_count = os.cpu_count()
+        if cpu_count:
+            limits.append(int(cpu_count))
+
+    # Slurm installations do not universally constrain sched_getaffinity, so
+    # also honor the requested CPUs when the scheduler exposes them directly.
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus:
+        try:
+            limits.append(int(slurm_cpus.split("(", 1)[0]))
+        except ValueError:
+            pass
+    return max(1, min(limits))
 
 
 # --------------------------- Spec & Obs helpers ---------------------------
@@ -104,6 +151,8 @@ class DMCContinuousEnv(ContinuousEnv):
         ] = None,  # Keyword arguments for time sampling ("irregular")
         return_reward_increment: bool = False,
         raw_state_obs: bool = False,
+        drift_backend: str = "auto",
+        drift_rollout_threads: Optional[int] = None,
     ) -> None:
         # Initialize ContinuousEnv (time grid, dt sampling, etc.)
         super().__init__(
@@ -117,6 +166,35 @@ class DMCContinuousEnv(ContinuousEnv):
             time_sampling_kwargs=time_sampling_kwargs,
             return_reward_increment=return_reward_increment,
         )
+
+        # Validate the drift controls before constructing the comparatively
+        # expensive dm_control environment. ``None`` sizes the native pool to
+        # the current CPU allocation, capped at eight workers.
+        drift_backend = str(drift_backend).strip().lower()
+        if drift_backend not in ("auto", "rollout", "loop"):
+            raise ValueError(
+                f"drift_backend must be 'auto', 'rollout' or 'loop', "
+                f"got {drift_backend!r}"
+            )
+        if drift_rollout_threads is None:
+            drift_rollout_threads = _default_drift_rollout_threads()
+        self.drift_backend = drift_backend
+        self.drift_rollout_threads = int(drift_rollout_threads)
+        if self.drift_rollout_threads < 1:
+            raise ValueError(
+                "drift_rollout_threads must be >= 1, got "
+                f"{drift_rollout_threads!r}"
+            )
+
+        # Lazily built on first rollout-backend call:
+        # (Rollout thread pool, private model copy, per-thread MjData list).
+        self._drift_rollout: Optional[tuple] = None
+        self._drift_rollout_pid: Optional[int] = None
+        self._drift_rollout_lock = threading.RLock()
+        # Register before a pool can be constructed. The pre-fork hook acquires
+        # every live env's lock, so a fork cannot capture either a half-built
+        # native pool or an RLock owned by a thread that will vanish in the child.
+        _DRIFT_ROLLOUT_ENVS.add(self)
 
         # --- Build dm_control env ---
         task_kwargs = dict(task_kwargs or {})
@@ -203,6 +281,48 @@ class DMCContinuousEnv(ContinuousEnv):
             self.observation_space = spaces.Box(
                 low=-np.inf, high=np.inf, shape=(nq + nv,), dtype=np.float32
             )
+
+    def close(self) -> None:
+        with self._drift_rollout_lock:
+            try:
+                self._close_drift_rollout()
+                self._env.close()
+                super().close()
+            finally:
+                _DRIFT_ROLLOUT_ENVS.discard(self)
+
+    def __getstate__(self) -> dict:
+        """Exclude process-local native rollout resources from serialization."""
+        state = self.__dict__.copy()
+        state["_drift_rollout"] = None
+        state["_drift_rollout_pid"] = None
+        state.pop("_drift_rollout_lock", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._drift_rollout = None
+        self._drift_rollout_pid = None
+        self._drift_rollout_lock = threading.RLock()
+        _DRIFT_ROLLOUT_ENVS.add(self)
+
+    def _close_drift_rollout(self) -> None:
+        """Close and forget this process's lazily-created rollout pool."""
+        with self._drift_rollout_lock:
+            rollout_state = self._drift_rollout
+            if rollout_state is None:
+                self._drift_rollout_pid = None
+                return
+            if self._drift_rollout_pid != os.getpid():
+                raise RuntimeError(
+                    "cannot close a mujoco rollout pool inherited from another "
+                    "process; create or serialize the environment before forking"
+                )
+            try:
+                rollout_state[0].close()
+            finally:
+                self._drift_rollout = None
+                self._drift_rollout_pid = None
 
     def render(
         self,
@@ -293,12 +413,17 @@ class DMCContinuousEnv(ContinuousEnv):
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         # dm_control uses its own random seeding at construction; reset() ignores seed here.
         del seed, options  # unused for now
-        ts = self._env.reset()
-        self._elapsed_time = 0.0
-        obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
-        self._last_obs_dmc = obs
-        info: Dict[str, Any] = {}
-        return obs, info
+        with self._drift_rollout_lock:
+            # Some suite tasks mutate dynamics-bearing model arrays on reset
+            # (point_mass-hard randomizes actuator directions, for example).
+            # A cached private model must never cross that mutation boundary.
+            self._close_drift_rollout()
+            ts = self._env.reset()
+            self._elapsed_time = 0.0
+            obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
+            self._last_obs_dmc = obs
+            info: Dict[str, Any] = {}
+            return obs, info
 
     def _step_physics(
         self,
@@ -306,6 +431,14 @@ class DMCContinuousEnv(ContinuousEnv):
         dt: float,
     ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any], float]:
         """Advance env by (approximately) `dt` seconds using dm_control's step."""
+        with self._drift_rollout_lock:
+            return self._step_physics_unlocked(action, dt)
+
+    def _step_physics_unlocked(
+        self,
+        action: np.ndarray,
+        dt: float,
+    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any], float]:
         assert dt > 0.0, "dt must be > 0 in DMCContinuousEnv._step_physics"
 
         restore_dt, restore_nsub, actual_dt = self._set_control_dt_for_one_step(dt)
@@ -379,9 +512,30 @@ class DMCContinuousEnv(ContinuousEnv):
         - the ``cheetah`` task observation, obs = [qpos[1:] (nq-1); qvel (nv)]:
           d/dt obs[:nq-1] = qvel[1:nq], d/dt obs[nq-1:] = qacc.
 
-        The live physics state is snapshotted and restored, so this is safe to
-        call during training. Computation loops over the batch on CPU.
+        Two CPU backends compute the batch (``drift_backend`` constructor
+        kwarg), both deterministic and both leaving the live physics state
+        unchanged:
+
+        - ``"rollout"``: one ``mujoco.rollout`` call steps the whole batch in
+          C across ``drift_rollout_threads`` worker threads, and qacc is
+          recovered from the Euler velocity update ``(qvel' - qvel)/h``. The
+          rollout runs on a private model copy forced to the explicit Euler
+          integrator (``eulerdamp`` and unstable-state autoreset disabled); these
+          settings change only the stepping rule, so the recovered qacc equals
+          what ``physics.forward()`` reads under any live integrator. Live
+          actuator state, applied forces, equality/mocap/user context, solver
+          warm-start, and time are copied into the private rollout.
+        - ``"loop"``: the historical per-sample loop, one
+          ``physics.forward()`` per row with the live state snapshotted and
+          restored.
+        - ``"auto"`` (default): ``"rollout"`` when supported, else ``"loop"``.
         """
+        with self._drift_rollout_lock:
+            return self._dynamics_terms_unlocked(obs, action)
+
+    def _dynamics_terms_unlocked(
+        self, obs: np.ndarray, action: np.ndarray
+    ) -> np.ndarray:
         if not self.raw_state_obs and self.domain_name != "cheetah":
             raise NotImplementedError(
                 "dynamics_terms supports raw_state_obs=True (any hinge/slide "
@@ -398,10 +552,8 @@ class DMCContinuousEnv(ContinuousEnv):
         obs = np.asarray(obs, dtype=np.float64).reshape(-1, obs_dim)
         action = np.asarray(action, dtype=np.float64).reshape(obs.shape[0], -1)
 
-        physics = self._env.physics
-        data = physics.data
-        nq = int(physics.model.nq)
-        nv = int(physics.model.nv)
+        nq = int(self._env.physics.model.nq)
+        nv = int(self._env.physics.model.nv)
         if self.raw_state_obs:
             assert obs_dim == nq + nv, f"raw obs_dim {obs_dim} != nq+nv = {nq + nv}"
             pos_width = nq  # obs = [qpos; qvel]
@@ -413,6 +565,29 @@ class DMCContinuousEnv(ContinuousEnv):
 
         low = np.asarray(self.action_space.low, dtype=np.float64)
         high = np.asarray(self.action_space.high, dtype=np.float64)
+        action = np.clip(action, low, high)
+
+        backend = self.drift_backend
+        if backend == "auto":
+            backend = "rollout" if self._drift_rollout_supported() else "loop"
+        elif backend == "rollout" and not self._drift_rollout_supported():
+            raise RuntimeError(
+                "drift_backend='rollout' needs the mujoco.rollout module; "
+                "use drift_backend='loop' or 'auto'."
+            )
+        if backend == "rollout":
+            return self._dynamics_terms_rollout(obs, action, pos_width)
+        return self._dynamics_terms_loop(obs, action, pos_width)
+
+    def _dynamics_terms_loop(
+        self, obs: np.ndarray, action: np.ndarray, pos_width: int
+    ) -> np.ndarray:
+        """Per-sample drift via ``physics.forward()`` on the live physics."""
+        physics = self._env.physics
+        data = physics.data
+        nq = int(physics.model.nq)
+        nv = int(physics.model.nv)
+        obs_dim = obs.shape[1]
 
         saved = (
             data.qpos.copy(),
@@ -428,7 +603,7 @@ class DMCContinuousEnv(ContinuousEnv):
                 qvel = obs[i, pos_width:].astype(np.float64)
                 data.qpos[:] = qpos
                 data.qvel[:] = qvel
-                data.ctrl[:] = np.clip(action[i], low, high)
+                data.ctrl[:] = action[i]
                 physics.forward()
                 out[i, :pos_width] = np.asarray(data.qvel[nq - pos_width:nq])
                 out[i, pos_width:] = np.asarray(data.qacc[:nv])
@@ -438,4 +613,158 @@ class DMCContinuousEnv(ContinuousEnv):
             data.ctrl[:] = saved[2]
             data.time = saved[3]
             physics.forward()
+        return out
+
+    def _drift_rollout_supported(self) -> bool:
+        try:
+            import mujoco.rollout as rollout_module
+        except (ImportError, OSError):
+            return False
+        return hasattr(rollout_module, "Rollout")
+
+    def _ensure_drift_rollout(self) -> tuple:
+        import copy
+
+        import mujoco
+        import mujoco.rollout
+
+        if (
+            self._drift_rollout is not None
+            and self._drift_rollout_pid != os.getpid()
+        ):
+            # Never destroy an inherited native pool here: its worker threads
+            # vanished at fork and its destructor would block trying to join
+            # them. The registered pre-fork hook prevents this path for Python
+            # forks; the guard turns any unregistered external fork into a clear
+            # error instead of a native deadlock.
+            raise RuntimeError(
+                "mujoco rollout pool was inherited from another process; "
+                "construct or serialize the environment before forking"
+            )
+
+        if self._drift_rollout is None:
+            model = copy.copy(self._env.physics.model.ptr)
+            # qacc is recovered below by inverting the explicit-Euler velocity
+            # update qvel' = qvel + h*qacc, so the private copy must integrate
+            # with exactly that rule: force Euler (qacc from mj_forward does
+            # not depend on the integrator, so RK4/implicit domains still get
+            # their correct drift) and disable implicit joint damping
+            # (eulerdamp), which would fold D into the update. Also disable
+            # mj_step's unstable-state autoreset: mj_forward returns the large
+            # acceleration to its caller, whereas autoreset would silently
+            # replace qvel and make the reconstructed acceleration meaningless.
+            model.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
+            model.opt.disableflags |= (
+                mujoco.mjtDisableBit.mjDSBL_EULERDAMP
+                | mujoco.mjtDisableBit.mjDSBL_AUTORESET
+            )
+            nthread = self.drift_rollout_threads
+            rollout = mujoco.rollout.Rollout(nthread=nthread)
+            try:
+                datas = [mujoco.MjData(model) for _ in range(nthread)]
+            except Exception:
+                rollout.close()
+                raise
+            self._drift_rollout = (rollout, model, datas)
+            self._drift_rollout_pid = os.getpid()
+        rollout, model, datas = self._drift_rollout
+        model.opt.timestep = float(self._env.physics.model.opt.timestep)
+        return rollout, model, datas
+
+    def _dynamics_terms_rollout(
+        self, obs: np.ndarray, action: np.ndarray, pos_width: int
+    ) -> np.ndarray:
+        """Batched drift via a one-step ``mujoco.rollout`` on a model copy."""
+        import mujoco
+
+        rollout, model, datas = self._ensure_drift_rollout()
+        nq = int(model.nq)
+        nv = int(model.nv)
+        batch = obs.shape[0]
+
+        # Snapshot every integration input once, then split it into the three
+        # channels accepted by mujoco.rollout. FULLPHYSICS also contains model-
+        # dependent history/plugin state, so derive sizes through MuJoCo rather
+        # than assuming the legacy [time;qpos;qvel;act] width.
+        live_model = self._env.physics.model.ptr
+        live_data = self._env.physics.data.ptr
+        if (int(live_model.nq), int(live_model.nv), int(live_model.nu)) != (
+            nq,
+            nv,
+            int(model.nu),
+        ):
+            raise RuntimeError("live and private MuJoCo model dimensions differ")
+        integration_spec = mujoco.mjtState.mjSTATE_INTEGRATION
+        integration = np.empty(
+            mujoco.mj_stateSize(live_model, integration_spec), dtype=np.float64
+        )
+        mujoco.mj_getState(live_model, live_data, integration, integration_spec)
+
+        def extract_state(spec) -> np.ndarray:
+            value = np.empty(mujoco.mj_stateSize(live_model, spec), dtype=np.float64)
+            if hasattr(mujoco, "mj_extractState"):
+                mujoco.mj_extractState(
+                    live_model, integration, integration_spec, value, spec
+                )
+            else:
+                # Compatibility with MuJoCo versions that expose Rollout but
+                # predate mj_extractState.
+                mujoco.mj_getState(live_model, live_data, value, spec)
+            return value
+
+        def state_offset(signature, field) -> int:
+            # State fields are serialized in ascending mjtState-bit order.
+            preceding = int(signature) & (int(field) - 1)
+            return int(mujoco.mj_stateSize(live_model, preceding))
+
+        full_spec = mujoco.mjtState.mjSTATE_FULLPHYSICS
+        base_state = extract_state(full_spec)
+        if mujoco.mj_stateSize(model, full_spec) != base_state.size:
+            raise RuntimeError("live and private MuJoCo model state signatures differ")
+        state = np.broadcast_to(base_state, (batch, base_state.size)).copy()
+        # Historical cheetah behavior fixes the omitted root translation to 0.
+        # Raw observations replace every qpos entry.
+        qpos_adr = state_offset(full_spec, mujoco.mjtState.mjSTATE_QPOS)
+        qvel_adr = state_offset(full_spec, mujoco.mjtState.mjSTATE_QVEL)
+        state[:, qpos_adr : qpos_adr + nq] = 0.0
+        state[
+            :, qpos_adr + (nq - pos_width) : qpos_adr + nq
+        ] = obs[:, :pos_width]
+        state[:, qvel_adr : qvel_adr + nv] = obs[:, pos_width:]
+
+        # CTRL is the first component of mjSTATE_USER. All remaining components
+        # retain the live qfrc/xfrc, equality, mocap, and userdata context.
+        control_spec = mujoco.mjtState.mjSTATE_USER
+        base_control = extract_state(control_spec)
+        if mujoco.mj_stateSize(model, control_spec) != base_control.size:
+            raise RuntimeError("live and private MuJoCo user-state signatures differ")
+        control = np.broadcast_to(
+            base_control, (batch, 1, base_control.size)
+        ).copy()
+        ctrl_adr = state_offset(control_spec, mujoco.mjtState.mjSTATE_CTRL)
+        control[:, 0, ctrl_adr : ctrl_adr + int(model.nu)] = action
+
+        base_warmstart = extract_state(mujoco.mjtState.mjSTATE_WARMSTART)
+        if int(model.nv) != base_warmstart.size:
+            raise RuntimeError("live and private MuJoCo warm-start signatures differ")
+        initial_warmstart = np.broadcast_to(
+            base_warmstart, (batch, base_warmstart.size)
+        ).copy()
+
+        next_state, _ = rollout.rollout(
+            model,
+            datas,
+            state,
+            control=control,
+            control_spec=control_spec,
+            initial_warmstart=initial_warmstart,
+        )
+
+        qvel = state[:, qvel_adr : qvel_adr + nv]
+        qvel_next = next_state[:, 0, qvel_adr : qvel_adr + nv]
+        qacc = (qvel_next - qvel) / float(model.opt.timestep)
+
+        out = np.empty((batch, obs.shape[1]), dtype=np.float32)
+        out[:, :pos_width] = qvel[:, nv - pos_width :]
+        out[:, pos_width:] = qacc
         return out
