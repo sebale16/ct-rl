@@ -161,33 +161,71 @@ def reanchored_endpoint(
             f"nominal_duration must be finite and > 0, got {nominal_duration!r}"
         )
     resid = (T - dt_col).clamp_min(0.0)
+    short_rows = (dt_col < T).squeeze(1)
     long_rows = (dt_col > T).squeeze(1)
 
     needs_transport = (dt_col != T).squeeze(1)
     innovation = th.zeros_like(next_obs)
-    if bool(needs_transport.any()):
-        x_meas = integrate_drift(
+    has_transport = bool(needs_transport.any())
+    if not has_transport:
+        # Preserve the integrator's input, option, and endpoint validation for
+        # an exact-horizon batch. Zero durations never dispatch ``drift_fn``.
+        x_re = integrate_drift(
             drift_fn,
-            obs[needs_transport],
-            actions[needs_transport],
-            dt_col[needs_transport],
+            next_obs,
+            actions,
+            resid,
             max_step=max_step,
             check_finite=check_finite,
         )
+    else:
+        x_re = next_obs.clone()
+        # Pack the independent flow jobs into one variable-duration integration:
+        # every non-nominal row needs Phi_dt(x) for its innovation, short rows
+        # additionally need Phi_{T-dt}(x'), and long rows need Phi_T(x).  The
+        # shared integrator keeps each job's own Euler step count/size while
+        # evaluating all jobs that remain active in one drift dispatch.
+        transport_obs = obs[needs_transport]
+        short_next_obs = next_obs[short_rows]
+        long_obs = obs[long_rows]
+        n_transport = int(transport_obs.shape[0])
+        n_short = int(short_next_obs.shape[0])
+        n_long = int(long_obs.shape[0])
+        flow_obs = th.cat(
+            (transport_obs, short_next_obs, long_obs),
+            dim=0,
+        )
+        flow_actions = th.cat(
+            (
+                actions[needs_transport],
+                actions[short_rows],
+                actions[long_rows],
+            ),
+            dim=0,
+        )
+        flow_durations = th.cat(
+            (
+                dt_col[needs_transport],
+                resid[short_rows],
+                th.full_like(dt_col[long_rows], T),
+            ),
+            dim=0,
+        )
+        flow_endpoints = integrate_drift(
+            drift_fn,
+            flow_obs,
+            flow_actions,
+            flow_durations,
+            max_step=max_step,
+            check_finite=check_finite,
+        )
+        x_meas, x_short, x_nom = flow_endpoints.split(
+            (n_transport, n_short, n_long), dim=0
+        )
+
         innovation = innovation.clone()
-        innovation[needs_transport] = (
-            next_obs[needs_transport] - x_meas
-        )
-    x_re = integrate_drift(
-        drift_fn, next_obs, actions, resid, max_step=max_step,
-        check_finite=check_finite,
-    )
-    if bool(long_rows.any()):
-        x_nom = integrate_drift(
-            drift_fn, obs[long_rows], actions[long_rows], T,
-            max_step=max_step, check_finite=check_finite,
-        )
-        x_re = x_re.clone()
+        innovation[needs_transport] = next_obs[needs_transport] - x_meas
+        x_re[short_rows] = x_short
         x_re[long_rows] = (
             x_nom + (T / dt_col[long_rows]) * innovation[long_rows]
         )

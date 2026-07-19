@@ -12,6 +12,7 @@ from algorithms.ct_sac import (
     reanchored_endpoint,
 )
 from models.actor_q_critic import ActorQCriticModel
+from models.port_hamiltonian import FlowIntegrationError
 
 
 class _ConstantDynamics(th.nn.Module):
@@ -122,6 +123,57 @@ class TestReanchoredEndpoint(unittest.TestCase):
         self.assertGreater(agent.dt_default, 0.002)
         self.assertLess(agent.dt_default, 0.03)
 
+    def test_mixed_flow_jobs_share_one_variable_duration_dispatch_loop(self):
+        _, agent = _make_agent()
+        T = float(agent.dt_default)
+        obs, act, nobs, _, _, dt, _ = _batch(
+            agent, [0.002, 0.008, T, 0.03]
+        )
+        act = th.tensor([[0.3], [-0.2], [0.7], [-0.5]])
+        calls = []
+
+        def counted_drift(x, actions):
+            calls.append(x.shape[0])
+            return actions[:, :1].expand_as(x)
+
+        x_re, innovation, model_seconds = reanchored_endpoint(
+            counted_drift, obs, act, nobs, dt, T, max_step=0.002
+        )
+
+        drift = act.expand_as(obs)
+        needs_transport = dt[:, 0] != T
+        short_rows = dt[:, 0] < T
+        long_rows = dt[:, 0] > T
+        expected_innovation = th.zeros_like(nobs)
+        expected_innovation[needs_transport] = (
+            nobs[needs_transport]
+            - (obs[needs_transport] + drift[needs_transport] * dt[needs_transport])
+        )
+        expected_x_re = nobs.clone()
+        expected_x_re[short_rows] = (
+            nobs[short_rows]
+            + drift[short_rows] * (T - dt[short_rows])
+        )
+        expected_x_re[long_rows] = (
+            obs[long_rows]
+            + drift[long_rows] * T
+            + (T / dt[long_rows]) * expected_innovation[long_rows]
+        )
+        th.testing.assert_close(innovation, expected_innovation, atol=1e-7, rtol=0)
+        th.testing.assert_close(x_re, expected_x_re, atol=1e-7, rtol=0)
+        th.testing.assert_close(
+            model_seconds,
+            th.tensor([[0.008], [0.002], [0.0], [T]]),
+            atol=1e-7,
+            rtol=0,
+        )
+        # The three logical jobs contain the same 30 row-level Euler stages as
+        # separate integrations, but fusion shares the longest 15-step loop.
+        # Before fusion these jobs required 15 + 4 + 5 = 24 drift dispatches.
+        self.assertEqual(calls, [6, 4, 4, 4, 2] + [1] * 10)
+        self.assertEqual(sum(calls), 30)
+        self.assertEqual(len(calls), 15)
+
     def test_zero_drift_reduces_to_data(self):
         _, agent = _make_agent(dynamics=_ConstantDynamics(0.0))
         T = float(agent.dt_default)
@@ -189,6 +241,35 @@ class TestReanchoredEndpoint(unittest.TestCase):
         th.testing.assert_close(x_re, nobs)
         th.testing.assert_close(innovation, th.zeros_like(innovation))
         th.testing.assert_close(model_seconds, th.zeros_like(model_seconds))
+
+    def test_nominal_duration_retains_zero_step_integrator_validation(self):
+        _, agent = _make_agent()
+        T = float(agent.dt_default)
+        obs, act, nobs, _, _, _, _ = _batch(agent, [T] * 2)
+
+        with self.assertRaisesRegex(ValueError, "max_step"):
+            reanchored_endpoint(
+                lambda x, _a: th.zeros_like(x),
+                obs,
+                act,
+                nobs,
+                T,
+                T,
+                max_step=0.0,
+            )
+
+        nobs = nobs.clone()
+        nobs[0, 0] = float("nan")
+        with self.assertRaises(FlowIntegrationError):
+            reanchored_endpoint(
+                lambda x, _a: th.zeros_like(x),
+                obs,
+                act,
+                nobs,
+                T,
+                T,
+                check_finite=True,
+            )
 
 
 class TestReanchoredTarget(unittest.TestCase):
