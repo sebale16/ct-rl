@@ -26,7 +26,7 @@ import torch._dynamo  # noqa: F401
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
-from .acrobot_v2 import swingup_v2
+from .acrobot_v2 import swingup_v2, swingup_v3
 from .base import ContinuousEnv
 
 
@@ -211,8 +211,12 @@ class DMCContinuousEnv(ContinuousEnv):
         environment_kwargs = dict(environment_kwargs or {})
         environment_kwargs.setdefault("flat_observation", flat_observation)
 
-        if domain_name == "acrobot" and task_name == "swingup-v2":
-            self._env = swingup_v2(
+        local_acrobot_tasks = {
+            "swingup-v2": swingup_v2,
+            "swingup-v3": swingup_v3,
+        }
+        if domain_name == "acrobot" and task_name in local_acrobot_tasks:
+            self._env = local_acrobot_tasks[task_name](
                 environment_kwargs=environment_kwargs,
                 **task_kwargs,
             )
@@ -452,7 +456,7 @@ class DMCContinuousEnv(ContinuousEnv):
             return obs, info
 
     def _acrobot_reward_info(self, *, update: bool) -> Dict[str, Any]:
-        """Expose reward-independent Acrobot-v2 evaluation diagnostics."""
+        """Expose reward-independent diagnostics for local Acrobot tasks."""
         task = self._env.task
         if not hasattr(task, "reward_terms"):
             return {}
@@ -468,7 +472,7 @@ class DMCContinuousEnv(ContinuousEnv):
             if self._acrobot_episode_steps
             else 0.0
         )
-        return {
+        info = {
             "acrobot_tip_distance": float(terms["tip_distance"]),
             "acrobot_tip_height": float(terms["tip_height"]),
             "acrobot_progress": float(terms["progress"]),
@@ -477,6 +481,20 @@ class DMCContinuousEnv(ContinuousEnv):
             "acrobot_max_tip_height": float(self._acrobot_max_tip_height),
             "acrobot_success_fraction": float(success_fraction),
         }
+        # V3 exposes the pieces needed to distinguish genuine swing-up from
+        # the folded-link behavior that received substantial V2 reward.  Keep
+        # these optional so the V2 info schema remains backward compatible.
+        optional_terms = {
+            "upper_uprightness": "acrobot_upper_uprightness",
+            "lower_uprightness": "acrobot_lower_uprightness",
+            "extension": "acrobot_extension",
+            "gym_height_success": "acrobot_gym_height_success",
+            "exact_success": "acrobot_exact_success",
+        }
+        for term_name, info_name in optional_terms.items():
+            if term_name in terms:
+                info[info_name] = float(terms[term_name])
+        return info
 
     def _step_physics(
         self,

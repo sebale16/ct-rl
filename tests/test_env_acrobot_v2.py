@@ -3,10 +3,11 @@ import unittest
 import numpy as np
 
 try:
+    from dm_control.suite import acrobot as dmc_acrobot
     from dm_control.utils import rewards as dmc_rewards
 
     from environment import DMCContinuousEnv
-    from environment.acrobot_v2 import BalanceV2
+    from environment.acrobot_v2 import BalanceV2, BalanceV3, swingup_v3
 
     HAVE_DMC = True
 except ImportError:
@@ -296,6 +297,287 @@ class TestAcrobotSwingupV2(unittest.TestCase):
         self.assertEqual(actual.shape, states.shape)
         self.assertTrue(np.isfinite(actual).all())
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-5)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v3 not available")
+class TestAcrobotSwingupV3Reward(unittest.TestCase):
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV3(
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            precision_weight=0.2,
+        )
+
+    def _set_physics_state(self, qpos, qvel=(0.0, 0.0)):
+        with self.physics.reset_context():
+            self.physics.data.qpos[:] = np.asarray(qpos, dtype=np.float64)
+            self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+            self.physics.data.ctrl[:] = 0.0
+
+    def test_factory_builds_v3_with_an_exact_down_reset(self):
+        env = swingup_v3(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            self.assertIsInstance(env.task, BalanceV3)
+            np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
+            np.testing.assert_array_equal(env.physics.data.qvel, [0.0, 0.0])
+        finally:
+            env.close()
+
+    def test_continuous_wrapper_builds_v3_and_exposes_v3_diagnostics(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v3",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+
+        _, reset_info = env.reset(seed=23)
+        self.assertIsInstance(env._env.task, BalanceV3)
+        v3_keys = {
+            "acrobot_upper_uprightness",
+            "acrobot_lower_uprightness",
+            "acrobot_extension",
+            "acrobot_gym_height_success",
+            "acrobot_exact_success",
+        }
+        self.assertTrue(v3_keys.issubset(reset_info))
+        self.assertAlmostEqual(reset_info["acrobot_upper_uprightness"], 0.0)
+        self.assertAlmostEqual(reset_info["acrobot_lower_uprightness"], 0.0)
+        self.assertAlmostEqual(reset_info["acrobot_extension"], 1.0)
+        self.assertEqual(reset_info["acrobot_gym_height_success"], 0.0)
+        self.assertEqual(reset_info["acrobot_exact_success"], 0.0)
+
+        _, _, _, _, step_info = env.step(np.zeros(1, dtype=np.float32))
+        self.assertTrue(v3_keys.issubset(step_info))
+
+    def test_v2_wrapper_info_schema_does_not_gain_v3_only_terms(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v2",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+
+        _, info = env.reset(seed=23)
+        v3_only_keys = {
+            "acrobot_upper_uprightness",
+            "acrobot_lower_uprightness",
+            "acrobot_extension",
+            "acrobot_gym_height_success",
+            "acrobot_exact_success",
+        }
+        self.assertTrue(v3_only_keys.isdisjoint(info))
+        self.assertIn("acrobot_success", info)
+
+    def test_reset_matches_v2_for_the_same_seed(self):
+        v2_physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        v3_physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        kwargs = {
+            "random": 37,
+            "angle_noise": 0.03,
+            "velocity_noise": 0.007,
+            "precision_weight": 0.2,
+        }
+        BalanceV2(**kwargs).initialize_episode(v2_physics)
+        BalanceV3(**kwargs).initialize_episode(v3_physics)
+
+        np.testing.assert_array_equal(v3_physics.data.qpos, v2_physics.data.qpos)
+        np.testing.assert_array_equal(v3_physics.data.qvel, v2_physics.data.qvel)
+
+    def test_reward_landmarks_require_upright_extended_links(self):
+        precision_weight = self.task.precision_weight
+        landmarks = (
+            {
+                "name": "down",
+                "qpos": (np.pi, 0.0),
+                "upright": (0.0, 0.0),
+                "extension": 1.0,
+                "progress": 0.0,
+                "tip_height": 0.0,
+                "gym_success": 0.0,
+                "exact_success": 0.0,
+            },
+            {
+                "name": "upright",
+                "qpos": (0.0, 0.0),
+                "upright": (1.0, 1.0),
+                "extension": 1.0,
+                "progress": 1.0,
+                "tip_height": 4.0,
+                "gym_success": 1.0,
+                "exact_success": 1.0,
+            },
+            {
+                "name": "straight-horizontal",
+                "qpos": (np.pi / 2.0, 0.0),
+                "upright": (0.5, 0.5),
+                "extension": 1.0,
+                "progress": 0.5,
+                "tip_height": 2.0,
+                "gym_success": 0.0,
+                "exact_success": 0.0,
+            },
+            {
+                "name": "down-folded",
+                "qpos": (np.pi, np.pi),
+                "upright": (0.0, 1.0),
+                "extension": 0.0,
+                "progress": 0.0,
+                "tip_height": 2.0,
+                "gym_success": 0.0,
+                "exact_success": 0.0,
+            },
+            {
+                "name": "horizontal-folded",
+                "qpos": (np.pi / 2.0, np.pi),
+                "upright": (0.5, 0.5),
+                "extension": 0.0,
+                "progress": 0.0,
+                "tip_height": 2.0,
+                "gym_success": 0.0,
+                "exact_success": 0.0,
+            },
+        )
+
+        for landmark in landmarks:
+            with self.subTest(landmark=landmark["name"]):
+                self._set_physics_state(landmark["qpos"])
+                terms = self.task.reward_terms(self.physics)
+                precise = float(
+                    dmc_rewards.tolerance(
+                        terms["tip_distance"], bounds=(0.0, 0.2), margin=1.0
+                    )
+                )
+                expected_reward = (
+                    (1.0 - precision_weight) * landmark["progress"]
+                    + precision_weight * precise
+                )
+
+                self.assertAlmostEqual(
+                    terms["upper_uprightness"], landmark["upright"][0]
+                )
+                self.assertAlmostEqual(
+                    terms["lower_uprightness"], landmark["upright"][1]
+                )
+                self.assertAlmostEqual(terms["extension"], landmark["extension"])
+                self.assertAlmostEqual(terms["progress"], landmark["progress"])
+                self.assertAlmostEqual(terms["tip_height"], landmark["tip_height"])
+                self.assertEqual(
+                    terms["gym_height_success"], landmark["gym_success"]
+                )
+                self.assertEqual(terms["exact_success"], landmark["exact_success"])
+                self.assertEqual(terms["success"], terms["exact_success"])
+                self.assertAlmostEqual(terms["precision"], precise)
+                self.assertAlmostEqual(terms["reward"], expected_reward)
+                self.assertAlmostEqual(
+                    self.task.get_reward(self.physics), expected_reward
+                )
+
+    def test_every_exact_fold_earns_only_the_precision_tail(self):
+        for elbow in (-np.pi, np.pi):
+            for shoulder in np.linspace(-np.pi, np.pi, 9):
+                with self.subTest(shoulder=shoulder, elbow=elbow):
+                    self._set_physics_state((shoulder, elbow))
+                    terms = self.task.reward_terms(self.physics)
+                    self.assertAlmostEqual(terms["tip_distance"], 2.0)
+                    self.assertAlmostEqual(terms["tip_height"], 2.0)
+                    self.assertAlmostEqual(terms["extension"], 0.0)
+                    self.assertAlmostEqual(terms["progress"], 0.0)
+                    self.assertAlmostEqual(
+                        terms["reward"],
+                        self.task.precision_weight * terms["precision"],
+                    )
+
+    def test_progress_is_extension_times_mean_link_uprightness(self):
+        rng = np.random.default_rng(11)
+        for qpos in rng.uniform(-4.0 * np.pi, 4.0 * np.pi, size=(100, 2)):
+            with self.subTest(qpos=qpos):
+                self._set_physics_state(qpos)
+                terms = self.task.reward_terms(self.physics)
+                expected = terms["extension"] * 0.5 * (
+                    terms["upper_uprightness"] + terms["lower_uprightness"]
+                )
+                self.assertAlmostEqual(terms["progress"], expected)
+
+    def test_blended_reward_landscape_has_only_the_upright_periodic_local_maximum(self):
+        # This analytic periodic grid guards against replacing the smooth
+        # extension-weighted mean with a bottleneck/minimum.  The latter creates
+        # spurious maxima near q1=q2=+/-2*pi/3 that can trap a policy.
+        angles = np.linspace(-np.pi, np.pi, 360, endpoint=False)
+        shoulder, elbow = np.meshgrid(angles, angles, indexing="ij")
+        upper = (1.0 + np.cos(shoulder)) / 2.0
+        lower = (1.0 + np.cos(shoulder + elbow)) / 2.0
+        extension = (1.0 + np.cos(elbow)) / 2.0
+        progress = extension * 0.5 * (upper + lower)
+        tip_x = np.sin(shoulder) + np.sin(shoulder + elbow)
+        tip_z = 2.0 + np.cos(shoulder) + np.cos(shoulder + elbow)
+        distance = np.hypot(tip_x, tip_z - 4.0)
+        precise = dmc_rewards.tolerance(
+            distance, bounds=(0.0, 0.2), margin=1.0
+        )
+        reward = (
+            (1.0 - self.task.precision_weight) * progress
+            + self.task.precision_weight * precise
+        )
+
+        neighbors = [
+            np.roll(np.roll(reward, di, axis=0), dj, axis=1)
+            for di in (-1, 0, 1)
+            for dj in (-1, 0, 1)
+            if (di, dj) != (0, 0)
+        ]
+        local_maximum = np.logical_and.reduce(
+            [reward >= neighbor for neighbor in neighbors]
+        ) & np.logical_or.reduce([reward > neighbor for neighbor in neighbors])
+        maxima = np.argwhere(local_maximum)
+
+        self.assertEqual(maxima.shape, (1, 2))
+        shoulder_index, elbow_index = maxima[0]
+        self.assertEqual(angles[shoulder_index], 0.0)
+        self.assertEqual(angles[elbow_index], 0.0)
+        self.assertEqual(reward[shoulder_index, elbow_index], 1.0)
+
+    def test_gym_height_threshold_is_strict_and_distinct_from_exact_success(self):
+        # Straight links at shoulder pi/3 put the tip exactly at z=3.  Gym's
+        # Acrobot terminal predicate uses height > 1 above the z=2 pivot.
+        self._set_physics_state((np.pi / 3.0, 0.0))
+        threshold = self.task.reward_terms(self.physics)
+        self.assertAlmostEqual(threshold["tip_height"], 3.0)
+        self.assertEqual(threshold["gym_height_success"], 0.0)
+        self.assertEqual(threshold["exact_success"], 0.0)
+
+        self._set_physics_state((np.pi / 3.0 - 1e-3, 0.0))
+        above = self.task.reward_terms(self.physics)
+        self.assertGreater(above["tip_height"], 3.0)
+        self.assertEqual(above["gym_height_success"], 1.0)
+        self.assertEqual(above["exact_success"], 0.0)
 
 
 if __name__ == "__main__":
