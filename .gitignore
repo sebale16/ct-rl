@@ -224,3 +224,5 @@ benchmarks/*
 !benchmarks/hyperparams/*
 #  render-time only (see benchmarks/package.json); benchmarks/* already covers it
 benchmarks/node_modules/
+# Slurm run logs (per-run stdout/err; not reproducibility artifacts)
+slurm_logs/
