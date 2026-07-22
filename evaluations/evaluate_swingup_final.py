@@ -288,10 +288,10 @@ def _validate_specs(specs: Sequence[CheckpointSpec]) -> None:
                 f"unsupported final-evaluation environment {spec.env_id!r}; "
                 f"choose one of {SUPPORTED_ENVS}"
             )
-        if spec.checkpoint_path.name != "final_model.pth":
+        if spec.checkpoint_path.name not in ("final_model.pth", "best_model.pth"):
             raise ValueError(
-                "final evaluation requires an explicit file named final_model.pth; "
-                f"got {spec.checkpoint_path}"
+                "final evaluation requires an explicit file named final_model.pth "
+                f"or best_model.pth; got {spec.checkpoint_path}"
             )
         if not spec.checkpoint_path.is_file():
             raise FileNotFoundError(f"checkpoint does not exist: {spec.checkpoint_path}")
