@@ -1016,13 +1016,57 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             return 1.0
         return float(-np.sign(float(physics.data.qvel[0])))
 
-    def test_factory_builds_v5_with_an_exact_down_reset(self):
+    def test_factory_default_uses_uniform_random_starts(self):
+        env = swingup_v5(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            velocity_noise=0.0,
+        )
+        try:
+            self.assertTrue(env.task.uniform_start)
+            starts, above = [], 0
+            for _ in range(60):
+                env.reset()
+                qpos = np.array(env.physics.data.qpos)
+                starts.append(qpos)
+                tip = float(env.physics.named.data.site_xpos["tip", "z"])
+                above += int(tip > 3.0)
+            starts = np.stack(starts)
+            # Angles cover the circle, not the near-hanging neighborhood.
+            self.assertGreater(np.ptp(starts[:, 0]), np.pi)
+            self.assertGreater(np.ptp(starts[:, 1]), np.pi)
+            # ~18.5 % of uniform resets begin above the height criterion, so
+            # the sparse income exists in the start distribution itself.
+            self.assertGreater(above, 0)
+            self.assertLess(above, 40)
+        finally:
+            env.close()
+
+    def test_uniform_start_resets_are_reseed_repeatable(self):
+        task_a = BalanceV5(random=11, velocity_noise=0.0)
+        task_b = BalanceV5(random=999, velocity_noise=0.0)
+        physics_a = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        physics_b = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        task_b.reseed(11)
+        task_a.initialize_episode(physics_a)
+        task_b.initialize_episode(physics_b)
+        np.testing.assert_array_equal(
+            physics_a.data.qpos, physics_b.data.qpos
+        )
+
+    def test_down_start_option_matches_v2_reset(self):
         env = swingup_v5(
             time_limit=0.1,
             random=19,
             environment_kwargs={"flat_observation": True},
             angle_noise=0.0,
             velocity_noise=0.0,
+            uniform_start=False,
         )
         try:
             env.reset()
@@ -1067,7 +1111,11 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
 
     def test_scripted_pump_accrues_occupancy_without_ending_the_episode(self):
         env = swingup_v5(
-            time_limit=30.0, random=3, angle_noise=0.0, velocity_noise=0.0
+            time_limit=30.0,
+            random=3,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            uniform_start=False,
         )
         self.addCleanup(env.close)
         env.reset()
@@ -1099,7 +1147,11 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             dt=0.01,
             physics_dt=0.002,
             episode_duration=14.0,
-            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+            task_kwargs={
+                "angle_noise": 0.0,
+                "velocity_noise": 0.0,
+                "uniform_start": False,
+            },
         )
         self.addCleanup(env.close)
         env.reset(seed=23)
@@ -1130,7 +1182,11 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             dt=0.01,
             physics_dt=0.002,
             episode_duration=0.05,
-            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+            task_kwargs={
+                "angle_noise": 0.0,
+                "velocity_noise": 0.0,
+                "uniform_start": False,
+            },
         )
         self.addCleanup(env.close)
         env.reset(seed=23)
@@ -1185,7 +1241,11 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             dt=0.01,
             physics_dt=0.002,
             episode_duration=0.1,
-            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+            task_kwargs={
+                "angle_noise": 0.0,
+                "velocity_noise": 0.0,
+                "uniform_start": False,
+            },
         )
         self.addCleanup(env.close)
 

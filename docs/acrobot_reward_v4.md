@@ -114,14 +114,18 @@ shaping. It isolates whether v4's shaping is necessary: v4 runs log
 ramp was the necessary ingredient, and if v5 also learns the simpler task
 wins.
 
-Sparse occupancy still needs settings the shaped tasks do not: the scripted
-pump first crosses tip_z > 3 at t ≈ 10–11.5 s, so v5 rows run 30 s episodes
-(`env_max_steps` 6000) leaving up to ~20 s of collectable occupancy, and the
-arms use γ = 0.999 and 0.9995 (`mf_hz_g0999`, `mf_hz_g09995`; ≈10 s and 20 s
-horizons) so pre-crossing states see the height income at all. Expectation
-from the recorded evidence (γ sweep on v3 never exceeded tip_z 1.87; 100 Hz
-dithering injects ≈0 energy): v5 collects zero income unless exploration
-stumbles onto pumping — that null result is the point of the control.
+Episodes start from uniform random joint angles at near-zero velocity
+(`uniform_start=True`, default) rather than the near-hanging pose: 18.5 % of
+uniform resets begin above the height, so the sparse income exists in the
+replay data from the first episodes and value propagates outward to lower
+starts, instead of exploration having to climb ~10 s uphill unrewarded
+(nothing unshaped has ever exceeded tip_z 1.87 from hanging here). Resets
+above the line are unstable inverted poses, so collecting their income
+directly trains balance. `uniform_start=False` restores the near-hanging
+reset for from-hanging probes.
+
+v5 rows run 30 s episodes (`env_max_steps` 6000) with γ = 0.999 and 0.9995
+(`mf_hz_g0999`, `mf_hz_g09995`).
 
 Independent of v5, the wrapper distinguishes the two dm_control LAST
 sources: genuine task termination (discount 0) maps to `terminated`, while

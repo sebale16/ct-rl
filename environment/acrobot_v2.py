@@ -446,7 +446,7 @@ def swingup_v41(
 
 
 class BalanceV5(BalanceV3):
-    """Unshaped height-occupancy objective on this mechanism.
+    """Unshaped height-occupancy objective with uniform random starts.
 
     Reward is 1 while the tip strictly exceeds the Gym height criterion and
     0 otherwise, with no termination: with the wrapper's reward-increment
@@ -456,11 +456,48 @@ class BalanceV5(BalanceV3):
     elevation — balancing near the top is the implicit optimum without any
     velocity gate or target-distance shaping.
 
+    By default episodes start from uniform random joint angles at near-zero
+    velocity (``uniform_start=True``) instead of the near-hanging pose the
+    shaped versions use.  About one reset in five then begins above the
+    height, so the sparse income is present in the replay data from the
+    first episodes and its value can propagate outward to lower starts;
+    from the hanging start alone the reward is never observed at all.
+    Resets above the line are unstable inverted poses, so collecting their
+    income immediately trains the balance skill.  ``uniform_start=False``
+    restores the shared near-hanging reset.
+
     The Gym predicate −cos θ₁ − cos(θ₁+θ₂) > 1 is tip height strictly above
     one link length over the pivot, i.e. ``tip_z > 3`` on this scaled model —
-    identical to the ``gym_height_success`` diagnostic of v3/v4.  Mechanism,
-    resets, and observations are identical to v2–v4.
+    identical to the ``gym_height_success`` diagnostic of v3/v4.  Mechanism
+    and observations are identical to v2–v4.
     """
+
+    def __init__(
+        self,
+        *,
+        random=None,
+        angle_noise: float = 0.05,
+        velocity_noise: float = 0.01,
+        uniform_start: bool = True,
+    ) -> None:
+        super().__init__(
+            random=random,
+            angle_noise=angle_noise,
+            velocity_noise=velocity_noise,
+        )
+        self.uniform_start = bool(uniform_start)
+
+    def initialize_episode(self, physics) -> None:
+        if not self.uniform_start:
+            super().initialize_episode(physics)
+            return
+        qpos = self.random.uniform(-np.pi, np.pi, 2)
+        qvel_noise = self.random.uniform(
+            -self.velocity_noise, self.velocity_noise, physics.model.nv
+        )
+        physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        physics.named.data.qvel[:] = qvel_noise
+        suite_base.Task.initialize_episode(self, physics)
 
     def _gym_height_reached(self, physics) -> bool:
         tip_height = float(physics.named.data.site_xpos["tip", "z"])
@@ -508,6 +545,7 @@ def swingup_v5(
     environment_kwargs: Optional[Dict[str, Any]] = None,
     angle_noise: float = 0.05,
     velocity_noise: float = 0.01,
+    uniform_start: bool = True,
 ):
     """Construct the height-occupancy ``acrobot-swingup-v5`` environment."""
     physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
@@ -515,6 +553,7 @@ def swingup_v5(
         random=random,
         angle_noise=angle_noise,
         velocity_noise=velocity_noise,
+        uniform_start=uniform_start,
     )
     return control.Environment(
         physics,

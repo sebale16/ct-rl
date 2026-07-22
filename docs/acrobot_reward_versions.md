@@ -6,13 +6,13 @@ Every local Acrobot task shares one mechanism, one reset, and one set of geometr
 
 **Mechanism.** Two length-1 capsule links. Shoulder pivot at $z = 2$; only the elbow is actuated (gear 2, control range $[-1, 1]$); the shoulder is passive. Joint damping 0.05, timestep 0.01 s, RK4. Fully extended upright the tip is at $z = 4$; hanging, the tip is at $z = 0$.
 
-**Reset.** Start near the fully hanging pose — shoulder $= \pi$, elbow $= 0$ — with uniform noise $\pm 0.05$ rad on each angle and $\pm 0.01$ on each velocity. Reseeding makes fixed evaluation starts repeatable. This replaces the stock uniform $[-\pi, \pi)$ reset.
+**Reset.** Start near the fully hanging pose — shoulder $= \pi$, elbow $= 0$ — with uniform noise $\pm 0.05$ rad on each angle and $\pm 0.01$ on each velocity. Reseeding makes fixed evaluation starts repeatable. This replaces the stock uniform $[-\pi, \pi)$ reset. (v5 deviates: uniform random start by default — see its section.)
 
 **Shared geometric terms** (recomputed each step from the physics state):
 
 - $d = \lVert \text{tip} - \text{target} \rVert$, the tip-to-target distance; target at $(0, 0, 4)$, radius $r = 0.2$.
 - $\text{precise} = \operatorname{tol}(d,\ (0, r),\ \text{margin}=1)$ — the stock dense target reward. $\text{precise} = 1$ at $d \le 0.2$ and decays to $0.1$ at $d = 1.2$.
-- $\bar{u} = \tfrac{1}{2}(u_1 + u_2)$, the mean link uprightness, with $u_i = \operatorname{clip}\!\big((v_i + 1)/2,\ 0,\ 1\big)$ and $v_i$ the $z$-component of link $i$'s frame $z$-axis; $u_i = 1$ when link $i$ points straight up, $0$ straight down.
+- $\bar{u} = \tfrac{1}{2}(u_1 + u_2)$, the mean link uprightness, with $u_i = \operatorname{clip}\!\big((v_i + 1)/2,\ 0,\ 1\big)$ and $v_i$ the vertical ($z$) component of link $i$; $u_i = 1$ when link $i$ points straight up, $0$ straight down.
 - $\text{extension} = \operatorname{clip}\!\big((1 + \cos\theta_\text{elbow})/2,\ 0,\ 1\big)$, $= 1$ when the elbow is straight, $0$ fully folded.
 - Reward rate convention: every version returns a per-step reward; episode return is the (discounted) sum over the 10 s episode.
 
@@ -86,13 +86,17 @@ Everything at or below $\tilde{E} = 1$ — the entire pumping ramp, every audit 
 
 Passing the top with surplus energy now loses the dense income, so the policy is pushed to regulate $\tilde{E} \to 1$ — where top passes are slow by the homoclinic argument and the hold term is enterable. On scripted trajectories the preference for an energy-regulated pump over an overshooting one rises from $2.31\times$ (v4) to $3.20\times$ (v4.1). Capture also fixes the evaluation instability seen in the v4 pilots: balance at the top is a fixed point, so a capturing policy has a stable deterministic readout, where the swing-through limit cycle is phase-critical and its greedy readout is bistable.
 
-Implementation: `BalanceV4(energy_overshoot_margin=0.25)`, registered as `acrobot-swingup-v4.1`; the default margin 1.0 reproduces v4 exactly.
+The overshoot margin defaults to 1.0, which reproduces v4 exactly.
 
 ## v5 — height occupancy (unshaped control arm)
 
 $$\text{reward} = \begin{cases} 1 & \text{tip } z > 3\\ 0 & \text{otherwise} \end{cases}$$
 
-Unshaped occupancy of the Gym height criterion ($-\cos\theta_1 - \cos(\theta_1{+}\theta_2) > 1 \iff$ tip $z > 3$): the return is the physical time the tip spends above one link length over the pivot, accumulated over the fixed-length episode with no termination. Zero signal below the height, so there is no parking surface; maximal income is *staying* above the height, which makes balancing near the top the implicit optimum without any velocity gate or target shaping. Runs use 30 s episodes (a competent scripted pump first crosses at $t \approx 10$–11.5 s, leaving up to $\sim$20 s of collectable occupancy) and $\gamma \in \{0.999, 0.9995\}$. It isolates whether v4's shaping is necessary: v4 logs the same height criterion continuously, so the pair answers whether unshaped exploration can find swing-up at 100 Hz continuous torque at all.
+Unshaped occupancy of the Gym height criterion ($-\cos\theta_1 - \cos(\theta_1{+}\theta_2) > 1 \iff$ tip $z > 3$): the return is the physical time the tip spends above one link length over the pivot, accumulated over the fixed-length episode with no termination. Zero signal below the height, so there is no parking surface; maximal income is *staying* above the height, which makes balancing near the top the implicit optimum without any velocity gate or target shaping.
+
+**Uniform random starts** (`uniform_start=True`, the default): episodes begin at uniform random joint angles with near-zero velocity — the stock-style reset — instead of the shared near-hanging pose. 18.5 % of such resets already start above the height, so the sparse income appears in the replay data from the first episodes and its value can propagate outward to progressively lower starts; from the hanging start alone the reward would never be observed (nothing unshaped has ever exceeded tip $z = 1.87$ here). Above-height resets are unstable inverted poses, so collecting their income immediately trains the balance skill. `uniform_start=False` restores the shared near-hanging reset for from-hanging probes.
+
+Runs use 30 s episodes (a competent scripted pump first crosses at $t \approx 10$–11.5 s from hanging, leaving up to $\sim 20$ s of collectable occupancy) and $\gamma \in \{0.999, 0.9995\}$. It isolates whether v4's shaping is necessary: v4 logs the same height criterion continuously, so the pair answers whether the unshaped objective is learnable at 100 Hz continuous torque when the signal is reachable from the start distribution.
 
 ---
 
@@ -102,9 +106,9 @@ Unshaped occupancy of the Gym height criterion ($-\cos\theta_1 - \cos(\theta_1{+
 |---|---|---|---|---|
 | v1 | — | $\text{precise}$ | baseline | no signal from hang (best 43) |
 | v2 | $0.8\cdot\operatorname{clip}(1 - d/4)$ | $0.2\cdot\text{precise}$ | dense from hang | bent-hover attractor (664–683) |
-| v3 | $0.8\cdot\text{extension}\cdot\bar{u}$ | $0.2\cdot\text{precise}$ | anti-fold pose | zeros pumping ($\approx$230–260, tip $\le 1.87$) |
+| v3 | $0.8\cdot\text{extension}\cdot\bar{u}$ | $0.2\cdot\text{precise}$ | anti-fold pose | zeros pumping ($\approx 230$–260, tip $\le 1.87$) |
 | v4 | $0.2\cdot\text{ramp}(\tilde{E}, \bar{u})$ | $0.8\cdot\text{precise}\cdot\text{slow}$ | reward pumping | swing-up found (tip 4.0, 48 % over height) but fast swing-through; no capture |
-| v4.1 | v4 with overshoot margin $1.0 \to 0.25$ | unchanged | regulate $\tilde{E}\to 1$, make capture the attractor | queued (`final_mf` + `fork_v41`) |
-| v5 | — | $\mathbb{1}[\text{tip } z > 3]$ occupancy | unshaped height-occupancy control arm | queued |
+| v4.1 | v4 with overshoot margin $1.0 \to 0.25$ | unchanged | regulate $\tilde{E}\to 1$, make capture the attractor | queued |
+| v5 | — | $\mathbb{1}[\text{tip } z > 3]$ occupancy | unshaped control arm, uniform random starts | queued |
 
 All reward outputs are in $[0, 1]$.
