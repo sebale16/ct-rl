@@ -101,28 +101,30 @@ bounds, and the pump trace must correlate with Ẽ under v4 but not under v3.
   is not binding, and multi-swing pumping plus capture spans a few seconds),
   plus the model-free horizon arms `mf_hz_g0998` / `mf_hz_g0999`.
 
-## v5: the Gym objective as an unshaped control arm
+## v5: unshaped height occupancy as the control arm
 
-`acrobot-swingup-v5` (`BalanceV5`) is the Gymnasium `Acrobot-v1` objective on
-this mechanism: reward rate −1 until the tip strictly exceeds the Gym height
-(one link length above the pivot ⟺ tip_z > 3), then reward 0 and episode
-termination with discount 0. The return is minus the physical time to reach
-the height, so the only optimum is fast genuine swing-up — no dense term, no
-parking surface, and no balance requirement. It isolates whether v4's shaping
-is necessary: v4 runs log `gym_height_success` continuously, so if v4-mf
-learns while v5 flatlines the ramp was the necessary ingredient, and if v5
-also learns the simpler task wins.
+`acrobot-swingup-v5` (`BalanceV5`) pays reward 1 while the tip strictly
+exceeds the Gym height (one link length above the pivot ⟺ tip_z > 3) and 0
+otherwise, over a fixed-length episode with no termination. The return is
+the physical time spent above the height. No dense term below the height, so
+there is no parking surface, and maximal income is staying up — balancing
+near the top is the implicit optimum without any velocity gate or target
+shaping. It isolates whether v4's shaping is necessary: v4 runs log
+`gym_height_success` continuously, so if v4-mf learns while v5 flatlines the
+ramp was the necessary ingredient, and if v5 also learns the simpler task
+wins.
 
-Sparse minimum-time needs settings the shaped tasks do not: the scripted pump
-first crosses tip_z > 3 at t ≈ 10–11.5 s, so v5 rows run 30 s episodes
-(`env_max_steps` 6000), and states farther than the discount horizon from
-success have saturated values, so the arms are γ = 0.999 and 0.9995
-(`mf_hz_g0999`, `mf_hz_g09995`; ≈10 s and 20 s horizons). Expectation from
-the recorded evidence (γ sweep on v3 never exceeded tip_z 1.87; 100 Hz
-dithering injects ≈0 energy): v5 sees zero successes unless exploration
+Sparse occupancy still needs settings the shaped tasks do not: the scripted
+pump first crosses tip_z > 3 at t ≈ 10–11.5 s, so v5 rows run 30 s episodes
+(`env_max_steps` 6000) leaving up to ~20 s of collectable occupancy, and the
+arms use γ = 0.999 and 0.9995 (`mf_hz_g0999`, `mf_hz_g09995`; ≈10 s and 20 s
+horizons) so pre-crossing states see the height income at all. Expectation
+from the recorded evidence (γ sweep on v3 never exceeded tip_z 1.87; 100 Hz
+dithering injects ≈0 energy): v5 collects zero income unless exploration
 stumbles onto pumping — that null result is the point of the control.
 
-The wrapper distinguishes the two LAST sources: task termination (discount 0)
-maps to `terminated`, dm_control's internal step limit (discount 1) and the
-wrapper's own episode duration map to `truncated`, so bootstrapping is cut
-only on genuine success.
+Independent of v5, the wrapper distinguishes the two dm_control LAST
+sources: genuine task termination (discount 0) maps to `terminated`, while
+dm_control's internal step limit (discount 1) and the wrapper's own episode
+duration map to `truncated`, so bootstrapping is only ever cut on true
+terminal states.

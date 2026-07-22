@@ -1032,62 +1032,64 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
         finally:
             env.close()
 
-    def test_gym_reward_and_termination_landmarks(self):
-        # Hanging: living cost, no termination.
+    def test_height_occupancy_reward_landmarks(self):
+        # Hanging: no income, no termination anywhere in this task.
         self._set_physics_state((np.pi, 0.0))
         terms = self.task.reward_terms(self.physics)
-        self.assertEqual(terms["reward"], -1.0)
+        self.assertEqual(terms["reward"], 0.0)
         self.assertEqual(terms["gym_height_success"], 0.0)
         self.assertEqual(terms["progress"], 0.0)
         self.assertIsNone(self.task.get_termination(self.physics))
 
         # Straight links at shoulder pi/3: tip exactly 3.0, strictly below
-        # the Gym predicate, so the episode continues.
+        # the height predicate.
         self._set_physics_state((np.pi / 3.0, 0.0))
         terms = self.task.reward_terms(self.physics)
         self.assertAlmostEqual(terms["tip_height"], 3.0)
-        self.assertEqual(terms["reward"], -1.0)
-        self.assertIsNone(self.task.get_termination(self.physics))
+        self.assertEqual(terms["reward"], 0.0)
 
-        # Just above the threshold: zero reward, terminal discount 0.
+        # Just above the threshold: full occupancy income, episode continues.
         self._set_physics_state((np.pi / 3.0 - 1e-3, 0.0))
         terms = self.task.reward_terms(self.physics)
         self.assertGreater(terms["tip_height"], 3.0)
-        self.assertEqual(terms["reward"], 0.0)
+        self.assertEqual(terms["reward"], 1.0)
         self.assertEqual(terms["gym_height_success"], 1.0)
-        self.assertEqual(self.task.get_termination(self.physics), 0.0)
+        self.assertIsNone(self.task.get_termination(self.physics))
 
-        # Upright at the target: also terminal; success stays the exact hit.
+        # Upright at the target: same occupancy income; success stays the
+        # exact target hit.
         self._set_physics_state((0.0, 0.0))
         terms = self.task.reward_terms(self.physics)
-        self.assertEqual(terms["reward"], 0.0)
-        self.assertEqual(self.task.get_termination(self.physics), 0.0)
+        self.assertEqual(terms["reward"], 1.0)
+        self.assertIsNone(self.task.get_termination(self.physics))
         self.assertEqual(terms["success"], terms["exact_success"])
         self.assertEqual(terms["exact_success"], 1.0)
 
-    def test_scripted_pump_terminates_episode_with_discount_zero(self):
+    def test_scripted_pump_accrues_occupancy_without_ending_the_episode(self):
         env = swingup_v5(
             time_limit=30.0, random=3, angle_noise=0.0, velocity_noise=0.0
         )
         self.addCleanup(env.close)
         env.reset()
         physics = env.physics
-        for step in range(3000):
+        rewards_seen = []
+        first_above = None
+        for step in range(2900):
             action = self._pump_action(physics, step)
             ts = env.step(np.asarray([action]))
-            if ts.last():
-                break
-        else:
-            self.fail("scripted pump never reached the Gym height in 30 s")
-        self.assertGreater(step, 300)
-        self.assertLess(step, 2500)
-        self.assertEqual(float(ts.discount), 0.0)
-        self.assertEqual(float(ts.reward), 0.0)
-        self.assertGreater(
-            float(physics.named.data.site_xpos["tip", "z"]), 3.0
-        )
+            rewards_seen.append(float(ts.reward))
+            if first_above is None and rewards_seen[-1] > 0.0:
+                first_above = step
+            self.assertFalse(
+                ts.last(), "height crossing must not end the episode"
+            )
+        self.assertIsNotNone(first_above, "pump never exceeded the height")
+        self.assertLess(first_above, 2500)
+        # Income continues to accrue after the first crossing.
+        self.assertGreater(sum(rewards_seen[first_above:]), 1.0)
+        self.assertTrue(set(rewards_seen) <= {0.0, 1.0})
 
-    def test_continuous_wrapper_terminates_without_truncation_at_height(self):
+    def test_continuous_wrapper_truncates_at_duration_with_occupancy_income(self):
         env = DMCContinuousEnv(
             domain_name="acrobot",
             task_name="swingup-v5",
@@ -1096,25 +1098,27 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             time_sampling="uniform",
             dt=0.01,
             physics_dt=0.002,
-            episode_duration=25.0,
+            episode_duration=14.0,
             task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
         )
         self.addCleanup(env.close)
         env.reset(seed=23)
         physics = env._env.physics
 
+        total = 0.0
+        seen_above = False
         terminated = truncated = False
-        for step in range(2600):
+        for step in range(1500):
             action = np.asarray([self._pump_action(physics, step)], np.float32)
             _, reward, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
+            total += float(reward)
+            seen_above = seen_above or info["acrobot_gym_height_success"] == 1.0
+            self.assertFalse(terminated)
+            if truncated:
                 break
-            self.assertEqual(reward, -1.0)
-        self.assertTrue(terminated)
-        self.assertFalse(truncated)
-        self.assertEqual(reward, 0.0)
-        self.assertEqual(float(info["discount"]), 0.0)
-        self.assertEqual(info["acrobot_gym_height_success"], 1.0)
+        self.assertTrue(truncated)
+        self.assertTrue(seen_above)
+        self.assertGreater(total, 1.0)
 
     def test_continuous_wrapper_time_limit_truncates_without_termination(self):
         env = DMCContinuousEnv(
@@ -1140,7 +1144,7 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
                 break
         self.assertTrue(truncated)
         self.assertFalse(terminated)
-        self.assertEqual(reward, -1.0)
+        self.assertEqual(reward, 0.0)
 
     def test_dmc_internal_step_limit_maps_to_truncation_not_termination(self):
         # dm_control's own step limit emits LAST with discount 1; the wrapper

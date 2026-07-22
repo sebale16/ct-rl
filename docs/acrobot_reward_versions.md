@@ -88,11 +88,11 @@ Passing the top with surplus energy now loses the dense income, so the policy is
 
 Implementation: `BalanceV4(energy_overshoot_margin=0.25)`, registered as `acrobot-swingup-v4.1`; the default margin 1.0 reproduces v4 exactly.
 
-## v5 — Gym minimum-time objective (unshaped control arm)
+## v5 — height occupancy (unshaped control arm)
 
-$$\text{reward} = \begin{cases} 0 & \text{tip } z > 3 \text{ (episode terminates, discount } 0)\\ -1 & \text{otherwise} \end{cases}$$
+$$\text{reward} = \begin{cases} 1 & \text{tip } z > 3\\ 0 & \text{otherwise} \end{cases}$$
 
-The Gymnasium `Acrobot-v1` objective on this mechanism: the return is minus the physical time until the tip strictly exceeds one link length above the pivot ($-\cos\theta_1 - \cos(\theta_1{+}\theta_2) > 1 \iff$ tip $z > 3$). No dense term, no parking surface, and no balance requirement — the episode ends at the height crossing. Runs use 30 s episodes (a competent scripted pump first crosses at $t \approx 10$–11.5 s) and $\gamma \in \{0.999, 0.9995\}$ (minimum-time values saturate beyond the discount horizon). It isolates whether v4's shaping is necessary: v4 logs the same height criterion continuously, so the pair answers whether unshaped exploration can find swing-up at 100 Hz continuous torque at all.
+Unshaped occupancy of the Gym height criterion ($-\cos\theta_1 - \cos(\theta_1{+}\theta_2) > 1 \iff$ tip $z > 3$): the return is the physical time the tip spends above one link length over the pivot, accumulated over the fixed-length episode with no termination. Zero signal below the height, so there is no parking surface; maximal income is *staying* above the height, which makes balancing near the top the implicit optimum without any velocity gate or target shaping. Runs use 30 s episodes (a competent scripted pump first crosses at $t \approx 10$–11.5 s, leaving up to $\sim$20 s of collectable occupancy) and $\gamma \in \{0.999, 0.9995\}$. It isolates whether v4's shaping is necessary: v4 logs the same height criterion continuously, so the pair answers whether unshaped exploration can find swing-up at 100 Hz continuous torque at all.
 
 ---
 
@@ -105,6 +105,6 @@ The Gymnasium `Acrobot-v1` objective on this mechanism: the return is minus the 
 | v3 | $0.8\cdot\text{extension}\cdot\bar{u}$ | $0.2\cdot\text{precise}$ | anti-fold pose | zeros pumping ($\approx$230–260, tip $\le 1.87$) |
 | v4 | $0.2\cdot\text{ramp}(\tilde{E}, \bar{u})$ | $0.8\cdot\text{precise}\cdot\text{slow}$ | reward pumping | swing-up found (tip 4.0, 48 % over height) but fast swing-through; no capture |
 | v4.1 | v4 with overshoot margin $1.0 \to 0.25$ | unchanged | regulate $\tilde{E}\to 1$, make capture the attractor | queued (`final_mf` + `fork_v41`) |
-| v5 | — | $-1$ until tip $z > 3$, then terminate | unshaped Gym control arm | queued |
+| v5 | — | $\mathbb{1}[\text{tip } z > 3]$ occupancy | unshaped height-occupancy control arm | queued |
 
-All reward outputs except v5 are clipped to $[0, 1]$; v5 is the signed Gym living cost.
+All reward outputs are in $[0, 1]$.
