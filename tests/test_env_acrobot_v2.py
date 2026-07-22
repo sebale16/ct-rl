@@ -12,8 +12,10 @@ try:
         BalanceV3,
         BalanceV4,
         BalanceV5,
+        V41_ENERGY_OVERSHOOT_MARGIN,
         swingup_v3,
         swingup_v4,
+        swingup_v41,
         swingup_v5,
     )
 
@@ -864,6 +866,133 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
         }
         self.assertTrue(v4_only_keys.isdisjoint(info))
         self.assertIn("acrobot_success", info)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        kwargs = {"random": 0, "angle_noise": 0.0, "velocity_noise": 0.0}
+        self.v4 = BalanceV4(**kwargs)
+        self.v41 = BalanceV4(
+            **kwargs, energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN
+        )
+        self.v4.initialize_episode(self.physics)
+        self.v41.initialize_episode(self.physics)
+
+    def _set_physics_state(self, qpos, qvel=(0.0, 0.0)):
+        with self.physics.reset_context():
+            self.physics.data.qpos[:] = np.asarray(qpos, dtype=np.float64)
+            self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+            self.physics.data.ctrl[:] = 0.0
+
+    def test_default_margin_keeps_v4_reward_identical_everywhere(self):
+        default_task = BalanceV4(random=0, angle_noise=0.0, velocity_noise=0.0)
+        default_task.initialize_episode(self.physics)
+        self.assertEqual(default_task.energy_overshoot_margin, 1.0)
+        rng = np.random.default_rng(7)
+        for pose, velocity in zip(
+            rng.uniform(-2.0 * np.pi, 2.0 * np.pi, size=(20, 2)),
+            rng.uniform(-6.0, 6.0, size=(20, 2)),
+        ):
+            self._set_physics_state(pose, qvel=velocity)
+            self.assertEqual(
+                default_task.reward_terms(self.physics)["reward"],
+                self.v4.reward_terms(self.physics)["reward"],
+            )
+
+    def test_rewards_identical_at_or_below_unity_energy(self):
+        for qpos, qvel in (
+            ((np.pi, 0.0), (0.0, 0.0)),
+            ((0.0, np.pi), (0.0, 0.0)),
+            ((2.2, 1.0), (2.0, -1.5)),
+            ((0.0, 0.0), (0.0, 0.0)),
+        ):
+            with self.subTest(qpos=qpos, qvel=qvel):
+                self._set_physics_state(qpos, qvel=qvel)
+                t4 = self.v4.reward_terms(self.physics)
+                t41 = self.v41.reward_terms(self.physics)
+                self.assertLessEqual(t41["energy_norm"], 1.0)
+                self.assertAlmostEqual(t41["reward"], t4["reward"], places=12)
+
+    def test_overshoot_states_lose_their_ramp_income(self):
+        # Fast spin through the top: the regime the v4 pilots converged to.
+        self._set_physics_state((0.0, 0.0), qvel=(3.5, 0.0))
+        t4 = self.v4.reward_terms(self.physics)
+        t41 = self.v41.reward_terms(self.physics)
+        self.assertGreater(t4["energy_norm"], 1.3)
+        self.assertGreater(t4["reward"], 0.1)
+        self.assertLess(t41["reward"], 0.05)
+
+        # Large surplus energy at the bottom is discounted to the floor.
+        self._set_physics_state((np.pi, 0.0), qvel=(7.0, 0.0))
+        self.assertLess(self.v41.reward_terms(self.physics)["reward"], 0.02)
+
+    def test_mild_overshoot_keeps_a_gradient_back_toward_unity(self):
+        # Just above Ẽ=1 the discount must be partial, not a cliff, so the
+        # policy sees a slope back toward the homoclinic energy.
+        self._set_physics_state((np.pi, 0.0), qvel=(5.65, 0.0))
+        terms = self.v41.reward_terms(self.physics)
+        self.assertGreater(terms["energy_norm"], 1.0)
+        self.assertLess(terms["energy_norm"], 1.15)
+        self.assertGreater(terms["progress"], 0.2)
+
+    def test_goal_and_slow_pass_unchanged(self):
+        self._set_physics_state((0.0, 0.0))
+        self.assertAlmostEqual(
+            self.v41.reward_terms(self.physics)["reward"], 1.0, places=6
+        )
+        self._set_physics_state((0.08, 0.05), qvel=(0.5, 0.4))
+        t4 = self.v4.reward_terms(self.physics)
+        t41 = self.v41.reward_terms(self.physics)
+        self.assertGreater(t41["reward"], 0.85)
+        # The slow pass sits barely above Ẽ=1, so v4.1 trims it only mildly.
+        self.assertLess(t4["reward"] - t41["reward"], 0.05)
+
+    def test_invalid_overshoot_margin_rejected(self):
+        for margin in (0.0, -0.25, float("nan"), float("inf")):
+            with self.subTest(margin=margin):
+                with self.assertRaises(ValueError):
+                    BalanceV4(random=0, energy_overshoot_margin=margin)
+
+    def test_factory_and_wrapper_registration(self):
+        env = swingup_v41(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            self.assertIsInstance(env.task, BalanceV4)
+            self.assertEqual(
+                env.task.energy_overshoot_margin, V41_ENERGY_OVERSHOOT_MARGIN
+            )
+            np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
+        finally:
+            env.close()
+
+        wrapped = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v4.1",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(wrapped.close)
+        _, info = wrapped.reset(seed=23)
+        self.assertEqual(
+            wrapped._env.task.energy_overshoot_margin,
+            V41_ENERGY_OVERSHOOT_MARGIN,
+        )
+        self.assertIn("acrobot_energy_norm", info)
 
 
 @unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")

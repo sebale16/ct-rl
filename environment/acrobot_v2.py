@@ -240,6 +240,7 @@ class BalanceV4(BalanceV3):
         angle_noise: float = 0.05,
         velocity_noise: float = 0.01,
         hold_weight: float = 0.8,
+        energy_overshoot_margin: float = 1.0,
     ) -> None:
         super().__init__(
             random=random,
@@ -251,6 +252,14 @@ class BalanceV4(BalanceV3):
             0.0 <= self.hold_weight <= 1.0
         ):
             raise ValueError("hold_weight must be finite and in [0, 1]")
+        self.energy_overshoot_margin = float(energy_overshoot_margin)
+        if (
+            not np.isfinite(self.energy_overshoot_margin)
+            or self.energy_overshoot_margin <= 0.0
+        ):
+            raise ValueError(
+                "energy_overshoot_margin must be finite and positive"
+            )
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
 
@@ -313,11 +322,20 @@ class BalanceV4(BalanceV3):
         energy_norm = (
             self._mechanical_energy(physics) - self._energy_hang
         ) / self._energy_span
+        # Piecewise margin: the deficit side keeps the broad pumping ramp,
+        # the overshoot side may be tightened (v4.1) so spinning past the
+        # upright-rest energy is discounted hard and the policy regulates
+        # toward slow top passes.  Both sides meet at 1 at the bound.
+        energy_margin = (
+            self._ENERGY_MARGIN
+            if energy_norm <= 1.0
+            else self.energy_overshoot_margin
+        )
         energy_close = float(
             rewards.tolerance(
                 energy_norm,
                 bounds=(1.0, 1.0),
-                margin=self._ENERGY_MARGIN,
+                margin=energy_margin,
                 value_at_margin=0.1,
                 sigmoid="gaussian",
             )
@@ -371,6 +389,7 @@ def swingup_v4(
     angle_noise: float = 0.05,
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
+    energy_overshoot_margin: float = 1.0,
 ):
     """Construct the energy-regulated ``acrobot-swingup-v4`` environment."""
     physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
@@ -379,6 +398,43 @@ def swingup_v4(
         angle_noise=angle_noise,
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
+        energy_overshoot_margin=energy_overshoot_margin,
+    )
+    return control.Environment(
+        physics,
+        task,
+        time_limit=float(time_limit),
+        **dict(environment_kwargs or {}),
+    )
+
+
+V41_ENERGY_OVERSHOOT_MARGIN = 0.25
+
+
+def swingup_v41(
+    *,
+    time_limit: float = 10.0,
+    random=None,
+    environment_kwargs: Optional[Dict[str, Any]] = None,
+    angle_noise: float = 0.05,
+    velocity_noise: float = 0.01,
+    hold_weight: float = 0.8,
+):
+    """Construct ``acrobot-swingup-v4.1``: v4 with a tight overshoot margin.
+
+    Identical to v4 for Ẽ ≤ 1.  Above the upright-rest energy the tolerance
+    margin drops from 1.0 to 0.25, so passing the top with surplus energy
+    (the fast swing-through the v4 pilots converged to) loses its ramp
+    income and the policy is pushed to regulate Ẽ → 1, where top passes are
+    slow and the hold term is enterable.
+    """
+    physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
+    task = BalanceV4(
+        random=random,
+        angle_noise=angle_noise,
+        velocity_noise=velocity_noise,
+        hold_weight=hold_weight,
+        energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
     )
     return control.Environment(
         physics,

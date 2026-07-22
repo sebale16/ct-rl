@@ -51,6 +51,7 @@ ACROBOT_ENVS = (
     "acrobot-swingup-v2",
     "acrobot-swingup-v3",
     "acrobot-swingup-v4",
+    "acrobot-swingup-v4.1",
     "acrobot-swingup-v5",
 )
 SUPPORTED_ENVS = ("cartpole-swingup", *ACROBOT_ENVS)

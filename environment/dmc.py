@@ -26,7 +26,13 @@ import torch._dynamo  # noqa: F401
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
-from .acrobot_v2 import swingup_v2, swingup_v3, swingup_v4, swingup_v5
+from .acrobot_v2 import (
+    swingup_v2,
+    swingup_v3,
+    swingup_v4,
+    swingup_v41,
+    swingup_v5,
+)
 from .base import ContinuousEnv
 
 
@@ -215,6 +221,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v2": swingup_v2,
             "swingup-v3": swingup_v3,
             "swingup-v4": swingup_v4,
+            "swingup-v4.1": swingup_v41,
             "swingup-v5": swingup_v5,
         }
         if domain_name == "acrobot" and task_name in local_acrobot_tasks:
