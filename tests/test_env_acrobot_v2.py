@@ -7,7 +7,13 @@ try:
     from dm_control.utils import rewards as dmc_rewards
 
     from environment import DMCContinuousEnv
-    from environment.acrobot_v2 import BalanceV2, BalanceV3, swingup_v3
+    from environment.acrobot_v2 import (
+        BalanceV2,
+        BalanceV3,
+        BalanceV4,
+        swingup_v3,
+        swingup_v4,
+    )
 
     HAVE_DMC = True
 except ImportError:
@@ -578,6 +584,284 @@ class TestAcrobotSwingupV3Reward(unittest.TestCase):
         self.assertGreater(above["tip_height"], 3.0)
         self.assertEqual(above["gym_height_success"], 1.0)
         self.assertEqual(above["exact_success"], 0.0)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV4Reward(unittest.TestCase):
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV4(
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            hold_weight=0.8,
+        )
+        # Calibrates the hanging/upright energy references.
+        self.task.initialize_episode(self.physics)
+
+    def _set_physics_state(self, qpos, qvel=(0.0, 0.0)):
+        with self.physics.reset_context():
+            self.physics.data.qpos[:] = np.asarray(qpos, dtype=np.float64)
+            self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+            self.physics.data.ctrl[:] = 0.0
+
+    def test_factory_builds_v4_with_an_exact_down_reset(self):
+        env = swingup_v4(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            self.assertIsInstance(env.task, BalanceV4)
+            np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
+            np.testing.assert_array_equal(env.physics.data.qvel, [0.0, 0.0])
+        finally:
+            env.close()
+
+    def test_reward_before_calibration_raises(self):
+        physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        task = BalanceV4(random=0)
+        with self.assertRaises(RuntimeError):
+            task.reward_terms(physics)
+
+    def test_invalid_hold_weight_rejected(self):
+        for hold_weight in (-0.1, 1.5, float("nan"), float("inf")):
+            with self.subTest(hold_weight=hold_weight):
+                with self.assertRaises(ValueError):
+                    BalanceV4(random=0, hold_weight=hold_weight)
+
+    def test_reset_matches_v2_for_the_same_seed(self):
+        v2_physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        v4_physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        kwargs = {"random": 37, "angle_noise": 0.03, "velocity_noise": 0.007}
+        BalanceV2(**kwargs, precision_weight=0.2).initialize_episode(v2_physics)
+        BalanceV4(**kwargs, hold_weight=0.8).initialize_episode(v4_physics)
+
+        np.testing.assert_array_equal(v4_physics.data.qpos, v2_physics.data.qpos)
+        np.testing.assert_array_equal(v4_physics.data.qvel, v2_physics.data.qvel)
+
+    def test_energy_normalization_landmarks(self):
+        self._set_physics_state((np.pi, 0.0))
+        self.assertAlmostEqual(
+            self.task.reward_terms(self.physics)["energy_norm"], 0.0, places=9
+        )
+        self._set_physics_state((0.0, 0.0))
+        self.assertAlmostEqual(
+            self.task.reward_terms(self.physics)["energy_norm"], 1.0, places=9
+        )
+        # Kinetic energy counts: a fast hanging swing carries positive Ẽ.
+        self._set_physics_state((np.pi, 0.0), qvel=(4.0, 0.0))
+        self.assertGreater(
+            self.task.reward_terms(self.physics)["energy_norm"], 0.4
+        )
+
+    def test_terms_recompose_from_published_tolerances(self):
+        rng = np.random.default_rng(5)
+        qpos = rng.uniform(-2.0 * np.pi, 2.0 * np.pi, size=(25, 2))
+        qvel = rng.uniform(-4.0, 4.0, size=(25, 2))
+        for pose, velocity in zip(qpos, qvel):
+            with self.subTest(qpos=pose, qvel=velocity):
+                self._set_physics_state(pose, qvel=velocity)
+                terms = self.task.reward_terms(self.physics)
+                energy_close = float(
+                    dmc_rewards.tolerance(
+                        terms["energy_norm"],
+                        bounds=(1.0, 1.0),
+                        margin=1.0,
+                        value_at_margin=0.1,
+                        sigmoid="gaussian",
+                    )
+                )
+                mean_upright = 0.5 * (
+                    terms["upper_uprightness"] + terms["lower_uprightness"]
+                )
+                self.assertAlmostEqual(
+                    terms["progress"], energy_close * 0.5 * (1.0 + mean_upright)
+                )
+                slow = float(
+                    dmc_rewards.tolerance(
+                        terms["speed"],
+                        bounds=(0.0, 0.5),
+                        margin=2.0,
+                        value_at_margin=0.1,
+                        sigmoid="gaussian",
+                    )
+                )
+                self.assertAlmostEqual(terms["slow_gate"], slow)
+                self.assertAlmostEqual(
+                    terms["hold"], terms["precision"] * terms["slow_gate"]
+                )
+                expected = 0.2 * terms["progress"] + 0.8 * terms["hold"]
+                self.assertAlmostEqual(
+                    terms["reward"], float(np.clip(expected, 0.0, 1.0))
+                )
+                self.assertEqual(terms["success"], terms["exact_success"])
+
+    def test_reward_landmarks_pay_only_the_slow_upright_capture(self):
+        # Hanging rest: only the value-at-margin energy floor times the tilt.
+        self._set_physics_state((np.pi, 0.0))
+        down = self.task.reward_terms(self.physics)
+        self.assertAlmostEqual(down["progress"], 0.05, places=6)
+        self.assertAlmostEqual(down["reward"], 0.01, places=3)
+
+        # Upright rest at the target: exact maximum.
+        self._set_physics_state((0.0, 0.0))
+        upright = self.task.reward_terms(self.physics)
+        self.assertAlmostEqual(upright["reward"], 1.0, places=6)
+        self.assertAlmostEqual(upright["hold"], 1.0, places=6)
+
+        # v2's exploits stay dead: exact folds and the bent near-top hover.
+        self._set_physics_state((0.0, np.pi))
+        self.assertLess(self.task.reward_terms(self.physics)["reward"], 0.2)
+        self._set_physics_state((0.18, 0.55), qvel=(1.8, -2.2))
+        self.assertLess(self.task.reward_terms(self.physics)["reward"], 0.3)
+
+        # Fast spin through the very top: energy overshoot plus speed gate.
+        self._set_physics_state((0.0, 0.0), qvel=(3.5, 0.0))
+        self.assertLess(self.task.reward_terms(self.physics)["reward"], 0.25)
+
+        # Slow pass near the goal earns most of the hold payoff.
+        self._set_physics_state((0.08, 0.05), qvel=(0.5, 0.4))
+        self.assertGreater(self.task.reward_terms(self.physics)["reward"], 0.85)
+
+    def test_static_reward_slice_has_only_the_upright_local_maximum(self):
+        # Zero-velocity slice of the reward over the periodic joint grid.
+        # Guards against a secondary energy/uprightness maximum a policy
+        # could park on without capturing the target.
+        n = 120
+        angles = np.linspace(-np.pi, np.pi, n, endpoint=False)
+        reward = np.empty((n, n))
+        for i, shoulder in enumerate(angles):
+            for j, elbow in enumerate(angles):
+                self._set_physics_state((shoulder, elbow))
+                reward[i, j] = self.task.reward_terms(self.physics)["reward"]
+
+        neighbors = [
+            np.roll(np.roll(reward, di, axis=0), dj, axis=1)
+            for di in (-1, 0, 1)
+            for dj in (-1, 0, 1)
+            if (di, dj) != (0, 0)
+        ]
+        local_maximum = np.logical_and.reduce(
+            [reward >= neighbor for neighbor in neighbors]
+        ) & np.logical_or.reduce([reward > neighbor for neighbor in neighbors])
+        maxima = np.argwhere(local_maximum)
+
+        self.assertEqual(maxima.shape, (1, 2))
+        shoulder_index, elbow_index = maxima[0]
+        self.assertEqual(angles[shoulder_index], 0.0)
+        self.assertEqual(angles[elbow_index], 0.0)
+
+    def test_elbow_pumping_raises_reward_where_v3_does_not(self):
+        # Scripted collocated pump: kick, then elbow torque against the
+        # shoulder swing, backing off as Ẽ approaches 1.  The v4 reward must
+        # track the injected energy; the v3 progress term must not.
+        env = swingup_v4(
+            time_limit=20.0,
+            random=3,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        self.addCleanup(env.close)
+        env.reset()
+        physics = env.physics
+        v3_task = BalanceV3(random=0, angle_noise=0.0, velocity_noise=0.0)
+
+        v4_rewards, v3_rewards, energies = [], [], []
+        for step in range(1200):
+            terms = env.task.reward_terms(physics)
+            energy_norm = terms["energy_norm"]
+            if step < 100:
+                action = 1.0
+            else:
+                gain = min(1.0, 4.0 * max(0.0, 1.0 - energy_norm))
+                action = -np.sign(float(physics.data.qvel[0])) * gain
+            env.step(np.asarray([action]))
+            terms = env.task.reward_terms(physics)
+            v4_rewards.append(terms["reward"])
+            v3_rewards.append(v3_task.reward_terms(physics)["reward"])
+            energies.append(terms["energy_norm"])
+
+        v4_rewards = np.asarray(v4_rewards)
+        v3_rewards = np.asarray(v3_rewards)
+        energies = np.asarray(energies)
+
+        self.assertGreater(energies.max(), 0.4)
+        corr_v4 = np.corrcoef(energies, v4_rewards)[0, 1]
+        corr_v3 = np.corrcoef(energies, v3_rewards)[0, 1]
+        self.assertGreater(corr_v4, 0.75)
+        self.assertGreater(corr_v4, corr_v3 + 0.2)
+
+    def test_continuous_wrapper_builds_v4_and_exposes_v4_diagnostics(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v4",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+
+        _, reset_info = env.reset(seed=23)
+        self.assertIsInstance(env._env.task, BalanceV4)
+        v4_keys = {
+            "acrobot_upper_uprightness",
+            "acrobot_lower_uprightness",
+            "acrobot_extension",
+            "acrobot_gym_height_success",
+            "acrobot_exact_success",
+            "acrobot_energy_norm",
+            "acrobot_speed",
+            "acrobot_slow_gate",
+            "acrobot_hold",
+        }
+        self.assertTrue(v4_keys.issubset(reset_info))
+        self.assertAlmostEqual(reset_info["acrobot_energy_norm"], 0.0, places=6)
+        self.assertAlmostEqual(reset_info["acrobot_slow_gate"], 1.0, places=6)
+        self.assertAlmostEqual(reset_info["acrobot_hold"], 0.0, places=6)
+        self.assertAlmostEqual(reset_info["acrobot_progress"], 0.05, places=6)
+
+        _, _, _, _, step_info = env.step(np.zeros(1, dtype=np.float32))
+        self.assertTrue(v4_keys.issubset(step_info))
+
+    def test_v3_wrapper_info_schema_does_not_gain_v4_only_terms(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v3",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+
+        _, info = env.reset(seed=23)
+        v4_only_keys = {
+            "acrobot_energy_norm",
+            "acrobot_speed",
+            "acrobot_slow_gate",
+            "acrobot_hold",
+        }
+        self.assertTrue(v4_only_keys.isdisjoint(info))
+        self.assertIn("acrobot_success", info)
 
 
 if __name__ == "__main__":

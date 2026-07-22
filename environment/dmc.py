@@ -26,7 +26,7 @@ import torch._dynamo  # noqa: F401
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
-from .acrobot_v2 import swingup_v2, swingup_v3
+from .acrobot_v2 import swingup_v2, swingup_v3, swingup_v4
 from .base import ContinuousEnv
 
 
@@ -214,6 +214,7 @@ class DMCContinuousEnv(ContinuousEnv):
         local_acrobot_tasks = {
             "swingup-v2": swingup_v2,
             "swingup-v3": swingup_v3,
+            "swingup-v4": swingup_v4,
         }
         if domain_name == "acrobot" and task_name in local_acrobot_tasks:
             self._env = local_acrobot_tasks[task_name](
@@ -482,14 +483,19 @@ class DMCContinuousEnv(ContinuousEnv):
             "acrobot_success_fraction": float(success_fraction),
         }
         # V3 exposes the pieces needed to distinguish genuine swing-up from
-        # the folded-link behavior that received substantial V2 reward.  Keep
-        # these optional so the V2 info schema remains backward compatible.
+        # the folded-link behavior that received substantial V2 reward, and V4
+        # adds its energy-regulation terms.  Keep these optional so the V2
+        # info schema remains backward compatible.
         optional_terms = {
             "upper_uprightness": "acrobot_upper_uprightness",
             "lower_uprightness": "acrobot_lower_uprightness",
             "extension": "acrobot_extension",
             "gym_height_success": "acrobot_gym_height_success",
             "exact_success": "acrobot_exact_success",
+            "energy_norm": "acrobot_energy_norm",
+            "speed": "acrobot_speed",
+            "slow_gate": "acrobot_slow_gate",
+            "hold": "acrobot_hold",
         }
         for term_name, info_name in optional_terms.items():
             if term_name in terms:

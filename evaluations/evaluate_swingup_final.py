@@ -47,7 +47,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SUPPORTED_ENVS = ("cartpole-swingup", "acrobot-swingup-v2", "acrobot-swingup-v3")
+ACROBOT_ENVS = (
+    "acrobot-swingup-v2",
+    "acrobot-swingup-v3",
+    "acrobot-swingup-v4",
+)
+SUPPORTED_ENVS = ("cartpole-swingup", *ACROBOT_ENVS)
 REGIMES = ("irregular_train", "uniform_0p01")
 SCHEMA_VERSION = 2
 UNIFORM_DT = 0.01
@@ -645,7 +650,7 @@ def summarize_episode(
         uniform_0p01_equivalent_return=reward_integral / UNIFORM_DT,
     )
 
-    if env_id in ("acrobot-swingup-v2", "acrobot-swingup-v3"):
+    if env_id in ACROBOT_ENVS:
         initial_distance = _require_finite_scalar(reset_info, "acrobot_tip_distance")
         initial_progress = _require_finite_scalar(reset_info, "acrobot_progress")
         initial_height = _require_finite_scalar(reset_info, "acrobot_tip_height")
