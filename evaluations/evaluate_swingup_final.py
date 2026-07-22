@@ -51,6 +51,7 @@ ACROBOT_ENVS = (
     "acrobot-swingup-v2",
     "acrobot-swingup-v3",
     "acrobot-swingup-v4",
+    "acrobot-swingup-v5",
 )
 SUPPORTED_ENVS = ("cartpole-swingup", *ACROBOT_ENVS)
 REGIMES = ("irregular_train", "uniform_0p01")

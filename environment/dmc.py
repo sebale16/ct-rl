@@ -26,7 +26,7 @@ import torch._dynamo  # noqa: F401
 from dm_control import suite, rl
 from dm_env import specs as dm_specs
 
-from .acrobot_v2 import swingup_v2, swingup_v3, swingup_v4
+from .acrobot_v2 import swingup_v2, swingup_v3, swingup_v4, swingup_v5
 from .base import ContinuousEnv
 
 
@@ -215,6 +215,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v2": swingup_v2,
             "swingup-v3": swingup_v3,
             "swingup-v4": swingup_v4,
+            "swingup-v5": swingup_v5,
         }
         if domain_name == "acrobot" and task_name in local_acrobot_tasks:
             self._env = local_acrobot_tasks[task_name](
@@ -545,9 +546,15 @@ class DMCContinuousEnv(ContinuousEnv):
         self._last_obs_dmc = obs
         reward = float(ts.reward if ts.reward is not None else 0.0)
 
+        # dm_control emits LAST for both genuine task termination (discount 0,
+        # e.g. the Acrobot swingup-v5 height criterion) and its internal step
+        # limit (discount 1).  Only the former is a Gym termination; the
+        # latter is a truncation and must keep bootstrapping.
         is_last = bool(ts.last())
-        terminated = is_last
-        truncated = False  # Truncation is handled by the ContinuousEnv wrapper
+        terminated = (
+            is_last and ts.discount is not None and float(ts.discount) == 0.0
+        )
+        truncated = is_last and not terminated
 
         # Track elapsed time separately for diagnostics
         self._elapsed_time += float(actual_dt)

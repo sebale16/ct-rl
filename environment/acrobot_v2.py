@@ -18,6 +18,9 @@ small precise-target term near the exact goal.
 term pays for holding total mechanical energy near the upright-rest level
 (rewarding the elbow pumping that v3 penalized), and sustained income exists
 only in the velocity-gated precise-hold term at the exact goal.
+``swingup-v5`` is the Gymnasium ``Acrobot-v1`` objective as an unshaped
+control arm: −1 reward rate until the tip exceeds the Gym height criterion
+(tip one link length above the pivot), then reward 0 and episode termination.
 """
 
 from __future__ import annotations
@@ -376,6 +379,91 @@ def swingup_v4(
         angle_noise=angle_noise,
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
+    )
+    return control.Environment(
+        physics,
+        task,
+        time_limit=float(time_limit),
+        **dict(environment_kwargs or {}),
+    )
+
+
+class BalanceV5(BalanceV3):
+    """The Gymnasium ``Acrobot-v1`` minimum-time objective on this mechanism.
+
+    Reward is the −1 living cost of the Gym task expressed as a rate: every
+    endpoint below the Gym height criterion pays −1, the first endpoint above
+    it pays 0 and terminates the episode (``get_termination`` discount 0).
+    With the wrapper's reward-increment convention the return is minus the
+    physical time to reach the height, so the only optimum is genuine fast
+    swing-up; there is no dense term and therefore nothing to park on.
+
+    The Gym predicate −cos θ₁ − cos(θ₁+θ₂) > 1 is tip height strictly above
+    one link length over the pivot, i.e. ``tip_z > 3`` on this scaled model —
+    identical to the ``gym_height_success`` diagnostic of v3/v4.  Balance is
+    intentionally not part of the task.  Mechanism, resets, and observations
+    are identical to v2–v4.
+    """
+
+    def _gym_height_reached(self, physics) -> bool:
+        tip_height = float(physics.named.data.site_xpos["tip", "z"])
+        return tip_height > self._GYM_TARGET_HEIGHT
+
+    def get_termination(self, physics) -> Optional[float]:
+        """Terminate with discount 0 once the Gym height is exceeded."""
+        if self._gym_height_reached(physics):
+            return 0.0
+        return None
+
+    def reward_terms(self, physics) -> Dict[str, float]:
+        """Return the Gym living-cost reward and reward-independent terms."""
+        distance = float(physics.to_target())
+        precise = float(acrobot.Balance._get_reward(self, physics, sparse=False))
+
+        vertical = np.asarray(physics.vertical(), dtype=np.float64).reshape(-1)
+        if vertical.shape != (2,):
+            raise ValueError(
+                "Acrobot vertical orientation must have shape (2,), got "
+                f"{vertical.shape}"
+            )
+        upright = np.clip((vertical + 1.0) / 2.0, 0.0, 1.0)
+
+        elbow = float(np.asarray(physics.named.data.qpos["elbow"]).item())
+        extension = float(np.clip((1.0 + np.cos(elbow)) / 2.0, 0.0, 1.0))
+        target_radius = float(physics.named.model.site_size["target", 0])
+        tip_height = float(physics.named.data.site_xpos["tip", "z"])
+        gym_height_success = float(tip_height > self._GYM_TARGET_HEIGHT)
+        exact_success = float(distance <= target_radius)
+        return {
+            "reward": 0.0 if gym_height_success else -1.0,
+            "tip_distance": distance,
+            "tip_height": tip_height,
+            # No dense progress term exists for the Gym objective.
+            "progress": 0.0,
+            "precision": precise,
+            "upper_uprightness": float(upright[0]),
+            "lower_uprightness": float(upright[1]),
+            "extension": extension,
+            "gym_height_success": gym_height_success,
+            "exact_success": exact_success,
+            "success": exact_success,
+        }
+
+
+def swingup_v5(
+    *,
+    time_limit: float = 30.0,
+    random=None,
+    environment_kwargs: Optional[Dict[str, Any]] = None,
+    angle_noise: float = 0.05,
+    velocity_noise: float = 0.01,
+):
+    """Construct the Gym-objective ``acrobot-swingup-v5`` environment."""
+    physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
+    task = BalanceV5(
+        random=random,
+        angle_noise=angle_noise,
+        velocity_noise=velocity_noise,
     )
     return control.Environment(
         physics,

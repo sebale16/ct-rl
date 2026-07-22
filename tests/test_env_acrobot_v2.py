@@ -11,8 +11,10 @@ try:
         BalanceV2,
         BalanceV3,
         BalanceV4,
+        BalanceV5,
         swingup_v3,
         swingup_v4,
+        swingup_v5,
     )
 
     HAVE_DMC = True
@@ -862,6 +864,216 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
         }
         self.assertTrue(v4_only_keys.isdisjoint(info))
         self.assertIn("acrobot_success", info)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV5(random=0, angle_noise=0.0, velocity_noise=0.0)
+
+    def _set_physics_state(self, qpos, qvel=(0.0, 0.0)):
+        with self.physics.reset_context():
+            self.physics.data.qpos[:] = np.asarray(qpos, dtype=np.float64)
+            self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+            self.physics.data.ctrl[:] = 0.0
+
+    @staticmethod
+    def _pump_action(physics, step):
+        """Kick, then bang-bang elbow torque against the shoulder swing."""
+        if step < 100:
+            return 1.0
+        return float(-np.sign(float(physics.data.qvel[0])))
+
+    def test_factory_builds_v5_with_an_exact_down_reset(self):
+        env = swingup_v5(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            self.assertIsInstance(env.task, BalanceV5)
+            np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
+            np.testing.assert_array_equal(env.physics.data.qvel, [0.0, 0.0])
+        finally:
+            env.close()
+
+    def test_gym_reward_and_termination_landmarks(self):
+        # Hanging: living cost, no termination.
+        self._set_physics_state((np.pi, 0.0))
+        terms = self.task.reward_terms(self.physics)
+        self.assertEqual(terms["reward"], -1.0)
+        self.assertEqual(terms["gym_height_success"], 0.0)
+        self.assertEqual(terms["progress"], 0.0)
+        self.assertIsNone(self.task.get_termination(self.physics))
+
+        # Straight links at shoulder pi/3: tip exactly 3.0, strictly below
+        # the Gym predicate, so the episode continues.
+        self._set_physics_state((np.pi / 3.0, 0.0))
+        terms = self.task.reward_terms(self.physics)
+        self.assertAlmostEqual(terms["tip_height"], 3.0)
+        self.assertEqual(terms["reward"], -1.0)
+        self.assertIsNone(self.task.get_termination(self.physics))
+
+        # Just above the threshold: zero reward, terminal discount 0.
+        self._set_physics_state((np.pi / 3.0 - 1e-3, 0.0))
+        terms = self.task.reward_terms(self.physics)
+        self.assertGreater(terms["tip_height"], 3.0)
+        self.assertEqual(terms["reward"], 0.0)
+        self.assertEqual(terms["gym_height_success"], 1.0)
+        self.assertEqual(self.task.get_termination(self.physics), 0.0)
+
+        # Upright at the target: also terminal; success stays the exact hit.
+        self._set_physics_state((0.0, 0.0))
+        terms = self.task.reward_terms(self.physics)
+        self.assertEqual(terms["reward"], 0.0)
+        self.assertEqual(self.task.get_termination(self.physics), 0.0)
+        self.assertEqual(terms["success"], terms["exact_success"])
+        self.assertEqual(terms["exact_success"], 1.0)
+
+    def test_scripted_pump_terminates_episode_with_discount_zero(self):
+        env = swingup_v5(
+            time_limit=30.0, random=3, angle_noise=0.0, velocity_noise=0.0
+        )
+        self.addCleanup(env.close)
+        env.reset()
+        physics = env.physics
+        for step in range(3000):
+            action = self._pump_action(physics, step)
+            ts = env.step(np.asarray([action]))
+            if ts.last():
+                break
+        else:
+            self.fail("scripted pump never reached the Gym height in 30 s")
+        self.assertGreater(step, 300)
+        self.assertLess(step, 2500)
+        self.assertEqual(float(ts.discount), 0.0)
+        self.assertEqual(float(ts.reward), 0.0)
+        self.assertGreater(
+            float(physics.named.data.site_xpos["tip", "z"]), 3.0
+        )
+
+    def test_continuous_wrapper_terminates_without_truncation_at_height(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v5",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=25.0,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+        env.reset(seed=23)
+        physics = env._env.physics
+
+        terminated = truncated = False
+        for step in range(2600):
+            action = np.asarray([self._pump_action(physics, step)], np.float32)
+            _, reward, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                break
+            self.assertEqual(reward, -1.0)
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(reward, 0.0)
+        self.assertEqual(float(info["discount"]), 0.0)
+        self.assertEqual(info["acrobot_gym_height_success"], 1.0)
+
+    def test_continuous_wrapper_time_limit_truncates_without_termination(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v5",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.05,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+        env.reset(seed=23)
+
+        terminated = truncated = False
+        for _ in range(10):
+            _, reward, terminated, truncated, _ = env.step(
+                np.zeros(1, dtype=np.float32)
+            )
+            if terminated or truncated:
+                break
+        self.assertTrue(truncated)
+        self.assertFalse(terminated)
+        self.assertEqual(reward, -1.0)
+
+    def test_dmc_internal_step_limit_maps_to_truncation_not_termination(self):
+        # dm_control's own step limit emits LAST with discount 1; the wrapper
+        # must report that as truncation so bootstrapping continues.
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v2",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            max_steps=3,
+            episode_duration=10.0,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+        env.reset(seed=23)
+
+        terminated = truncated = False
+        for _ in range(3):
+            _, _, terminated, truncated, info = env.step(
+                np.zeros(1, dtype=np.float32)
+            )
+            if terminated or truncated:
+                break
+        self.assertTrue(truncated)
+        self.assertFalse(terminated)
+        self.assertEqual(float(info["discount"]), 1.0)
+
+    def test_v5_wrapper_info_schema_has_v3_family_terms_but_no_v4_terms(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v5",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"angle_noise": 0.0, "velocity_noise": 0.0},
+        )
+        self.addCleanup(env.close)
+
+        _, info = env.reset(seed=23)
+        v3_family_keys = {
+            "acrobot_upper_uprightness",
+            "acrobot_lower_uprightness",
+            "acrobot_extension",
+            "acrobot_gym_height_success",
+            "acrobot_exact_success",
+        }
+        v4_only_keys = {
+            "acrobot_energy_norm",
+            "acrobot_speed",
+            "acrobot_slow_gate",
+            "acrobot_hold",
+        }
+        self.assertTrue(v3_family_keys.issubset(info))
+        self.assertTrue(v4_only_keys.isdisjoint(info))
+        self.assertEqual(info["acrobot_progress"], 0.0)
+        self.assertEqual(info["acrobot_gym_height_success"], 0.0)
 
 
 if __name__ == "__main__":
