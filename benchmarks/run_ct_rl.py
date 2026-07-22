@@ -176,6 +176,7 @@ def run_algorithm(
     checkpoint_dir: str | None = None,
     run_id: str | None = None,
     continuation_rng_seed: int | None = None,
+    init_weights: str | None = None,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -406,6 +407,17 @@ def run_algorithm(
     # minibatches relative to MF/oracle arms for reasons unrelated to data.
     if hasattr(algorithm, "_dynamics_sample_rng"):
         algorithm._dynamics_sample_rng = np.random.default_rng(int(seed) + 999983)
+
+    # Warm start (fork): graft a previously trained policy/critic onto a fresh
+    # trainer.  ``load`` restores only the model weights (actor + Q-critics +
+    # their targets); alpha, optimizers, and the replay buffer stay fresh from
+    # this run's hyperparameters, so a fork can continue the loaded policy under
+    # a different alpha/lr/tau regime.  Mutually exclusive with --resume.
+    if init_weights:
+        if resume_active:
+            raise ValueError("--init_weights cannot be combined with --resume")
+        algorithm.load(init_weights, strict=True)
+        print(f"[fork] warm-started weights from {init_weights}", flush=True)
 
     # Setup callbacks
     save_freq = log_kwargs.get("save_freq", 100000)
@@ -675,6 +687,15 @@ def parse_args():
         "run_id so they share one log/save/checkpoint directory.",
     )
     parser.add_argument(
+        "--init_weights",
+        type=str,
+        default=None,
+        help="Warm-start (fork): path to a saved model (e.g. best_model.pth) "
+        "whose actor/critic weights are loaded into a fresh trainer before "
+        "learning. alpha/optimizers/replay buffer stay fresh, so the loaded "
+        "policy continues under this run's hyperparameters. Not for --resume.",
+    )
+    parser.add_argument(
         "--continuation_rng_seed",
         type=int,
         default=None,
@@ -719,6 +740,7 @@ def main():
                 checkpoint_dir=args.checkpoint_dir,
                 run_id=args.run_id,
                 continuation_rng_seed=args.continuation_rng_seed,
+                init_weights=args.init_weights,
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:

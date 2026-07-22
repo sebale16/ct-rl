@@ -1,0 +1,13 @@
+arm,seed,src,total_timesteps,eval_25k,eval_150k,eval_final,eval_best,eval_best_step,alpha_final,critic_loss_max
+fork_ctrl,0,final_mf/seed_2/best_model,300000,161.5,36.33,19.82,189.59,175000,0.00164,2.103
+fork_ctrl,1,final_mf/seed_2/best_model,300000,19.8,134.53,35.2,189.37,225000,0.00193,1.851
+fork_ctrl,2,final_mf/seed_2/best_model,300000,20.89,81.21,168.29,186.32,225000,0.00301,4.328
+fork_a02,0,final_mf/seed_2/best_model,300000,19.88,19.75,19.75,19.96,50000,0.02,0.216
+fork_a02,1,final_mf/seed_2/best_model,300000,19.81,19.79,19.77,19.92,50000,0.02,0.237
+fork_a02,2,final_mf/seed_2/best_model,300000,19.95,19.81,19.81,19.95,25000,0.02,0.254
+fork_lr1e4,0,final_mf/seed_2/best_model,300000,20.15,19.78,20.84,59.05,100000,0.00017,0.354
+fork_lr1e4,1,final_mf/seed_2/best_model,300000,19.79,20.32,20.01,20.7,200000,0.00024,0.759
+fork_lr1e4,2,final_mf/seed_2/best_model,300000,19.91,20.07,19.87,111.19,50000,0.00033,0.175
+fork_tau01,0,final_mf/seed_2/best_model,300000,119.92,19.82,20.1,119.92,25000,0.00022,0.241
+fork_tau01,1,final_mf/seed_2/best_model,300000,133.11,21.33,176.37,187.64,275000,0.00182,0.839
+fork_tau01,2,final_mf/seed_2/best_model,300000,162.97,19.96,20.04,183.03,125000,0.00084,1.674
