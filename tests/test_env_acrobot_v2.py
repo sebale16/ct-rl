@@ -957,24 +957,96 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     BalanceV4(random=0, energy_overshoot_margin=margin)
 
-    def test_factory_and_wrapper_registration(self):
+    def test_factory_defaults_to_capture_pressure_and_uniform_start(self):
+        env = swingup_v41(
+            time_limit=0.1,
+            random=19,
+            environment_kwargs={"flat_observation": True},
+            velocity_noise=0.0,
+        )
+        try:
+            self.assertIsInstance(env.task, BalanceV4)
+            self.assertEqual(
+                env.task.energy_overshoot_margin, V41_ENERGY_OVERSHOOT_MARGIN
+            )
+            self.assertTrue(env.task.uniform_start)
+            starts = []
+            for _ in range(40):
+                env.reset()
+                starts.append(np.array(env.physics.data.qpos))
+            starts = np.stack(starts)
+            # Not the near-hanging reset: angles cover the circle.
+            self.assertGreater(np.ptp(starts[:, 0]), np.pi)
+            self.assertGreater(np.ptp(starts[:, 1]), np.pi)
+        finally:
+            env.close()
+
+    def test_uniform_start_puts_hold_income_in_the_start_distribution(self):
+        # The reason uniform starts are needed: from hanging the capture
+        # region is unreachable without the penalized overshoot, so the hold
+        # term is never observed. Under uniform starts a meaningful share of
+        # resets begin above the height already earning hold reward.
+        env = swingup_v41(time_limit=0.1, random=7, velocity_noise=0.0)
+        self.addCleanup(env.close)
+        physics = env.physics
+        above = 0
+        hold_income = 0.0
+        n = 400
+        for _ in range(n):
+            env.reset()
+            terms = env.task.reward_terms(physics)
+            if terms["tip_height"] > 3.0:
+                above += 1
+                hold_income += terms["hold"]
+        self.assertGreater(above, n // 10)
+        self.assertLess(above, n // 2)
+        # Average hold over the whole start stream clears the 0.05 gate that
+        # left the hanging-start v4.1 best_model empty.
+        self.assertGreater(hold_income / n, 0.05)
+
+    def test_uniform_start_false_restores_hanging_reset(self):
         env = swingup_v41(
             time_limit=0.1,
             random=19,
             environment_kwargs={"flat_observation": True},
             angle_noise=0.0,
             velocity_noise=0.0,
+            uniform_start=False,
         )
         try:
+            self.assertFalse(env.task.uniform_start)
             env.reset()
-            self.assertIsInstance(env.task, BalanceV4)
-            self.assertEqual(
-                env.task.energy_overshoot_margin, V41_ENERGY_OVERSHOOT_MARGIN
-            )
             np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
         finally:
             env.close()
 
+    def test_energy_calibration_survives_uniform_start(self):
+        env = swingup_v41(time_limit=0.1, random=3, velocity_noise=0.0)
+        self.addCleanup(env.close)
+        env.reset()
+        physics = env.physics
+        for qpos, expected in (((np.pi, 0.0), 0.0), ((0.0, 0.0), 1.0)):
+            with physics.reset_context():
+                physics.data.qpos[:] = qpos
+                physics.data.qvel[:] = 0.0
+            self.assertAlmostEqual(
+                env.task.reward_terms(physics)["energy_norm"],
+                expected,
+                places=9,
+            )
+
+    def test_plain_v4_factory_keeps_hanging_start(self):
+        env = swingup_v4(
+            time_limit=0.1, random=19, angle_noise=0.0, velocity_noise=0.0
+        )
+        try:
+            self.assertFalse(env.task.uniform_start)
+            env.reset()
+            np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
+        finally:
+            env.close()
+
+    def test_wrapper_registration_and_uniform_start_override(self):
         wrapped = DMCContinuousEnv(
             domain_name="acrobot",
             task_name="swingup-v4.1",
@@ -992,7 +1064,30 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
             wrapped._env.task.energy_overshoot_margin,
             V41_ENERGY_OVERSHOOT_MARGIN,
         )
+        self.assertTrue(wrapped._env.task.uniform_start)
         self.assertIn("acrobot_energy_norm", info)
+
+        down = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v4.1",
+            seed=23,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={
+                "angle_noise": 0.0,
+                "velocity_noise": 0.0,
+                "uniform_start": False,
+            },
+        )
+        self.addCleanup(down.close)
+        obs, _ = down.reset(seed=23)
+        self.assertFalse(down._env.task.uniform_start)
+        np.testing.assert_array_equal(
+            down._env.physics.data.qpos, [np.pi, 0.0]
+        )
 
 
 @unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")

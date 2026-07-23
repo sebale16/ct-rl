@@ -88,6 +88,22 @@ class BalanceV2(acrobot.Balance):
         # base class for visualization bookkeeping instead.
         suite_base.Task.initialize_episode(self, physics)
 
+    def _initialize_uniform_episode(self, physics) -> None:
+        """Reset to uniform random joint angles with small velocity noise.
+
+        The stock-style exploring-starts reset used by v5 and the uniform
+        v4.1 arms: about one draw in five begins above the Gym height, so a
+        sparse or capture-pressured reward is observed from the start
+        distribution rather than requiring a discovery path from hanging.
+        """
+        qpos = self.random.uniform(-np.pi, np.pi, 2)
+        qvel_noise = self.random.uniform(
+            -self.velocity_noise, self.velocity_noise, physics.model.nv
+        )
+        physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        physics.named.data.qvel[:] = qvel_noise
+        suite_base.Task.initialize_episode(self, physics)
+
     def reward_terms(self, physics) -> Dict[str, float]:
         """Return the bounded reward and its reward-independent diagnostics."""
         distance = float(physics.to_target())
@@ -227,7 +243,10 @@ class BalanceV4(BalanceV3):
       exists only while balancing at the exact goal; wobbling or slowly
       spinning through the target region earns transient fractions at most.
 
-    Mechanism, resets, and observations are identical to v2/v3.
+    Mechanism and observations are identical to v2/v3.  ``uniform_start``
+    selects the reset: ``False`` (v4) starts near hanging; ``True`` (the
+    v4.1 default) starts from uniform random joint angles so the hold region
+    is present in the start distribution — see ``energy_overshoot_margin``.
     """
 
     _SPEED_BOUNDS = (0.0, 0.5)
@@ -242,6 +261,7 @@ class BalanceV4(BalanceV3):
         velocity_noise: float = 0.01,
         hold_weight: float = 0.8,
         energy_overshoot_margin: float = 1.0,
+        uniform_start: bool = False,
     ) -> None:
         super().__init__(
             random=random,
@@ -261,6 +281,7 @@ class BalanceV4(BalanceV3):
             raise ValueError(
                 "energy_overshoot_margin must be finite and positive"
             )
+        self.uniform_start = bool(uniform_start)
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
 
@@ -298,8 +319,13 @@ class BalanceV4(BalanceV3):
         self._energy_span = span
 
     def initialize_episode(self, physics) -> None:
+        # Energy calibration is pose-independent, so the reset choice below
+        # composes with it cleanly.
         self._calibrate_energy(physics)
-        super().initialize_episode(physics)
+        if self.uniform_start:
+            self._initialize_uniform_episode(physics)
+        else:
+            super().initialize_episode(physics)
 
     def reward_terms(self, physics) -> Dict[str, float]:
         """Return energy-regulated reward terms and diagnostics."""
@@ -391,6 +417,7 @@ def swingup_v4(
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
     energy_overshoot_margin: float = 1.0,
+    uniform_start: bool = False,
 ):
     """Construct the energy-regulated ``acrobot-swingup-v4`` environment."""
     physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
@@ -400,6 +427,7 @@ def swingup_v4(
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
         energy_overshoot_margin=energy_overshoot_margin,
+        uniform_start=uniform_start,
     )
     return control.Environment(
         physics,
@@ -420,14 +448,24 @@ def swingup_v41(
     angle_noise: float = 0.05,
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
+    uniform_start: bool = True,
 ):
-    """Construct ``acrobot-swingup-v4.1``: v4 with a tight overshoot margin.
+    """Construct ``acrobot-swingup-v4.1``: v4 capture pressure, uniform start.
 
     Identical to v4 for Ẽ ≤ 1.  Above the upright-rest energy the tolerance
     margin drops from 1.0 to 0.25, so passing the top with surplus energy
     (the fast swing-through the v4 pilots converged to) loses its ramp
     income and the policy is pushed to regulate Ẽ → 1, where top passes are
     slow and the hold term is enterable.
+
+    Episodes start from uniform random joint angles (``uniform_start=True``,
+    the default).  The capture-pressured reward has its maximum at the slow
+    hold on the Ẽ = 1 manifold, but from hanging that region is reachable
+    only through the overshoot the margin now penalizes — the hanging-start
+    v4.1 pilots removed their own discovery path and never captured.  The
+    uniform reset puts near-top, near-Ẽ = 1 states in the start distribution
+    so the hold is learned directly and its value propagates outward.
+    ``uniform_start=False`` restores the near-hanging reset.
     """
     physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
     task = BalanceV4(
@@ -436,6 +474,7 @@ def swingup_v41(
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
         energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
+        uniform_start=uniform_start,
     )
     return control.Environment(
         physics,
@@ -488,16 +527,10 @@ class BalanceV5(BalanceV3):
         self.uniform_start = bool(uniform_start)
 
     def initialize_episode(self, physics) -> None:
-        if not self.uniform_start:
+        if self.uniform_start:
+            self._initialize_uniform_episode(physics)
+        else:
             super().initialize_episode(physics)
-            return
-        qpos = self.random.uniform(-np.pi, np.pi, 2)
-        qvel_noise = self.random.uniform(
-            -self.velocity_noise, self.velocity_noise, physics.model.nv
-        )
-        physics.named.data.qpos[["shoulder", "elbow"]] = qpos
-        physics.named.data.qvel[:] = qvel_noise
-        suite_base.Task.initialize_episode(self, physics)
 
     def _gym_height_reached(self, physics) -> bool:
         tip_height = float(physics.named.data.site_xpos["tip", "z"])

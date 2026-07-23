@@ -101,6 +101,50 @@ bounds, and the pump trace must correlate with Ẽ under v4 but not under v3.
   is not binding, and multi-swing pumping plus capture spans a few seconds),
   plus the model-free horizon arms `mf_hz_g0998` / `mf_hz_g0999`.
 
+## v4.1: capture pressure + uniform starts
+
+The v4 pilots reach the top but pass through it with surplus energy (Ẽ > 1,
+fast), so the hold term never triggers — swing-through at rate ≈0.08–0.19,
+not capture at ≈1. v4.1 tightens the energy tolerance margin above Ẽ = 1
+from 1.0 to 0.25 (identical to v4 for Ẽ ≤ 1), so surplus-energy passes lose
+their ramp income and the policy is pushed to regulate Ẽ → 1, where top
+passes are slow and the hold is enterable. See `acrobot_reward_versions.md`
+for the exact piecewise margin.
+
+**Hanging-start v4.1 failed, and the failure is instructive.** Held-out eval
+(`results/acrobot_v41_v5_eval.csv`): CT-SAC never even reached the height
+(max tip 2.02, height and hold occupancy 0 across all seeds), strictly worse
+than v4 which at least found tip 4.0; the fixed-dt SB3 baselines reached the
+height (frac tip>3 up to 0.70) but with hold occupancy ≈0.001 — reach, not
+hold. The cause: from hanging, the only discovery path to the top runs
+through the overshoot the margin now penalizes (a first successful pump
+arrives fast, with Ẽ > 1). v4.1 removed its own ladder — the capture-pressured
+reward has its maximum on the slow Ẽ = 1 manifold, but that region is
+unreachable from hanging without the penalized overshoot. The best_model
+gate (hold occupancy ≥ 0.05) then stayed empty, so no peak checkpoint was
+even captured.
+
+**Uniform random starts fix it** (`uniform_start=True`, the v4.1 default),
+the same lever that made v5 learnable. Starting from uniform random joint
+angles puts near-top, near-Ẽ = 1 states directly in the start distribution:
+18 % of resets begin above the height, and averaged over the whole start
+stream the hold reward is ≈0.07 — already above the 0.05 gate before any
+learning. The hold is trained directly where v4.1 rewards it most, and its
+value propagates outward to lower-energy starts, so discovery no longer
+requires the penalized overshoot. Energy calibration is pose-independent and
+composes with the reset unchanged; `uniform_start=False` restores the
+near-hanging reset for from-hanging probes and A/B comparison.
+
+Because training now measures capture-from-anywhere, the true task (swing up
+from hanging) must be scored with a `uniform_start=False` eval pass, and the
+best_model gate should be loosened (the height/hold income from the start
+distribution alone can otherwise satisfy it trivially). v5's ceiling is a
+caution: uniform starts made it learnable but held-out height occupancy
+tops out ≈0.12, so uniform-start v4.1 is expected to become learnable but
+not automatically to sustain balance — v4.1's velocity-gated hold is a
+stronger balance signal than v5's raw occupancy, which is the reason to
+prefer it.
+
 ## v5: unshaped height occupancy as the control arm
 
 `acrobot-swingup-v5` (`BalanceV5`) pays reward 1 while the tip strictly

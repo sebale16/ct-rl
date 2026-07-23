@@ -86,7 +86,7 @@ Everything at or below $\tilde{E} = 1$ — the entire pumping ramp, every audit 
 
 Passing the top with surplus energy now loses the dense income, so the policy is pushed to regulate $\tilde{E} \to 1$ — where top passes are slow by the homoclinic argument and the hold term is enterable. On scripted trajectories the preference for an energy-regulated pump over an overshooting one rises from $2.31\times$ (v4) to $3.20\times$ (v4.1). Capture also fixes the evaluation instability seen in the v4 pilots: balance at the top is a fixed point, so a capturing policy has a stable deterministic readout, where the swing-through limit cycle is phase-critical and its greedy readout is bistable.
 
-The overshoot margin defaults to 1.0, which reproduces v4 exactly.
+**Uniform random starts** (`uniform_start=True`, the v4.1 default). The hanging-start v4.1 pilot removed its own discovery path: the capture-pressured reward has its maximum at the slow hold on the $\tilde{E} = 1$ manifold, but from hanging that region is reachable only through the overshoot the margin now penalizes. The result was strictly worse than v4 — CT-SAC never even reached the height on held-out starts (max tip $2.0$, height/hold occupancy $0$), and the best_model gate stayed empty. Starting from uniform random joint angles instead puts near-top, near-$\tilde{E} = 1$ states directly in the start distribution: 18 % of resets begin above the height, and averaged over the whole start stream the hold reward is $\approx 0.07$ — already above the 0.05 best_model gate before any learning — so the hold is trained directly and its value propagates outward to lower-energy starts. Energy calibration is pose-independent and composes with the reset unchanged. `uniform_start=False` restores the near-hanging reset (and the overshoot margin defaults to 1.0, so `BalanceV4(uniform_start=False)` reproduces v4 exactly).
 
 ## v5 — height occupancy (unshaped control arm)
 
@@ -108,7 +108,21 @@ Runs use 30 s episodes (a competent scripted pump first crosses at $t \approx 10
 | v2 | $0.8\cdot\operatorname{clip}(1 - d/4)$ | $0.2\cdot\text{precise}$ | dense from hang | bent-hover attractor (664–683) |
 | v3 | $0.8\cdot\text{extension}\cdot\bar{u}$ | $0.2\cdot\text{precise}$ | anti-fold pose | zeros pumping ($\approx 230$–260, tip $\le 1.87$) |
 | v4 | $0.2\cdot\text{ramp}(\tilde{E}, \bar{u})$ | $0.8\cdot\text{precise}\cdot\text{slow}$ | reward pumping | swing-up found (tip 4.0, 48 % over height) but fast swing-through; no capture |
-| v4.1 | v4 with overshoot margin $1.0 \to 0.25$ | unchanged | regulate $\tilde{E}\to 1$, make capture the attractor | queued |
-| v5 | — | $\mathbb{1}[\text{tip } z > 3]$ occupancy | unshaped control arm, uniform random starts | queued |
+| v4.1 | v4 with overshoot margin $1.0 \to 0.25$ | unchanged | regulate $\tilde{E}\to 1$, make capture the attractor | hanging start failed (no capture); uniform-start rerun queued |
+| v5 | — | $\mathbb{1}[\text{tip } z > 3]$ occupancy | unshaped control arm, uniform random starts | learnable, height occupancy $\le 0.12$ held-out; partial balance |
 
 All reward outputs are in $[0, 1]$.
+
+## Held-out evaluation (20 seeds/checkpoint)
+
+Best-checkpoint results across CT-SAC (irregular timing) and fixed-dt SB3 baselines. Height occupancy is the dt-weighted time fraction with tip $z > 3$; hold occupancy is the v4 velocity-gated exact-target term.
+
+| version | framework | max tip | frac tip $>3$ | height occ | hold occ |
+|---|---|---|---|---|---|
+| v4.1 (hanging) | CT-SAC | 2.02 | 0.00 | 0.000 | 0.000 |
+| v4.1 (hanging) | SB3 SAC | 3.53 | 0.35 | 0.016 | 0.002 |
+| v4.1 (hanging) | SB3 PPO | 3.91 | 0.70 | 0.042 | 0.001 |
+| v5 (uniform) | CT-SAC | 4.00 | 0.60 | 0.080 | — |
+| v5 (uniform) | SB3 PPO | 4.00 | 0.80 | 0.118 | — |
+
+Two readings drive the v4.1 uniform-start rerun: hanging-start v4.1 either never reaches the height (CT-SAC) or reaches without holding (SB3, hold occ $\approx 0$); and v5 shows uniform starts convert an unlearnable-from-hanging objective into a partially learnable one. v4.1's hold term is a stronger balance signal than v5's raw occupancy, so uniform-start v4.1 is the combined bet: reachability from the start distribution, plus a reward that specifically shapes the slow exact-target capture. Occupancy at $\le 0.12$ even for v5 means no arm yet sustains balance broadly; capture remains the open problem.
