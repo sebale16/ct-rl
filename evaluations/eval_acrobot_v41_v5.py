@@ -7,6 +7,12 @@ deterministic episodes on the cell's own training timing, and records per
 checkpoint the mean return, max tip height, height occupancy (dt-weighted time
 with tip_z>3), and hold occupancy (dt-weighted info['acrobot_hold']).
 
+Each checkpoint is evaluated under both start distributions, side by side:
+``uniform`` (the training reset: uniform random joint angles) and ``hanging``
+(the canonical swing-up-from-down task).  The ``start`` column distinguishes
+them, so the true from-hanging capability is reported alongside the
+capture-from-anywhere number the uniform training reset produces.
+
 No rendering -> MUJOCO_GL=disable. Writes results/acrobot_v41_v5_eval.csv.
 """
 import os
@@ -29,6 +35,15 @@ from stable_baselines3 import SAC, PPO
 N_EVAL = int(os.environ.get("N_EVAL", "20"))
 SEED0 = 20000
 OUT = os.environ.get("ACRO_EVAL_OUT", "results/acrobot_v41_v5_eval.csv")
+
+# Start distributions to evaluate, run alongside each other per checkpoint.
+# "uniform" is the training reset; "hanging" is the canonical swing-up task.
+_START_UNIFORM = {"uniform": True, "hanging": False}
+STARTS = [
+    (label, _START_UNIFORM[label])
+    for label in os.environ.get("ACRO_EVAL_STARTS", "uniform,hanging").split(",")
+    if label.strip()
+]
 
 
 def env_kwargs_for(framework, algo, env_id, mode):
@@ -123,33 +138,52 @@ def discover():
     return specs
 
 
+def _with_start(env_kwargs, uniform_start):
+    """Copy env_kwargs with the acrobot start distribution overridden."""
+    ek = dict(env_kwargs)
+    task_kwargs = dict(ek.get("task_kwargs", {}))
+    task_kwargs["uniform_start"] = uniform_start
+    ek["task_kwargs"] = task_kwargs
+    return ek
+
+
 def main():
     specs = discover()
-    print(f"discovered {len(specs)} checkpoints", flush=True)
+    print(f"discovered {len(specs)} checkpoints x {len(STARTS)} starts "
+          f"({[s for s, _ in STARTS]})", flush=True)
     rows = []
-    for i, s in enumerate(specs):
+    total = len(specs) * len(STARTS)
+    n = 0
+    for s in specs:
         ek, mk = env_kwargs_for(s["framework"], s["algo"], s["env_id"], s["mode"])
-        rets, tips, hocc, holdocc = [], [], [], []
-        for j in range(N_EVAL):
-            env = make_ct_env(env_id=s["env_id"], seed=SEED0 + j, env_kwargs=ek)
-            pol = load_policy(s["framework"], s["algo"], s["path"], env, mk)
-            r, mt, ho, hd = rollout(env, pol, SEED0 + j)
-            env.close()
-            rets.append(r); tips.append(mt); hocc.append(ho); holdocc.append(hd)
-        row = dict(
-            framework=s["framework"], algo=s["algo"], env_id=s["env_id"],
-            mode=s["mode"], seed=s["seed"], ckpt=s["kind"], n_eval=N_EVAL,
-            mean_return=round(float(np.mean(rets)), 2),
-            max_tip_height=round(float(np.max(tips)), 3),
-            mean_height_occ=round(float(np.mean(hocc)), 4),
-            mean_hold_occ=round(float(np.mean(holdocc)), 4),
-            frac_tip_gt3=round(float(np.mean([t > 3.0 for t in tips])), 3),
-        )
-        rows.append(row)
-        print(f"[{i+1}/{len(specs)}] {s['algo']}/{s['env_id'].split('-')[-1]}/"
-              f"{s['mode']}/s{s['seed']}/{s['kind']}: ret={row['mean_return']} "
-              f"tip={row['max_tip_height']} hocc={row['mean_height_occ']} "
-              f"hold={row['mean_hold_occ']}", flush=True)
+        for start_label, uniform_start in STARTS:
+            ek_start = _with_start(ek, uniform_start)
+            rets, tips, hocc, holdocc = [], [], [], []
+            for j in range(N_EVAL):
+                env = make_ct_env(
+                    env_id=s["env_id"], seed=SEED0 + j, env_kwargs=ek_start
+                )
+                pol = load_policy(s["framework"], s["algo"], s["path"], env, mk)
+                r, mt, ho, hd = rollout(env, pol, SEED0 + j)
+                env.close()
+                rets.append(r); tips.append(mt); hocc.append(ho); holdocc.append(hd)
+            row = dict(
+                framework=s["framework"], algo=s["algo"], env_id=s["env_id"],
+                mode=s["mode"], seed=s["seed"], ckpt=s["kind"],
+                start=start_label, n_eval=N_EVAL,
+                mean_return=round(float(np.mean(rets)), 2),
+                max_tip_height=round(float(np.max(tips)), 3),
+                mean_height_occ=round(float(np.mean(hocc)), 4),
+                mean_hold_occ=round(float(np.mean(holdocc)), 4),
+                frac_tip_gt3=round(float(np.mean([t > 3.0 for t in tips])), 3),
+            )
+            rows.append(row)
+            n += 1
+            print(f"[{n}/{total}] {s['algo']}/{s['env_id'].split('-')[-1]}/"
+                  f"{s['mode']}/s{s['seed']}/{s['kind']}/{start_label}: "
+                  f"ret={row['mean_return']} tip={row['max_tip_height']} "
+                  f"hocc={row['mean_height_occ']} hold={row['mean_hold_occ']}",
+                  flush=True)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))

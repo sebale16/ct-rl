@@ -115,7 +115,7 @@ All reward outputs are in $[0, 1]$.
 
 ## Held-out evaluation (20 seeds/checkpoint)
 
-Best-checkpoint results across CT-SAC (irregular timing) and fixed-dt SB3 baselines. Height occupancy is the dt-weighted time fraction with tip $z > 3$; hold occupancy is the v4 velocity-gated exact-target term.
+Each checkpoint is evaluated from both start distributions side by side (`evaluations/eval_acrobot_v41_v5.py`, `start` column): `uniform` — the training reset — and `hanging`, the canonical swing-up-from-down task. The hanging column is the true-task capability; the numbers below are the `uniform` pass. Height occupancy is the dt-weighted time fraction with tip $z > 3$; hold occupancy is the v4 velocity-gated exact-target term.
 
 | version | framework | max tip | frac tip $>3$ | height occ | hold occ |
 |---|---|---|---|---|---|
