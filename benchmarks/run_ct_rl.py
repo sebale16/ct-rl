@@ -177,6 +177,7 @@ def run_algorithm(
     run_id: str | None = None,
     continuation_rng_seed: int | None = None,
     init_weights: str | None = None,
+    best_model_gate: str | None = None,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -424,6 +425,25 @@ def run_algorithm(
     eval_freq = log_kwargs.get("eval_freq", 10000)
     log_interval = log_kwargs.get("interval", 1000)
 
+    # Optional best-model gate: "occupancy_key:min_occupancy:min_reward"
+    # (e.g. "acrobot_hold:0.05:400") -> best_model only updates on evals whose
+    # dt-weighted mean info[key] and mean reward both clear the floors.
+    gate_key, gate_occ, gate_rew = None, 0.0, float("-inf")
+    if best_model_gate:
+        parts = best_model_gate.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                "--best_model_gate must be 'key:min_occupancy:min_reward'"
+            )
+        gate_key = parts[0].strip()
+        gate_occ = float(parts[1])
+        gate_rew = float(parts[2])
+        print(
+            f"[gate] best_model gated on {gate_key}>={gate_occ} and "
+            f"eval_reward>={gate_rew}",
+            flush=True,
+        )
+
     eval_callback = EvalCallback(
         eval_env=eval_env,
         eval_freq=max(eval_freq // n_envs, 1),
@@ -433,6 +453,9 @@ def run_algorithm(
         best_model_save_path=str(save_dir / "best_model"),
         log_path=str(log_dir / "eval"),
         verbose=1,
+        gate_occupancy_key=gate_key,
+        gate_min_occupancy=gate_occ,
+        gate_min_reward=gate_rew,
     )
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq,
@@ -696,6 +719,14 @@ def parse_args():
         "policy continues under this run's hyperparameters. Not for --resume.",
     )
     parser.add_argument(
+        "--best_model_gate",
+        type=str,
+        default=None,
+        help="Gate best_model saving on 'key:min_occupancy:min_reward' "
+        "(e.g. 'acrobot_hold:0.05:400'): best_model only updates on evals whose "
+        "dt-weighted mean info[key] and mean reward both clear the floors.",
+    )
+    parser.add_argument(
         "--continuation_rng_seed",
         type=int,
         default=None,
@@ -741,6 +772,7 @@ def main():
                 run_id=args.run_id,
                 continuation_rng_seed=args.continuation_rng_seed,
                 init_weights=args.init_weights,
+                best_model_gate=args.best_model_gate,
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:

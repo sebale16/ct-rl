@@ -57,7 +57,8 @@ def evaluate_policy_per_episode(
     n_eval_episodes: int = 10,
     deterministic: bool = True,
     reset_seed: Optional[int] = None,
-) -> Tuple[List[float], List[int]]:
+    occupancy_key: Optional[str] = None,
+):
     """
     Episodic eval for continuous-time model.
     The implementation is aware of whether the env is a Monitor wrapper:
@@ -67,6 +68,11 @@ def evaluate_policy_per_episode(
     Returns:
       episode_returns: List[float] length n_eval_episodes
       episode_lengths: List[int]   length n_eval_episodes
+
+    If ``occupancy_key`` is given, a per-step scalar is read from
+    ``info[occupancy_key]`` each step and its dt-weighted mean over each episode
+    is returned as a third list ``episode_occupancies`` (used e.g. for the
+    acrobot hold-occupancy best-model gate).
     """
     is_vec_env = _is_vec_env(env)
     n_envs = int(getattr(env, "num_envs", 1)) if is_vec_env else 1
@@ -80,9 +86,12 @@ def evaluate_policy_per_episode(
 
     running_returns = np.zeros((n_envs,), dtype=np.float64)
     running_lengths = np.zeros((n_envs,), dtype=np.int64)
+    running_occ_w = np.zeros((n_envs,), dtype=np.float64)  # dt-weighted occupancy sum
+    running_dt = np.zeros((n_envs,), dtype=np.float64)
 
     episode_returns: List[float] = []
     episode_lengths: List[int] = []
+    episode_occupancies: List[float] = []
 
     while len(episode_returns) < n_eval_episodes:
         obs_batch = obs if is_vec_env else obs[None, ...]
@@ -113,6 +122,26 @@ def evaluate_policy_per_episode(
         running_returns += rew_arr
         running_lengths += 1
 
+        if occupancy_key is not None:
+            dt_arr = (
+                np.asarray(next_t, dtype=np.float64).reshape(-1)
+                - np.asarray(t, dtype=np.float64).reshape(-1)
+            )
+            if dt_arr.size != n_envs:
+                dt_arr = np.full((n_envs,), float(dt_arr.reshape(-1)[0]))
+            if is_vec_env:
+                occ_infos = infos if isinstance(infos, (list, tuple)) else [infos] * n_envs
+                occ_arr = np.asarray(
+                    [float(occ_infos[i].get(occupancy_key, 0.0)) for i in range(n_envs)],
+                    dtype=np.float64,
+                )
+            else:
+                occ_arr = np.asarray(
+                    [float(infos.get(occupancy_key, 0.0))], dtype=np.float64
+                )
+            running_occ_w += occ_arr * dt_arr
+            running_dt += dt_arr
+
         if is_vec_env:
             info_list = infos if isinstance(infos, (list, tuple)) else [infos] * n_envs
 
@@ -129,9 +158,16 @@ def evaluate_policy_per_episode(
 
                 episode_returns.append(ep_r)
                 episode_lengths.append(ep_l)
+                if occupancy_key is not None:
+                    episode_occupancies.append(
+                        float(running_occ_w[i] / running_dt[i])
+                        if running_dt[i] > 0 else 0.0
+                    )
 
                 running_returns[i] = 0.0
                 running_lengths[i] = 0
+                running_occ_w[i] = 0.0
+                running_dt[i] = 0.0
 
                 if len(episode_returns) >= n_eval_episodes:
                     break
@@ -153,9 +189,16 @@ def evaluate_policy_per_episode(
 
                 episode_returns.append(ep_r)
                 episode_lengths.append(ep_l)
+                if occupancy_key is not None:
+                    episode_occupancies.append(
+                        float(running_occ_w[0] / running_dt[0])
+                        if running_dt[0] > 0 else 0.0
+                    )
 
                 running_returns[0] = 0.0
                 running_lengths[0] = 0
+                running_occ_w[0] = 0.0
+                running_dt[0] = 0.0
 
                 # single env must reset explicitly
                 obs, _ = env.reset()
@@ -163,6 +206,8 @@ def evaluate_policy_per_episode(
             else:
                 obs = np.asarray(next_obs, dtype=np.float32)
 
+    if occupancy_key is not None:
+        return episode_returns, episode_lengths, episode_occupancies
     return episode_returns, episode_lengths
 
 

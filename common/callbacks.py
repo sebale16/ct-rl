@@ -421,6 +421,9 @@ class EvalCallback(EventCallback):
         verbose: int = 1,
         callback_on_new_best: Optional[BaseCallback] = None,
         callback_after_eval: Optional[BaseCallback] = None,
+        gate_occupancy_key: Optional[str] = None,
+        gate_min_occupancy: float = 0.0,
+        gate_min_reward: float = -np.inf,
     ):
         super().__init__(callback=callback_after_eval, verbose=verbose)
         self.eval_env = eval_env
@@ -428,6 +431,15 @@ class EvalCallback(EventCallback):
         self.n_eval_episodes = int(n_eval_episodes)
         self.deterministic = bool(deterministic)
         self.reset_seed = None if reset_seed is None else int(reset_seed)
+
+        # Optional best-model gate: only update best_model on an eval whose mean
+        # reward exceeds ``gate_min_reward`` AND whose dt-weighted mean of
+        # ``info[gate_occupancy_key]`` exceeds ``gate_min_occupancy``.  Used to
+        # require a genuine acrobot hold-capture (info['acrobot_hold']) rather
+        # than a high-reward swing-through.  No gate when key is None.
+        self.gate_occupancy_key = gate_occupancy_key
+        self.gate_min_occupancy = float(gate_min_occupancy)
+        self.gate_min_reward = float(gate_min_reward)
 
         self.log_path = log_path
         self.best_model_save_path = best_model_save_path
@@ -483,13 +495,20 @@ class EvalCallback(EventCallback):
 
         self._last_eval_timesteps = self.num_timesteps
 
-        rewards, lengths = evaluate_policy_per_episode(
+        eval_out = evaluate_policy_per_episode(
             model=self.algorithm.model,
             env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
             deterministic=self.deterministic,
             reset_seed=self.reset_seed,
+            occupancy_key=self.gate_occupancy_key,
         )
+        if self.gate_occupancy_key is not None:
+            rewards, lengths, occupancies = eval_out
+            mean_occ = float(np.mean(occupancies)) if len(occupancies) else 0.0
+        else:
+            rewards, lengths = eval_out
+            mean_occ = None
 
         rewards = np.asarray(rewards, dtype=float)
         lengths = np.asarray(lengths, dtype=int)
@@ -501,11 +520,18 @@ class EvalCallback(EventCallback):
         self.last_mean_reward = mean_reward
         self._save_evals(rewards, lengths)
         self._log_eval(mean_reward, std_reward, mean_len)
+        if mean_occ is not None:
+            self.logger.record("eval/hold_occupancy", float(mean_occ))
 
         continue_training = True
 
-        # New best model save
-        if mean_reward > self.best_mean_reward:
+        # New best model save (optionally gated on occupancy + reward floor)
+        gate_ok = True
+        if self.gate_occupancy_key is not None:
+            gate_ok = (mean_reward >= self.gate_min_reward) and (
+                mean_occ >= self.gate_min_occupancy
+            )
+        if gate_ok and mean_reward > self.best_mean_reward:
             self.best_mean_reward = mean_reward
             if self.best_model_save_path is not None:
                 path = os.path.join(self.best_model_save_path, "best_model.pth")
