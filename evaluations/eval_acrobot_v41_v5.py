@@ -108,25 +108,24 @@ def discover():
     specs = []  # dict(framework, algo, env_id, mode, seed, kind, path)
     # CT-SAC runs: (env_id, mode, run_tag)
     ct = [
-        ("acrobot-swingup-v4.1", "fork_v41", "acrov41_fork_v1"),
-        ("acrobot-swingup-v4.1", "final_mf", "acrov41_mf_v1"),
-        ("acrobot-swingup-v5", "mf_hz_g0999", "acrov5_rs_v1"),
-        ("acrobot-swingup-v5", "mf_hz_g09995", "acrov5_rs_v1"),
+        ("acrobot-swingup-v4.1", "final_mf", "acrov41_mf_v2"),
+        ("acrobot-swingup-v5", "mf_hz_g0999", "acrov5_v2"),
+        ("acrobot-swingup-v5", "mf_hz_g09995", "acrov5_v2"),
     ]
     for env_id, mode, tag in ct:
         for d in sorted(glob.glob(f"saved_models/ct_sac/{env_id}/{mode}/seed_*/*{tag}")):
             seed = int(d.split("/seed_")[1].split("/")[0])
             for kind, p in [("final", f"{d}/final_model.pth"),
-                            ("best", f"{d}/best_model/best_model.pth")]:
+                            ("best", f"{d}/best_model/best_model.pth"),
+                            ("best_hanging", f"{d}/best_model_hanging/best_model.pth")]:
                 if os.path.isfile(p):
                     specs.append(dict(framework="ct", algo="ct_sac", env_id=env_id,
                                       mode=mode, seed=seed, kind=kind, path=p))
-    # SB3 runs: both v4.1 (any dir) and v5 (desc 'rs' only, to skip stale run)
-    for algo in ("sac", "ppo"):
-        for env_id, dirglob in [("acrobot-swingup-v4.1", "*"),
-                                ("acrobot-swingup-v5", "*rs*")]:
+    # Discrete-time SB3 PPO baseline (--desc v2 runs)
+    for algo in ("ppo",):
+        for env_id in ("acrobot-swingup-v4.1", "acrobot-swingup-v5"):
             for d in sorted(glob.glob(
-                    f"saved_models/{algo}/{env_id}/final_mf/seed_*/{dirglob}")):
+                    f"saved_models/{algo}/{env_id}/final_mf/seed_*/*v2*")):
                 if not os.path.isdir(d):
                     continue
                 seed = int(d.split("/seed_")[1].split("/")[0])
