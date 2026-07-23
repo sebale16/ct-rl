@@ -181,6 +181,33 @@ class TestCallbacks(unittest.TestCase):
         self.assertTrue(algo.logger.record.called)
         algo.logger.record.assert_any_call("eval/mean_reward", 100.0)
 
+    @patch("common.callbacks.evaluate_policy_per_episode")
+    def test_eval_callback_log_prefix_namespaces_metrics(self, mock_evaluate):
+        algo = MockAlgorithm()
+        mock_evaluate.return_value = ([100.0], [10])
+
+        cb = EvalCallback(
+            eval_env=MagicMock(),
+            eval_freq=10,
+            n_eval_episodes=1,
+            best_model_save_path=self.test_dir,
+            gate_occupancy_key="acrobot_hold",
+            log_prefix="eval_hanging",
+        )
+        cb.init_callback(algo)
+
+        mock_evaluate.return_value = ([100.0], [10], [0.3])
+        algo.num_timesteps = 10
+        cb.on_step()
+
+        recorded = {c.args[0] for c in algo.logger.record.call_args_list}
+        self.assertIn("eval_hanging/mean_reward", recorded)
+        self.assertIn("eval_hanging/hold_occupancy", recorded)
+        # The default namespace must not leak when a prefix is set, and the
+        # shared time key stays un-prefixed.
+        self.assertNotIn("eval/mean_reward", recorded)
+        self.assertIn("time/total_timesteps", recorded)
+
     def test_stop_on_reward_threshold(self):
         # This callback needs a parent EvalCallback
         parent = MagicMock()

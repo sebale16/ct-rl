@@ -178,6 +178,7 @@ def run_algorithm(
     continuation_rng_seed: int | None = None,
     init_weights: str | None = None,
     best_model_gate: str | None = None,
+    eval_hanging: bool = False,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -531,6 +532,49 @@ def run_algorithm(
 
     callbacks = [checkpoint_callback, eval_callback]
 
+    # Optional second eval track from the canonical hanging start, run
+    # alongside the (uniform-start) primary eval.  For acrobot v4.1/v5 the
+    # training resets are uniform random, so the primary eval and its
+    # best_model measure capture-from-anywhere; this hanging eval reports the
+    # true swing-up-from-down task and saves its own gated best_model_hanging/,
+    # without disturbing the primary best_model.
+    if eval_hanging:
+        hanging_eval_env_kwargs = dict(eval_env_kwargs)
+        hanging_task_kwargs = dict(hanging_eval_env_kwargs.get("task_kwargs", {}))
+        hanging_task_kwargs["uniform_start"] = False
+        hanging_eval_env_kwargs["task_kwargs"] = hanging_task_kwargs
+        make_hanging_env_fn = partial(
+            make_ct_env,
+            env_id=env_id,
+            env_kwargs=hanging_eval_env_kwargs,
+            npz_path=EVAL_NPZ,
+        )
+        hanging_eval_env = (
+            VecContinuousEnv(
+                [
+                    lambda i=i: make_hanging_env_fn(seed=seed + 2000 + i)
+                    for i in range(eval_n_envs)
+                ]
+            )
+            if eval_n_envs > 1
+            else make_hanging_env_fn(seed=seed + 2000)
+        )
+        hanging_eval_callback = EvalCallback(
+            eval_env=hanging_eval_env,
+            eval_freq=max(eval_freq // n_envs, 1),
+            n_eval_episodes=n_eval_episodes,
+            deterministic=True,
+            reset_seed=seed + 2000,
+            best_model_save_path=str(save_dir / "best_model_hanging"),
+            log_path=str(log_dir / "eval_hanging"),
+            verbose=1,
+            gate_occupancy_key=gate_key,
+            gate_min_occupancy=gate_occ,
+            gate_min_reward=gate_rew,
+            log_prefix="eval_hanging",
+        )
+        callbacks.append(hanging_eval_callback)
+
     # Wall-clock checkpoint: near the time budget, write a resumable checkpoint
     # and stop cleanly so the resubmission chain can continue.
     wall_cb = None
@@ -634,6 +678,13 @@ def parse_args():
         type=str,
         default=None,
         help="Evaluation mode key for EvalCallback. Defaults to --mode if not set.",
+    )
+    parser.add_argument(
+        "--eval_hanging",
+        action="store_true",
+        help="Add a second eval track from the canonical hanging start "
+        "(saves best_model_hanging/, logs eval_hanging/*) alongside the "
+        "uniform-start primary eval. For acrobot v4.1/v5.",
     )
     parser.add_argument(
         "--seed",
@@ -773,6 +824,7 @@ def main():
                 continuation_rng_seed=args.continuation_rng_seed,
                 init_weights=args.init_weights,
                 best_model_gate=args.best_model_gate,
+                eval_hanging=args.eval_hanging,
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:

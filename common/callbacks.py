@@ -424,10 +424,16 @@ class EvalCallback(EventCallback):
         gate_occupancy_key: Optional[str] = None,
         gate_min_occupancy: float = 0.0,
         gate_min_reward: float = -np.inf,
+        log_prefix: str = "eval",
     ):
         super().__init__(callback=callback_after_eval, verbose=verbose)
         self.eval_env = eval_env
         self.eval_freq = int(eval_freq)
+        # Namespace for the logged metric keys ("<log_prefix>/mean_reward", ...).
+        # Distinct prefixes let two EvalCallbacks (e.g. a uniform-start and a
+        # hanging-start eval) run in one training loop without clobbering each
+        # other's curves.
+        self.log_prefix = str(log_prefix)
         self.n_eval_episodes = int(n_eval_episodes)
         self.deterministic = bool(deterministic)
         self.reset_seed = None if reset_seed is None else int(reset_seed)
@@ -465,9 +471,9 @@ class EvalCallback(EventCallback):
             self.callback_on_new_best.init_callback(self.algorithm)
 
     def _log_eval(self, mean_reward: float, std_reward: float, mean_len: float) -> None:
-        self.logger.record("eval/mean_reward", float(mean_reward))
-        self.logger.record("eval/std_reward", float(std_reward))
-        self.logger.record("eval/mean_ep_length", float(mean_len))
+        self.logger.record(f"{self.log_prefix}/mean_reward", float(mean_reward))
+        self.logger.record(f"{self.log_prefix}/std_reward", float(std_reward))
+        self.logger.record(f"{self.log_prefix}/mean_ep_length", float(mean_len))
         self.logger.record(
             "time/total_timesteps", int(self.num_timesteps), exclude="tensorboard"
         )
@@ -521,7 +527,7 @@ class EvalCallback(EventCallback):
         self._save_evals(rewards, lengths)
         self._log_eval(mean_reward, std_reward, mean_len)
         if mean_occ is not None:
-            self.logger.record("eval/hold_occupancy", float(mean_occ))
+            self.logger.record(f"{self.log_prefix}/hold_occupancy", float(mean_occ))
 
         continue_training = True
 

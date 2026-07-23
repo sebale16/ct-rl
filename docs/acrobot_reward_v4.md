@@ -136,14 +136,26 @@ composes with the reset unchanged; `uniform_start=False` restores the
 near-hanging reset for from-hanging probes and A/B comparison.
 
 Because training now measures capture-from-anywhere, the true task (swing up
-from hanging) must be scored with a `uniform_start=False` eval pass, and the
-best_model gate should be loosened (the height/hold income from the start
-distribution alone can otherwise satisfy it trivially). v5's ceiling is a
-caution: uniform starts made it learnable but held-out height occupancy
-tops out ≈0.12, so uniform-start v4.1 is expected to become learnable but
-not automatically to sustain balance — v4.1's velocity-gated hold is a
-stronger balance signal than v5's raw occupancy, which is the reason to
-prefer it.
+from hanging) is scored two ways. Post-training, `evaluations/eval_acrobot_v41_v5.py`
+evaluates each checkpoint from both starts (`start` column). During training,
+`run_ct_rl.py --eval_hanging` adds a second eval track from the hanging start
+alongside the uniform-start primary: it logs `eval_hanging/*` and saves its
+own gated `best_model_hanging/`, without disturbing the primary `best_model/`.
+Because that hanging track resets every eval episode from down, its hold
+occupancy only rises on genuine from-hanging capture — the start-distribution
+income that trivially satisfies the uniform gate is absent — so
+`best_model_hanging/` is the honest true-task selection (it will simply stay
+empty if no from-hanging capture emerges, which is itself the answer). v5's
+ceiling is a caution: uniform starts made it learnable but held-out height
+occupancy tops out ≈0.12, so uniform-start v4.1 is expected to become
+learnable but not automatically to sustain balance — v4.1's velocity-gated
+hold is a stronger balance signal than v5's raw occupancy, which is the reason
+to prefer it.
+
+(On a resumed run the hanging track's best-so-far is not restored from the
+checkpoint the way the primary eval's is, so `best_model_hanging/` may be
+re-selected from a fresh baseline after a resubmission; the primary
+`best_model/` keeps full resume fidelity.)
 
 ## v5: unshaped height occupancy as the control arm
 
