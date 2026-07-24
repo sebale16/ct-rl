@@ -5,7 +5,15 @@ Discovers the run checkpoints under saved_models, loads each policy (CT
 ActorQCriticModel from .pth, or SB3 SAC/PPO from .zip), rolls N_EVAL held-out
 deterministic episodes on the cell's own training timing, and records per
 checkpoint the mean return, max tip height, height occupancy (dt-weighted time
-with tip_z>3), and hold occupancy (dt-weighted info['acrobot_hold']).
+with tip_z>3), hold occupancy (dt-weighted info['acrobot_hold']), strict-capture
+success rate, and mean maximum strict-capture residence duration.
+
+The strict metrics reuse the training callbacks' shared physical-time tracker:
+the tip must remain within distance 0.2 with joint-speed norm below 0.2 for at
+least one second.  An interval counts only when both observed endpoints satisfy
+the predicate, and its duration comes from info['dt_used'].  Tasks without the
+shared strict predicate (for example the legacy v5 override) emit ``nan`` for
+the strict columns rather than reporting a false failure.
 
 Each checkpoint is evaluated under both start distributions, side by side:
 ``uniform`` (the training reset: uniform random joint angles) and ``hanging``
@@ -21,6 +29,9 @@ os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import glob
 import csv
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 import torch as th
 
@@ -28,6 +39,13 @@ from benchmarks.run_ct_rl import make_ct_env
 from common.utils import (
     load_ct_hyperparams_from_table,
     load_sb3_hyperparams_from_table,
+)
+from evaluations.sustained_capture import (
+    CaptureEpisodeResult,
+    SustainedCaptureSpec,
+    SustainedCaptureTracker,
+    capture_selection_rank,
+    strict_capture_spec_for,
 )
 from models import ActorQCriticModel
 from stable_baselines3 import SAC, PPO
@@ -44,6 +62,17 @@ STARTS = [
     for label in os.environ.get("ACRO_EVAL_STARTS", "uniform,hanging").split(",")
     if label.strip()
 ]
+
+
+@dataclass(frozen=True)
+class AcrobotRolloutMetrics:
+    """Post-training metrics for one deterministic held-out episode."""
+
+    episode_return: float
+    max_tip_height: float
+    height_occupancy: float
+    hold_occupancy: float
+    capture_result: Optional[CaptureEpisodeResult]
 
 
 def env_kwargs_for(framework, algo, env_id, mode):
@@ -85,13 +114,27 @@ def act(pol, obs):
     return a
 
 
-def rollout(env, pol, seed):
-    obs, _ = env.reset(seed=seed)
+def rollout(
+    env,
+    pol,
+    seed,
+    capture_spec: Optional[SustainedCaptureSpec] = None,
+) -> AcrobotRolloutMetrics:
+    obs, reset_info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
     ret, maxtip, occ_h, occ_hold, T, done = 0.0, -1e9, 0.0, 0.0, 0.0, False
+    tracker = (
+        SustainedCaptureTracker(1, capture_spec, [reset_info])
+        if capture_spec is not None
+        else None
+    )
+    capture_result = None
     while not done:
         a = act(pol, obs)
         _, t, _, r, nobs, nt, term, trunc, info = env.step_dt(a)
+        done = bool(term or trunc)
+        if tracker is not None:
+            capture_result = tracker.update_slot(0, info, done=done)
         dt = float(nt) - float(t)
         T += dt
         tip = float(info.get("acrobot_tip_height", -1e9))
@@ -100,8 +143,15 @@ def rollout(env, pol, seed):
         occ_hold += dt * float(info.get("acrobot_hold", 0.0))
         ret += float(r)
         obs = np.asarray(nobs, dtype=np.float32)
-        done = bool(term or trunc)
-    return ret, maxtip, occ_h / max(T, 1e-9), occ_hold / max(T, 1e-9)
+    if tracker is not None and capture_result is None:
+        raise RuntimeError("strict-capture rollout ended without a terminal result")
+    return AcrobotRolloutMetrics(
+        episode_return=ret,
+        max_tip_height=maxtip,
+        height_occupancy=occ_h / max(T, 1e-9),
+        hold_occupancy=occ_hold / max(T, 1e-9),
+        capture_result=capture_result,
+    )
 
 
 def discover():
@@ -163,17 +213,49 @@ def main():
     n = 0
     for s in specs:
         ek, mk = env_kwargs_for(s["framework"], s["algo"], s["env_id"], s["mode"])
+        capture_spec = strict_capture_spec_for(
+            algorithm=s["algo"], env_id=s["env_id"]
+        )
         for start_label, uniform_start in STARTS:
             ek_start = _with_start(ek, uniform_start)
             rets, tips, hocc, holdocc = [], [], [], []
+            capture_successes, capture_durations = [], []
             for j in range(N_EVAL):
                 env = make_ct_env(
                     env_id=s["env_id"], seed=SEED0 + j, env_kwargs=ek_start
                 )
-                pol = load_policy(s["framework"], s["algo"], s["path"], env, mk)
-                r, mt, ho, hd = rollout(env, pol, SEED0 + j)
-                env.close()
-                rets.append(r); tips.append(mt); hocc.append(ho); holdocc.append(hd)
+                try:
+                    pol = load_policy(
+                        s["framework"], s["algo"], s["path"], env, mk
+                    )
+                    metrics = rollout(
+                        env,
+                        pol,
+                        SEED0 + j,
+                        capture_spec=capture_spec,
+                    )
+                finally:
+                    env.close()
+                rets.append(metrics.episode_return)
+                tips.append(metrics.max_tip_height)
+                hocc.append(metrics.height_occupancy)
+                holdocc.append(metrics.hold_occupancy)
+                if capture_spec is not None:
+                    if metrics.capture_result is None:
+                        raise RuntimeError(
+                            "strict-capture rollout returned no episode result"
+                        )
+                    capture_successes.append(metrics.capture_result.success)
+                    capture_durations.append(
+                        metrics.capture_result.max_duration_seconds
+                    )
+            if capture_spec is not None:
+                capture_rate, mean_capture_duration = capture_selection_rank(
+                    capture_successes, capture_durations
+                )
+            else:
+                capture_rate = float("nan")
+                mean_capture_duration = float("nan")
             row = dict(
                 framework=s["framework"], algo=s["algo"], env_id=s["env_id"],
                 mode=s["mode"], seed=s["seed"], ckpt=s["kind"],
@@ -183,13 +265,19 @@ def main():
                 mean_height_occ=round(float(np.mean(hocc)), 4),
                 mean_hold_occ=round(float(np.mean(holdocc)), 4),
                 frac_tip_gt3=round(float(np.mean([t > 3.0 for t in tips])), 3),
+                strict_capture_success_rate=round(float(capture_rate), 6),
+                strict_capture_mean_max_duration=round(
+                    float(mean_capture_duration), 6
+                ),
             )
             rows.append(row)
             n += 1
             print(f"[{n}/{total}] {s['algo']}/{s['env_id'].split('-')[-1]}/"
                   f"{s['mode']}/s{s['seed']}/{s['kind']}/{start_label}: "
                   f"ret={row['mean_return']} tip={row['max_tip_height']} "
-                  f"hocc={row['mean_height_occ']} hold={row['mean_hold_occ']}",
+                  f"hocc={row['mean_height_occ']} hold={row['mean_hold_occ']} "
+                  f"strict={row['strict_capture_success_rate']} "
+                  f"maxdur={row['strict_capture_mean_max_duration']}s",
                   flush=True)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", newline="") as f:

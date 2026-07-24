@@ -146,7 +146,11 @@ horizon under the configured sampler.
 
 Because training now measures capture-from-anywhere, the true task (swing up
 from hanging) is scored two ways. Post-training, `evaluations/eval_acrobot_v41_v5.py`
-evaluates each checkpoint from both starts (`start` column). During training,
+evaluates each checkpoint from both starts (`start` column). Its
+`strict_capture_success_rate` and `strict_capture_mean_max_duration` columns
+reuse the same one-second physical-time tracker as checkpoint selection;
+`mean_hold_occ` remains a separate smooth reward diagnostic, not a formal
+capture count. During training,
 both `run_ct_rl.py --eval_hanging` and
 `run_discrete_rl.py --eval_hanging` add a second eval track from the hanging
 start alongside the uniform-start primary. Each logs `eval_hanging/*` and

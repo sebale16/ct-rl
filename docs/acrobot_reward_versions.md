@@ -148,6 +148,10 @@ All reward outputs are in $[0, 1]$.
 ## Held-out evaluation (20 seeds/checkpoint)
 
 Each checkpoint is evaluated from both start distributions side by side (`evaluations/eval_acrobot_v41_v5.py`, `start` column): `uniform` — the training reset — and `hanging`, the canonical swing-up-from-down task. The hanging column is the true-task capability; the numbers below are the `uniform` pass. Height occupancy is the dt-weighted time fraction with tip $z > 3$; hold occupancy is the v4 velocity-gated exact-target term.
+The evaluator also exports `strict_capture_success_rate` and
+`strict_capture_mean_max_duration`, calculated by the same consecutive-endpoint,
+`dt_used`-based one-second tracker used during training. These formal capture
+columns are distinct from the smooth `mean_hold_occ` reward diagnostic.
 
 | version | framework | max tip | frac tip $>3$ | height occ | hold occ |
 |---|---|---|---|---|---|
