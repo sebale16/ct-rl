@@ -90,6 +90,7 @@ def make_env(env_id, monitor_root, seed, env_meta=None, dataset_path=None):
             "episode_duration",  # T
             "time_sampling_kwargs",
             "return_reward_increment",
+            "task_kwargs",
         ]:
             if k in env_meta and env_meta[k] is not None:
                 dmc_kwargs[k] = env_meta[k]
@@ -125,6 +126,7 @@ def run_sb3_benchmark(
     increment_modeling: bool,
     n_eval_episodes: int = 10,
     eval_range: str | None = None,
+    eval_hanging: bool = False,
 ):
     """
     Runs a single Stable-Baselines3 benchmark experiment.
@@ -146,6 +148,13 @@ def run_sb3_benchmark(
     else:
         # If eval_mode is not specified, use the same env settings as training
         eval_env_meta = env_meta.copy()
+
+    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    if eval_hanging and capture_spec is None:
+        raise ValueError(
+            "--eval_hanging is supported only for PPO on "
+            "acrobot-swingup-v4.1"
+        )
 
     if env_id.startswith("trading") and eval_range is not None:
         eval_env_meta = eval_env_meta.copy()
@@ -197,6 +206,30 @@ def run_sb3_benchmark(
         ),
     )
 
+    # Optional true-task evaluation from the canonical hanging pose. Keep a
+    # separate metadata copy so the primary uniform-start evaluation remains
+    # unchanged, and use independent reset streams and output directories.
+    hanging_eval_env = None
+    if eval_hanging:
+        hanging_eval_meta = dict(eval_env_meta)
+        hanging_task_kwargs = dict(
+            hanging_eval_meta.get("task_kwargs") or {}
+        )
+        hanging_task_kwargs["uniform_start"] = False
+        hanging_eval_meta["task_kwargs"] = hanging_task_kwargs
+        hanging_eval_env = make_vec_env(
+            make_env,
+            n_envs=eval_n_envs,
+            seed=seed + 2000,
+            env_kwargs=dict(
+                env_id=env_id,
+                monitor_root=log_dir / "eval_hanging",
+                seed=seed + 2000,
+                env_meta=hanging_eval_meta,
+                dataset_path=EVAL_NPZ,
+            ),
+        )
+
     # If increment modeling, adjust algo parameters gamma
     dt = env_meta.get("dt")
     if dt is not None and "gamma" in algo_kwargs:
@@ -236,7 +269,6 @@ def run_sb3_benchmark(
     eval_freq = log_kwargs.get("eval_freq", 10000)
     step_log_interval = log_kwargs.get("interval", 10000)
 
-    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
     if capture_spec is not None:
         print(
             "[selection] best_model uses strict capture: distance<0.2, "
@@ -268,12 +300,35 @@ def run_sb3_benchmark(
         name_prefix=f"{algo}_{env_id}",
     )
 
+    callbacks = [checkpoint_callback, eval_callback]
+    if hanging_eval_env is not None:
+        assert capture_spec is not None
+        print(
+            "[selection] best_model_hanging uses the same strict capture "
+            "metric from the canonical hanging start",
+            flush=True,
+        )
+        hanging_eval_callback = SustainedCaptureEvalCallback(
+            hanging_eval_env,
+            capture_spec=capture_spec,
+            reset_seed=seed + 2000,
+            n_eval_episodes=n_eval_episodes,
+            best_model_save_path=str(save_dir / "best_model_hanging"),
+            log_path=str(log_dir / "eval_hanging"),
+            eval_freq=max(eval_freq // n_envs, 1),
+            deterministic=True,
+            render=False,
+            log_prefix="eval_hanging",
+        )
+        callbacks.append(hanging_eval_callback)
+
     # Timestep-based logging callback
     log_callback = LogEveryNTimesteps(n_steps=max(step_log_interval // n_envs, 1))
     # progress_bar_callback = ProgressBarCallback()
 
     # Combine callbacks
-    callback = CallbackList([checkpoint_callback, eval_callback, log_callback])
+    callbacks.append(log_callback)
+    callback = CallbackList(callbacks)
 
     # Train
     print(
@@ -286,14 +341,20 @@ def run_sb3_benchmark(
     print(f"\npolicy_kwargs={policy_kwargs}\n")
     print(f"env_meta={env_meta}\n")
     print(f"eval_env_meta={eval_env_meta}\n")
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=callback,
-        tb_log_name=f"{algo}_{env_id}",
-        log_interval=10**9,  # Disable SB3's episode-based logging
-    )
-    model.save(str(save_dir / "final_model"))
-    print("Training finished.")
+    try:
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            tb_log_name=f"{algo}_{env_id}",
+            log_interval=10**9,  # Disable SB3's episode-based logging
+        )
+        model.save(str(save_dir / "final_model"))
+        print("Training finished.")
+    finally:
+        if hanging_eval_env is not None:
+            hanging_eval_env.close()
+        eval_env.close()
+        train_env.close()
 
 
 def parse_args():
@@ -321,6 +382,13 @@ def parse_args():
         type=str,
         default=None,
         help="Evaluation mode key for EvalCallback. Defaults to --mode if not set.",
+    )
+    parser.add_argument(
+        "--eval_hanging",
+        action="store_true",
+        help="Add a second strict-capture evaluation track from the canonical "
+        "hanging start for PPO on acrobot-swingup-v4.1 "
+        "(saves best_model_hanging/ and logs eval_hanging/*).",
     )
     parser.add_argument(
         "--seed",
@@ -401,6 +469,7 @@ def main():
                 increment_modeling=args.increment_modeling,
                 n_eval_episodes=args.n_eval_episodes,
                 eval_range=eval_range,
+                eval_hanging=args.eval_hanging,
             )
         except (FileNotFoundError, KeyError) as e:
             print(f"\nCould not run {algo_name} due to a configuration error: {e}\n")

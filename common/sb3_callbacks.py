@@ -166,11 +166,15 @@ class SustainedCaptureEvalCallback(EvalCallback):
         *,
         capture_spec: SustainedCaptureSpec,
         reset_seed: Optional[int] = None,
+        log_prefix: str = "eval",
         **kwargs: Any,
     ) -> None:
         super().__init__(eval_env, **kwargs)
         self.capture_spec = capture_spec
         self.reset_seed = None if reset_seed is None else int(reset_seed)
+        self.log_prefix = str(log_prefix).strip("/")
+        if not self.log_prefix:
+            raise ValueError("log_prefix must be non-empty")
         self.best_capture_success_rate = -np.inf
         self.best_capture_duration = -np.inf
         self.evaluations_capture_successes: list[list[bool]] = []
@@ -232,7 +236,7 @@ class SustainedCaptureEvalCallback(EvalCallback):
 
         if self.verbose >= 1:
             print(
-                f"Eval num_timesteps={self.num_timesteps}, "
+                f"{self.log_prefix} num_timesteps={self.num_timesteps}, "
                 f"episode_reward={mean_reward:.2f} +/- {std_reward:.2f}"
             )
             print(
@@ -241,11 +245,16 @@ class SustainedCaptureEvalCallback(EvalCallback):
                 f"mean max duration={mean_capture_duration:.3f}s"
             )
 
-        self.logger.record("eval/mean_reward", mean_reward)
-        self.logger.record("eval/mean_ep_length", mean_length)
-        self.logger.record("eval/strict_capture_success_rate", capture_rate)
+        self.logger.record(f"{self.log_prefix}/mean_reward", mean_reward)
         self.logger.record(
-            "eval/strict_capture_mean_max_duration", mean_capture_duration
+            f"{self.log_prefix}/mean_ep_length", mean_length
+        )
+        self.logger.record(
+            f"{self.log_prefix}/strict_capture_success_rate", capture_rate
+        )
+        self.logger.record(
+            f"{self.log_prefix}/strict_capture_mean_max_duration",
+            mean_capture_duration,
         )
         self.logger.record(
             "time/total_timesteps",
@@ -277,11 +286,11 @@ class SustainedCaptureEvalCallback(EvalCallback):
                 continue_training = self.callback_on_new_best.on_step()
 
         self.logger.record(
-            "eval/best_strict_capture_success_rate",
+            f"{self.log_prefix}/best_strict_capture_success_rate",
             self.best_capture_success_rate,
         )
         self.logger.record(
-            "eval/best_strict_capture_mean_max_duration",
+            f"{self.log_prefix}/best_strict_capture_mean_max_duration",
             self.best_capture_duration,
         )
         self.logger.dump(self.num_timesteps)

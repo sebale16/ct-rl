@@ -147,9 +147,10 @@ horizon under the configured sampler.
 Because training now measures capture-from-anywhere, the true task (swing up
 from hanging) is scored two ways. Post-training, `evaluations/eval_acrobot_v41_v5.py`
 evaluates each checkpoint from both starts (`start` column). During training,
-`run_ct_rl.py --eval_hanging` adds a second eval track from the hanging start
-alongside the uniform-start primary: it logs `eval_hanging/*` and saves its
-own `best_model_hanging/`, without disturbing the primary `best_model/`.
+both `run_ct_rl.py --eval_hanging` and
+`run_discrete_rl.py --eval_hanging` add a second eval track from the hanging
+start alongside the uniform-start primary. Each logs `eval_hanging/*` and
+saves its own `best_model_hanging/`, without disturbing `best_model/`.
 For v4.1 PPO and CT-SAC, both checkpoint paths use the same strict event:
 tip distance below 0.2 and joint-speed norm below 0.2 continuously for at
 least one physical second. Selection maximizes the episode success rate,

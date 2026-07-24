@@ -107,6 +107,9 @@ evaluation episodes satisfying that event; mean maximum residence duration
 breaks ties. Raw return is logged but cannot select a checkpoint. Residence
 is integrated from `dt_used`, including irregular CT steps, and an interval
 counts only when both observed endpoints satisfy the predicate.
+Both training runners accept `--eval_hanging`, which applies the same rank to
+a separately seeded canonical-hanging evaluation stream and saves
+`best_model_hanging/` independently of the uniform-start `best_model/`.
 
 **Episode horizon.** Current PPO and CT-SAC v4.1 training and evaluation
 episodes last 20 physical seconds. This leaves stabilization time after the

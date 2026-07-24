@@ -223,6 +223,7 @@ class SB3SustainedCaptureTests(unittest.TestCase):
 
     def test_callback_reseeds_persists_and_selects_only_by_capture_rank(self):
         eval_env = DummyVecEnv([_MinimalGymEnv])
+        self.addCleanup(eval_env.close)
         original_seed = eval_env.seed
         eval_env.seed = MagicMock(wraps=original_seed)
 
@@ -338,6 +339,62 @@ class SB3SustainedCaptureTests(unittest.TestCase):
             self.assertIn(
                 "eval/best_strict_capture_success_rate", recorded_keys
             )
+
+    def test_hanging_callback_uses_an_independent_logger_namespace(self):
+        eval_env = DummyVecEnv([_MinimalGymEnv])
+        self.addCleanup(eval_env.close)
+        model = MagicMock()
+        model.num_timesteps = 1
+        model.get_env.return_value = eval_env
+        model.get_vec_normalize_env.return_value = None
+        model.logger = MagicMock()
+        result = SB3CaptureEvaluation(
+            rewards=[5.0],
+            lengths=[100],
+            capture_successes=[True],
+            capture_durations=[1.25],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            callback = SustainedCaptureEvalCallback(
+                eval_env,
+                capture_spec=SustainedCaptureSpec(),
+                reset_seed=2000,
+                log_prefix="eval_hanging",
+                n_eval_episodes=1,
+                eval_freq=1,
+                log_path=str(root / "eval_hanging"),
+                best_model_save_path=str(root / "best_hanging"),
+                deterministic=True,
+                render=False,
+                verbose=0,
+            )
+            callback.init_callback(model)
+
+            with patch(
+                "common.sb3_callbacks.evaluate_sb3_policy_with_capture",
+                return_value=result,
+            ):
+                self.assertTrue(callback.on_step())
+
+        recorded_keys = {
+            invocation.args[0]
+            for invocation in model.logger.record.call_args_list
+        }
+        expected = {
+            "eval_hanging/mean_reward",
+            "eval_hanging/mean_ep_length",
+            "eval_hanging/strict_capture_success_rate",
+            "eval_hanging/strict_capture_mean_max_duration",
+            "eval_hanging/best_strict_capture_success_rate",
+            "eval_hanging/best_strict_capture_mean_max_duration",
+        }
+        self.assertTrue(expected.issubset(recorded_keys))
+        self.assertFalse(
+            any(key.startswith("eval/") for key in recorded_keys),
+            recorded_keys,
+        )
 
 
 if __name__ == "__main__":
