@@ -389,31 +389,38 @@ class DOFLayout:
         cls,
         slider_limit: Tuple[float, float] = (-1.8, 1.8),
         *,
+        num_poles: int = 1,
         joint_limit_width: float = 0.02,
         joint_limit_stiffness_init: float = 100.0,
         joint_limit_damping_init: float = 1.0,
         base_damping_reg: float = 1e-3,
     ) -> "DOFLayout":
-        """Mechanics-aware layout for dm_control's raw-state cartpole.
+        """Mechanics-aware layout for a raw-state dm_control CartPole chain.
 
-        The state is ``[cart_x, pole_angle, cart_velocity, pole_velocity]``.
-        Rigid-body inertia and gravity are invariant to cart translation, while
-        the hinge dependence is periodic.  The rail limits are represented by a
+        There is one slider plus ``num_poles`` serial hinge coordinates.  The
+        state is ``[cart_x, hinge_angles..., cart_velocity, hinge_velocities...]``;
+        downstream hinge angles are relative to their parent links.  Rigid-body
+        inertia and gravity are invariant to cart translation, while every
+        hinge coordinate is periodic.  The rail limits are represented by a
         separate smooth unilateral potential/dissipation port, and the single
         actuator applies generalized force only to the cart slider.
         """
+        num_poles = int(num_poles)
+        if num_poles < 1:
+            raise ValueError(f"num_poles must be >= 1, got {num_poles}")
+        nv = num_poles + 1
         lower, upper = (float(slider_limit[0]), float(slider_limit[1]))
         return cls(
-            obs_dim=4,
-            pos_slice=(0, 2),
-            vel_slice=(2, 4),
+            obs_dim=2 * nv,
+            pos_slice=(0, nv),
+            vel_slice=(nv, 2 * nv),
             cyclic_cfg=(),
-            obs_pos_to_cfg=(0, 1),
+            obs_pos_to_cfg=tuple(range(nv)),
             act_to_cfg=(0,),
             m_invariant_pos=(0,),
             enforce_m_invariance=True,
             potential_invariant_pos=(0,),
-            periodic_pos=(1,),
+            periodic_pos=tuple(range(1, nv)),
             damping_log_init=-8.0,
             base_damping_reg=float(base_damping_reg),
             joint_limits=((0, lower, upper),),

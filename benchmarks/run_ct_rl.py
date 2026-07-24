@@ -161,7 +161,12 @@ def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
     if current is None or not getattr(current, "raw_state_obs", False):
         return None
     if getattr(current, "domain_name", None) == "cartpole":
-        return layout_cls.cartpole()
+        num_poles = int(obs_dim) // 2 - 1
+        if num_poles == 1:
+            # Keep the no-argument call compatible with layout implementations
+            # and tests written before serial CartPole chains were supported.
+            return layout_cls.cartpole()
+        return layout_cls.cartpole(num_poles=num_poles)
     if getattr(current, "domain_name", None) == "acrobot":
         return layout_cls.acrobot()
     return layout_cls.raw_state(nv=int(obs_dim) // 2)
