@@ -12,6 +12,10 @@ from common.logger import dump
 
 # from common.logger import get_logger
 from evaluations.evaluation_helpers import evaluate_policy_per_episode
+from evaluations.sustained_capture import (
+    SustainedCaptureSpec,
+    capture_selection_rank,
+)
 
 if TYPE_CHECKING:
     from algorithms.base import BaseAlgorithm
@@ -405,7 +409,11 @@ class EvalCallback(EventCallback):
     Logs:
       - eval/mean_reward, eval/std_reward
       - eval/mean_ep_length, eval/std_ep_length
-      - eval/best_mean_reward
+      - optional strict-capture success rate and maximum residence duration
+
+    With ``capture_spec``, checkpoints are ranked lexicographically by episode
+    capture-success rate and mean maximum capture duration. Reward remains a
+    diagnostic. Without it, historical mean-reward selection is unchanged.
     """
 
     def __init__(
@@ -424,6 +432,7 @@ class EvalCallback(EventCallback):
         gate_occupancy_key: Optional[str] = None,
         gate_min_occupancy: float = 0.0,
         gate_min_reward: float = -np.inf,
+        capture_spec: Optional[SustainedCaptureSpec] = None,
         log_prefix: str = "eval",
     ):
         super().__init__(callback=callback_after_eval, verbose=verbose)
@@ -446,6 +455,10 @@ class EvalCallback(EventCallback):
         self.gate_occupancy_key = gate_occupancy_key
         self.gate_min_occupancy = float(gate_min_occupancy)
         self.gate_min_reward = float(gate_min_reward)
+        # When configured, best-model selection is lexicographic on strict
+        # capture success rate and mean maximum residence duration. Reward
+        # remains a diagnostic and is never a tie-breaker.
+        self.capture_spec = capture_spec
 
         self.log_path = log_path
         self.best_model_save_path = best_model_save_path
@@ -453,11 +466,16 @@ class EvalCallback(EventCallback):
 
         self.best_mean_reward = -np.inf
         self.last_mean_reward = -np.inf
+        self.best_capture_success_rate = -np.inf
+        self.best_capture_duration = -np.inf
         self._last_eval_timesteps = 0
 
         self.evaluations_timesteps: List[int] = []
         self.evaluations_results: List[np.ndarray] = []
         self.evaluations_lengths: List[np.ndarray] = []
+        self.evaluations_capture_timesteps: List[int] = []
+        self.evaluations_capture_successes: List[np.ndarray] = []
+        self.evaluations_capture_durations: List[np.ndarray] = []
 
     def _init_callback(self) -> None:
         super()._init_callback()  # init callback_after_eval
@@ -477,19 +495,45 @@ class EvalCallback(EventCallback):
         self.logger.record(
             "time/total_timesteps", int(self.num_timesteps), exclude="tensorboard"
         )
-        dump(step=self.num_timesteps)
 
-    def _save_evals(self, rewards: np.ndarray, lengths: np.ndarray) -> None:
+    def _save_evals(
+        self,
+        rewards: np.ndarray,
+        lengths: np.ndarray,
+        capture_successes: Optional[np.ndarray] = None,
+        capture_durations: Optional[np.ndarray] = None,
+    ) -> None:
         if self.log_path is None:
             return
         self.evaluations_timesteps.append(int(self.num_timesteps))
         self.evaluations_results.append(np.asarray(rewards, dtype=float))
         self.evaluations_lengths.append(np.asarray(lengths, dtype=int))
+        extra = {}
+        if capture_successes is not None and capture_durations is not None:
+            self.evaluations_capture_timesteps.append(int(self.num_timesteps))
+            self.evaluations_capture_successes.append(
+                np.asarray(capture_successes, dtype=bool)
+            )
+            self.evaluations_capture_durations.append(
+                np.asarray(capture_durations, dtype=float)
+            )
+            extra = {
+                "capture_timesteps": np.asarray(
+                    self.evaluations_capture_timesteps, dtype=int
+                ),
+                "capture_successes": np.asarray(
+                    self.evaluations_capture_successes, dtype=object
+                ),
+                "capture_durations": np.asarray(
+                    self.evaluations_capture_durations, dtype=object
+                ),
+            }
         np.savez(
             os.path.join(self.log_path, "evaluations.npz"),
             timesteps=np.asarray(self.evaluations_timesteps, dtype=int),
             results=np.asarray(self.evaluations_results, dtype=object),
             ep_lengths=np.asarray(self.evaluations_lengths, dtype=object),
+            **extra,
         )
 
     def _on_step(self) -> bool:
@@ -501,20 +545,52 @@ class EvalCallback(EventCallback):
 
         self._last_eval_timesteps = self.num_timesteps
 
-        eval_out = evaluate_policy_per_episode(
-            model=self.algorithm.model,
-            env=self.eval_env,
-            n_eval_episodes=self.n_eval_episodes,
-            deterministic=self.deterministic,
-            reset_seed=self.reset_seed,
-            occupancy_key=self.gate_occupancy_key,
-        )
-        if self.gate_occupancy_key is not None:
-            rewards, lengths, occupancies = eval_out
-            mean_occ = float(np.mean(occupancies)) if len(occupancies) else 0.0
+        if self.capture_spec is not None:
+            metrics = evaluate_policy_per_episode(
+                model=self.algorithm.model,
+                env=self.eval_env,
+                n_eval_episodes=self.n_eval_episodes,
+                deterministic=self.deterministic,
+                reset_seed=self.reset_seed,
+                occupancy_key=self.gate_occupancy_key,
+                capture_spec=self.capture_spec,
+                return_metrics=True,
+            )
+            rewards, lengths = metrics.returns, metrics.lengths
+            occupancies = metrics.occupancies
+            capture_successes = np.asarray(
+                metrics.capture_successes, dtype=bool
+            )
+            capture_durations = np.asarray(
+                metrics.capture_durations, dtype=float
+            )
+            capture_rate, mean_capture_duration = capture_selection_rank(
+                capture_successes.tolist(), capture_durations.tolist()
+            )
         else:
-            rewards, lengths = eval_out
-            mean_occ = None
+            eval_out = evaluate_policy_per_episode(
+                model=self.algorithm.model,
+                env=self.eval_env,
+                n_eval_episodes=self.n_eval_episodes,
+                deterministic=self.deterministic,
+                reset_seed=self.reset_seed,
+                occupancy_key=self.gate_occupancy_key,
+            )
+            if self.gate_occupancy_key is not None:
+                rewards, lengths, occupancies = eval_out
+            else:
+                rewards, lengths = eval_out
+                occupancies = None
+            capture_successes = None
+            capture_durations = None
+            capture_rate = None
+            mean_capture_duration = None
+
+        mean_occ = (
+            float(np.mean(occupancies))
+            if occupancies is not None and len(occupancies)
+            else (0.0 if occupancies is not None else None)
+        )
 
         rewards = np.asarray(rewards, dtype=float)
         lengths = np.asarray(lengths, dtype=int)
@@ -524,30 +600,74 @@ class EvalCallback(EventCallback):
         mean_len = float(np.mean(lengths)) if lengths.size else 0.0
 
         self.last_mean_reward = mean_reward
-        self._save_evals(rewards, lengths)
+        self._save_evals(
+            rewards, lengths, capture_successes, capture_durations
+        )
         self._log_eval(mean_reward, std_reward, mean_len)
         if mean_occ is not None:
             self.logger.record(f"{self.log_prefix}/hold_occupancy", float(mean_occ))
+        if capture_rate is not None and mean_capture_duration is not None:
+            self.logger.record(
+                f"{self.log_prefix}/strict_capture_success_rate",
+                float(capture_rate),
+            )
+            self.logger.record(
+                f"{self.log_prefix}/strict_capture_mean_max_duration",
+                float(mean_capture_duration),
+            )
 
         continue_training = True
 
-        # New best model save (optionally gated on occupancy + reward floor)
+        # New best model save. Strict-capture selection never uses reward as a
+        # tie-breaker; without a capture spec, retain the historical reward
+        # selection and optional occupancy/reward eligibility gate.
         gate_ok = True
         if self.gate_occupancy_key is not None:
             gate_ok = (mean_reward >= self.gate_min_reward) and (
                 mean_occ >= self.gate_min_occupancy
             )
-        if gate_ok and mean_reward > self.best_mean_reward:
+        if capture_rate is not None and mean_capture_duration is not None:
+            new_rank = (capture_rate, mean_capture_duration)
+            best_rank = (
+                self.best_capture_success_rate,
+                self.best_capture_duration,
+            )
+            is_new_best = gate_ok and new_rank > best_rank
+        else:
+            is_new_best = gate_ok and mean_reward > self.best_mean_reward
+
+        if is_new_best:
             self.best_mean_reward = mean_reward
+            if capture_rate is not None and mean_capture_duration is not None:
+                self.best_capture_success_rate = capture_rate
+                self.best_capture_duration = mean_capture_duration
             if self.best_model_save_path is not None:
                 path = os.path.join(self.best_model_save_path, "best_model.pth")
                 self.algorithm.save(path)
                 if self.verbose > 0:
-                    print(f"New best mean reward={mean_reward:.3f}. Saving to {path}")
+                    if capture_rate is None:
+                        label = f"mean reward={mean_reward:.3f}"
+                    else:
+                        label = (
+                            f"strict capture rate={capture_rate:.3f}, "
+                            f"mean max duration={mean_capture_duration:.3f}s"
+                        )
+                    print(f"New best {label}. Saving to {path}")
 
             if self.callback_on_new_best is not None:
                 self.callback_on_new_best.update_locals(self.locals)
                 continue_training = self.callback_on_new_best.on_step()
+
+        if capture_rate is not None:
+            self.logger.record(
+                f"{self.log_prefix}/best_strict_capture_success_rate",
+                float(self.best_capture_success_rate),
+            )
+            self.logger.record(
+                f"{self.log_prefix}/best_strict_capture_mean_max_duration",
+                float(self.best_capture_duration),
+            )
+        dump(step=self.num_timesteps)
 
         # After-eval callback
         if continue_training:

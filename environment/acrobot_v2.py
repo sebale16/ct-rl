@@ -37,6 +37,10 @@ from dm_control.suite import base as suite_base
 from dm_control.utils import rewards
 
 
+STRICT_CAPTURE_DISTANCE = 0.2
+STRICT_CAPTURE_SPEED = 0.2
+
+
 class BalanceV2(acrobot.Balance):
     """Acrobot swing-up with a near-down reset and bounded dense reward."""
 
@@ -261,6 +265,8 @@ class BalanceV4(BalanceV3):
         velocity_noise: float = 0.01,
         hold_weight: float = 0.8,
         energy_overshoot_margin: float = 1.0,
+        speed_bounds: tuple[float, float] = _SPEED_BOUNDS,
+        speed_margin: float = _SPEED_MARGIN,
         uniform_start: bool = False,
     ) -> None:
         super().__init__(
@@ -281,6 +287,25 @@ class BalanceV4(BalanceV3):
             raise ValueError(
                 "energy_overshoot_margin must be finite and positive"
             )
+        try:
+            speed_lo, speed_hi = (float(v) for v in speed_bounds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "speed_bounds must contain exactly two numbers"
+            ) from exc
+        if (
+            not np.isfinite(speed_lo)
+            or not np.isfinite(speed_hi)
+            or speed_lo < 0.0
+            or speed_hi < speed_lo
+        ):
+            raise ValueError(
+                "speed_bounds must be finite, non-negative, and ordered"
+            )
+        self.speed_bounds = (speed_lo, speed_hi)
+        self.speed_margin = float(speed_margin)
+        if not np.isfinite(self.speed_margin) or self.speed_margin <= 0.0:
+            raise ValueError("speed_margin must be finite and positive")
         self.uniform_start = bool(uniform_start)
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
@@ -375,8 +400,8 @@ class BalanceV4(BalanceV3):
         slow = float(
             rewards.tolerance(
                 speed,
-                bounds=self._SPEED_BOUNDS,
-                margin=self._SPEED_MARGIN,
+                bounds=self.speed_bounds,
+                margin=self.speed_margin,
                 value_at_margin=0.1,
                 sigmoid="gaussian",
             )
@@ -389,6 +414,9 @@ class BalanceV4(BalanceV3):
         target_radius = float(physics.named.model.site_size["target", 0])
         tip_height = float(physics.named.data.site_xpos["tip", "z"])
         exact_success = float(distance <= target_radius)
+        strict_capture = float(
+            distance < STRICT_CAPTURE_DISTANCE and speed < STRICT_CAPTURE_SPEED
+        )
         return {
             "reward": float(np.clip(reward, 0.0, 1.0)),
             "tip_distance": distance,
@@ -402,6 +430,7 @@ class BalanceV4(BalanceV3):
             "speed": speed,
             "slow_gate": slow,
             "hold": hold,
+            "strict_capture": strict_capture,
             "gym_height_success": float(tip_height > self._GYM_TARGET_HEIGHT),
             "exact_success": exact_success,
             "success": exact_success,
@@ -417,6 +446,8 @@ def swingup_v4(
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
     energy_overshoot_margin: float = 1.0,
+    speed_bounds: tuple[float, float] = BalanceV4._SPEED_BOUNDS,
+    speed_margin: float = BalanceV4._SPEED_MARGIN,
     uniform_start: bool = False,
 ):
     """Construct the energy-regulated ``acrobot-swingup-v4`` environment."""
@@ -427,6 +458,8 @@ def swingup_v4(
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
         energy_overshoot_margin=energy_overshoot_margin,
+        speed_bounds=speed_bounds,
+        speed_margin=speed_margin,
         uniform_start=uniform_start,
     )
     return control.Environment(
@@ -438,6 +471,8 @@ def swingup_v4(
 
 
 V41_ENERGY_OVERSHOOT_MARGIN = 0.25
+V41_SPEED_BOUNDS = (0.0, 0.1)
+V41_SPEED_MARGIN = 0.5
 
 
 def swingup_v41(
@@ -448,15 +483,17 @@ def swingup_v41(
     angle_noise: float = 0.05,
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
+    speed_bounds: tuple[float, float] = V41_SPEED_BOUNDS,
+    speed_margin: float = V41_SPEED_MARGIN,
     uniform_start: bool = True,
 ):
     """Construct ``acrobot-swingup-v4.1``: v4 capture pressure, uniform start.
 
-    Identical to v4 for Ẽ ≤ 1.  Above the upright-rest energy the tolerance
-    margin drops from 1.0 to 0.25, so passing the top with surplus energy
-    (the fast swing-through the v4 pilots converged to) loses its ramp
-    income and the policy is pushed to regulate Ẽ → 1, where top passes are
-    slow and the hold term is enterable.
+    The pumping ramp remains identical to v4 for Ẽ ≤ 1. Above the
+    upright-rest energy its margin drops from 1.0 to 0.25, so passing the top
+    with surplus energy loses ramp income. The hold speed tolerance is also
+    tightened from bounds [0, 0.5], margin 2.0 to bounds [0, 0.1], margin
+    0.5, making appreciable hold income require an actually slow tip capture.
 
     Episodes start from uniform random joint angles (``uniform_start=True``,
     the default).  The capture-pressured reward has its maximum at the slow
@@ -474,6 +511,8 @@ def swingup_v41(
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
         energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
+        speed_bounds=speed_bounds,
+        speed_margin=speed_margin,
         uniform_start=uniform_start,
     )
     return control.Environment(

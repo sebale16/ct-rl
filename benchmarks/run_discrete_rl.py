@@ -18,7 +18,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import (
-    EvalCallback,
+    EvalCallback as RewardEvalCallback,
     CheckpointCallback,
     CallbackList,
     LogEveryNTimesteps,
@@ -35,7 +35,9 @@ from common.utils import (
     normalize_eval_range,
     get_eval_episode_count,
 )
+from common.sb3_callbacks import SustainedCaptureEvalCallback
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
+from evaluations.sustained_capture import strict_capture_spec_for
 
 _MONITOR_COUNTER = count()
 
@@ -234,8 +236,14 @@ def run_sb3_benchmark(
     eval_freq = log_kwargs.get("eval_freq", 10000)
     step_log_interval = log_kwargs.get("interval", 10000)
 
-    eval_callback = EvalCallback(
-        eval_env,
+    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    if capture_spec is not None:
+        print(
+            "[selection] best_model uses strict capture: distance<0.2, "
+            "speed<0.2, sustained for >=1 physical second",
+            flush=True,
+        )
+    eval_callback_kwargs = dict(
         n_eval_episodes=n_eval_episodes,
         best_model_save_path=str(save_dir / "best_model"),
         log_path=str(log_dir / "eval"),
@@ -243,6 +251,15 @@ def run_sb3_benchmark(
         deterministic=True,
         render=False,
     )
+    if capture_spec is None:
+        eval_callback = RewardEvalCallback(eval_env, **eval_callback_kwargs)
+    else:
+        eval_callback = SustainedCaptureEvalCallback(
+            eval_env,
+            capture_spec=capture_spec,
+            reset_seed=seed + 1000,
+            **eval_callback_kwargs,
+        )
 
     # Checkpoint freq is based on calls to step(), so we need to adjust for n_envs
     checkpoint_callback = CheckpointCallback(

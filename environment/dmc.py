@@ -504,6 +504,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "speed": "acrobot_speed",
             "slow_gate": "acrobot_slow_gate",
             "hold": "acrobot_hold",
+            "strict_capture": "acrobot_strict_capture",
         }
         for term_name, info_name in optional_terms.items():
             if term_name in terms:

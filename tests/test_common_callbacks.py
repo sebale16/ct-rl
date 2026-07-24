@@ -18,6 +18,8 @@ from common.callbacks import (
     StopTrainingOnNoModelImprovement,
     StopTrainingOnMaxEpisodes,
 )
+from evaluations.evaluation_helpers import EpisodeEvaluationResults
+from evaluations.sustained_capture import SustainedCaptureSpec
 
 
 class DummyModel:
@@ -207,6 +209,77 @@ class TestCallbacks(unittest.TestCase):
         # shared time key stays un-prefixed.
         self.assertNotIn("eval/mean_reward", recorded)
         self.assertIn("time/total_timesteps", recorded)
+
+    @patch("common.callbacks.evaluate_policy_per_episode")
+    def test_eval_callback_selects_strict_capture_rank_not_reward(
+        self, mock_evaluate
+    ):
+        algo = MockAlgorithm()
+        mock_evaluate.side_effect = [
+            EpisodeEvaluationResults(
+                returns=[10.0, 10.0],
+                lengths=[10, 10],
+                capture_successes=[False, False],
+                capture_durations=[0.3, 0.2],
+            ),
+            EpisodeEvaluationResults(
+                returns=[1000.0, 1000.0],
+                lengths=[10, 10],
+                capture_successes=[False, False],
+                capture_durations=[0.1, 0.1],
+            ),
+            EpisodeEvaluationResults(
+                returns=[-5.0, -5.0],
+                lengths=[10, 10],
+                capture_successes=[True, False],
+                capture_durations=[1.0, 0.0],
+            ),
+        ]
+
+        cb = EvalCallback(
+            eval_env=MagicMock(),
+            eval_freq=10,
+            n_eval_episodes=2,
+            best_model_save_path=self.test_dir,
+            log_path=os.path.join(self.test_dir, "eval"),
+            capture_spec=SustainedCaptureSpec(),
+        )
+        cb.init_callback(algo)
+
+        algo.num_timesteps = 10
+        cb.on_step()
+        self.assertEqual(algo.save.call_count, 1)
+
+        # Reward improves dramatically, but strict capture gets worse.
+        algo.num_timesteps = 20
+        cb.on_step()
+        self.assertEqual(algo.save.call_count, 1)
+        self.assertEqual(cb.best_mean_reward, 10.0)
+
+        # A higher strict success rate wins even with a lower reward.
+        algo.num_timesteps = 30
+        cb.on_step()
+        self.assertEqual(algo.save.call_count, 2)
+        self.assertEqual(cb.best_capture_success_rate, 0.5)
+        self.assertEqual(cb.best_capture_duration, 0.5)
+        self.assertEqual(cb.best_mean_reward, -5.0)
+        algo.save.assert_called_with(
+            os.path.join(self.test_dir, "best_model.pth")
+        )
+
+        recorded = {c.args[0] for c in algo.logger.record.call_args_list}
+        self.assertIn("eval/strict_capture_success_rate", recorded)
+        self.assertIn("eval/strict_capture_mean_max_duration", recorded)
+
+        saved = np.load(
+            os.path.join(self.test_dir, "eval", "evaluations.npz"),
+            allow_pickle=True,
+        )
+        np.testing.assert_array_equal(saved["capture_timesteps"], [10, 20, 30])
+        np.testing.assert_array_equal(
+            np.asarray(saved["capture_successes"].tolist(), dtype=bool),
+            [[False, False], [False, False], [True, False]],
+        )
 
     def test_stop_on_reward_threshold(self):
         # This callback needs a parent EvalCallback

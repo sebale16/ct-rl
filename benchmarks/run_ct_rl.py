@@ -36,6 +36,7 @@ from common.callbacks import (
     WallClockCheckpointCallback,
 )
 from common.checkpoint import load_checkpoint
+from evaluations.sustained_capture import strict_capture_spec_for
 
 from common.logger import configure
 from common.utils import (
@@ -425,12 +426,25 @@ def run_algorithm(
     save_freq = log_kwargs.get("save_freq", 100000)
     eval_freq = log_kwargs.get("eval_freq", 10000)
     log_interval = log_kwargs.get("interval", 1000)
+    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    if capture_spec is not None:
+        print(
+            "[selection] best_model uses strict capture: distance<0.2, "
+            "speed<0.2, sustained for >=1 physical second",
+            flush=True,
+        )
 
     # Optional best-model gate: "occupancy_key:min_occupancy:min_reward"
     # (e.g. "acrobot_hold:0.05:400") -> best_model only updates on evals whose
     # dt-weighted mean info[key] and mean reward both clear the floors.
     gate_key, gate_occ, gate_rew = None, 0.0, float("-inf")
-    if best_model_gate:
+    if best_model_gate and capture_spec is not None:
+        print(
+            "[selection] strict sustained capture supersedes "
+            "--best_model_gate for Acrobot v4.1 CT-SAC",
+            flush=True,
+        )
+    elif best_model_gate:
         parts = best_model_gate.split(":")
         if len(parts) != 3:
             raise ValueError(
@@ -457,6 +471,7 @@ def run_algorithm(
         gate_occupancy_key=gate_key,
         gate_min_occupancy=gate_occ,
         gate_min_reward=gate_rew,
+        capture_spec=capture_spec,
     )
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq,
@@ -465,36 +480,85 @@ def run_algorithm(
         verbose=1,
     )
 
+    def _eval_callback_state(callback: EvalCallback) -> dict:
+        return {
+            "best_mean_reward": float(callback.best_mean_reward),
+            "last_mean_reward": float(callback.last_mean_reward),
+            "best_capture_success_rate": float(
+                callback.best_capture_success_rate
+            ),
+            "best_capture_duration": float(callback.best_capture_duration),
+            "last_eval_timesteps": int(callback._last_eval_timesteps),
+            "evaluations_timesteps": callback.evaluations_timesteps,
+            "evaluations_results": callback.evaluations_results,
+            "evaluations_lengths": callback.evaluations_lengths,
+            "evaluations_capture_timesteps": (
+                callback.evaluations_capture_timesteps
+            ),
+            "evaluations_capture_successes": (
+                callback.evaluations_capture_successes
+            ),
+            "evaluations_capture_durations": (
+                callback.evaluations_capture_durations
+            ),
+        }
+
+    def _restore_eval_callback_state(
+        callback: EvalCallback, state: dict
+    ) -> None:
+        if not state:
+            return
+        callback.best_mean_reward = state.get(
+            "best_mean_reward", callback.best_mean_reward
+        )
+        callback.last_mean_reward = state.get(
+            "last_mean_reward", callback.last_mean_reward
+        )
+        callback.best_capture_success_rate = state.get(
+            "best_capture_success_rate",
+            callback.best_capture_success_rate,
+        )
+        callback.best_capture_duration = state.get(
+            "best_capture_duration", callback.best_capture_duration
+        )
+        callback._last_eval_timesteps = state.get("last_eval_timesteps", 0)
+        callback.evaluations_timesteps = state.get(
+            "evaluations_timesteps", []
+        )
+        callback.evaluations_results = state.get("evaluations_results", [])
+        callback.evaluations_lengths = state.get("evaluations_lengths", [])
+        callback.evaluations_capture_timesteps = state.get(
+            "evaluations_capture_timesteps", []
+        )
+        callback.evaluations_capture_successes = state.get(
+            "evaluations_capture_successes", []
+        )
+        callback.evaluations_capture_durations = state.get(
+            "evaluations_capture_durations", []
+        )
+
     # Resume: reload the full trainer state (buffer, optimizers, counters, RNG)
     # and restore the EvalCallback's cumulative history so the eval curve stays
     # whole and best_model.pth is not clobbered by a worse early eval.
+    resume_extra = {}
     if resume_active:
-        extra = load_checkpoint(algorithm, ckpt_dir)
-        eval_state = extra.get("eval", {})
-        if eval_state:
-            eval_callback.best_mean_reward = eval_state.get(
-                "best_mean_reward", eval_callback.best_mean_reward
-            )
-            eval_callback.last_mean_reward = eval_state.get(
-                "last_mean_reward", eval_callback.last_mean_reward
-            )
-            eval_callback._last_eval_timesteps = eval_state.get(
-                "last_eval_timesteps", 0
-            )
-            eval_callback.evaluations_timesteps = eval_state.get(
-                "evaluations_timesteps", []
-            )
-            eval_callback.evaluations_results = eval_state.get(
-                "evaluations_results", []
-            )
-            eval_callback.evaluations_lengths = eval_state.get(
-                "evaluations_lengths", []
+        resume_extra = load_checkpoint(algorithm, ckpt_dir)
+        _restore_eval_callback_state(
+            eval_callback, resume_extra.get("eval", {})
+        )
+        if capture_spec is None:
+            best_label = f"eval_best_reward={eval_callback.best_mean_reward:.3f}"
+        else:
+            best_label = (
+                "eval_best_capture="
+                f"{eval_callback.best_capture_success_rate:.3f}, "
+                "duration="
+                f"{eval_callback.best_capture_duration:.3f}s"
             )
         print(
             f"[resume] loaded checkpoint from {ckpt_dir}: "
             f"num_timesteps={algorithm.num_timesteps}, "
-            f"buffer_size={algorithm.replay_buffer.size()}, "
-            f"eval_best={eval_callback.best_mean_reward:.3f}",
+            f"buffer_size={algorithm.replay_buffer.size()}, {best_label}",
             flush=True,
         )
 
@@ -536,8 +600,9 @@ def run_algorithm(
     # alongside the (uniform-start) primary eval.  For acrobot v4.1/v5 the
     # training resets are uniform random, so the primary eval and its
     # best_model measure capture-from-anywhere; this hanging eval reports the
-    # true swing-up-from-down task and saves its own gated best_model_hanging/,
+    # true swing-up-from-down task and saves its own best_model_hanging/,
     # without disturbing the primary best_model.
+    hanging_eval_callback = None
     if eval_hanging:
         hanging_eval_env_kwargs = dict(eval_env_kwargs)
         hanging_task_kwargs = dict(hanging_eval_env_kwargs.get("task_kwargs", {}))
@@ -571,7 +636,12 @@ def run_algorithm(
             gate_occupancy_key=gate_key,
             gate_min_occupancy=gate_occ,
             gate_min_reward=gate_rew,
+            capture_spec=capture_spec,
             log_prefix="eval_hanging",
+        )
+        _restore_eval_callback_state(
+            hanging_eval_callback,
+            resume_extra.get("eval_hanging", {}),
         )
         callbacks.append(hanging_eval_callback)
 
@@ -580,16 +650,16 @@ def run_algorithm(
     wall_cb = None
     if max_seconds is not None and max_seconds > 0:
         def _collect_extra():
-            return {
-                "eval": {
-                    "best_mean_reward": float(eval_callback.best_mean_reward),
-                    "last_mean_reward": float(eval_callback.last_mean_reward),
-                    "last_eval_timesteps": int(eval_callback._last_eval_timesteps),
-                    "evaluations_timesteps": eval_callback.evaluations_timesteps,
-                    "evaluations_results": eval_callback.evaluations_results,
-                    "evaluations_lengths": eval_callback.evaluations_lengths,
-                }
-            }
+            state = {"eval": _eval_callback_state(eval_callback)}
+            if hanging_eval_callback is not None:
+                state["eval_hanging"] = _eval_callback_state(
+                    hanging_eval_callback
+                )
+            elif "eval_hanging" in resume_extra:
+                # Preserve an existing optional track even if this chunk was
+                # launched without --eval_hanging.
+                state["eval_hanging"] = resume_extra["eval_hanging"]
+            return state
 
         wall_cb = WallClockCheckpointCallback(
             ckpt_dir=ckpt_dir,

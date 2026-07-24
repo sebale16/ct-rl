@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -12,7 +13,11 @@ try:
         BalanceV3,
         BalanceV4,
         BalanceV5,
+        STRICT_CAPTURE_DISTANCE,
+        STRICT_CAPTURE_SPEED,
         V41_ENERGY_OVERSHOOT_MARGIN,
+        V41_SPEED_BOUNDS,
+        V41_SPEED_MARGIN,
         swingup_v3,
         swingup_v4,
         swingup_v41,
@@ -622,6 +627,8 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
         try:
             env.reset()
             self.assertIsInstance(env.task, BalanceV4)
+            self.assertEqual(env.task.speed_bounds, (0.0, 0.5))
+            self.assertEqual(env.task.speed_margin, 2.0)
             np.testing.assert_array_equal(env.physics.data.qpos, [np.pi, 0.0])
             np.testing.assert_array_equal(env.physics.data.qvel, [0.0, 0.0])
         finally:
@@ -640,6 +647,78 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
             with self.subTest(hold_weight=hold_weight):
                 with self.assertRaises(ValueError):
                     BalanceV4(random=0, hold_weight=hold_weight)
+
+    def test_invalid_speed_gate_configuration_rejected(self):
+        bad_bounds = (
+            None,
+            (),
+            (0.0,),
+            (0.0, 0.1, 0.2),
+            (-0.1, 0.1),
+            (0.2, 0.1),
+            (0.0, float("nan")),
+            (0.0, float("inf")),
+        )
+        for speed_bounds in bad_bounds:
+            with self.subTest(speed_bounds=speed_bounds):
+                with self.assertRaisesRegex(ValueError, "speed_bounds"):
+                    BalanceV4(random=0, speed_bounds=speed_bounds)
+
+        for speed_margin in (0.0, -0.5, float("nan"), float("inf")):
+            with self.subTest(speed_margin=speed_margin):
+                with self.assertRaisesRegex(ValueError, "speed_margin"):
+                    BalanceV4(random=0, speed_margin=speed_margin)
+
+    def test_default_speed_gate_preserves_published_v4_definition(self):
+        self.assertEqual(self.task.speed_bounds, (0.0, 0.5))
+        self.assertEqual(self.task.speed_margin, 2.0)
+
+        self._set_physics_state((0.0, 0.0), qvel=(0.6, 0.0))
+        terms = self.task.reward_terms(self.physics)
+        expected = float(
+            dmc_rewards.tolerance(
+                terms["speed"],
+                bounds=(0.0, 0.5),
+                margin=2.0,
+                value_at_margin=0.1,
+                sigmoid="gaussian",
+            )
+        )
+        self.assertAlmostEqual(terms["slow_gate"], expected)
+
+    def test_strict_capture_uses_open_distance_and_speed_thresholds(self):
+        self.assertEqual(STRICT_CAPTURE_DISTANCE, 0.2)
+        self.assertEqual(STRICT_CAPTURE_SPEED, 0.2)
+        inside_distance = np.nextafter(STRICT_CAPTURE_DISTANCE, 0.0)
+        inside_speed = np.nextafter(STRICT_CAPTURE_SPEED, 0.0)
+
+        self._set_physics_state((0.0, 0.0), qvel=(inside_speed, 0.0))
+        with mock.patch.object(
+            dmc_acrobot.Physics, "to_target", return_value=inside_distance
+        ):
+            self.assertEqual(
+                self.task.reward_terms(self.physics)["strict_capture"], 1.0
+            )
+
+        # Both thresholds are strict: equality at either boundary is outside.
+        with mock.patch.object(
+            dmc_acrobot.Physics,
+            "to_target",
+            return_value=STRICT_CAPTURE_DISTANCE,
+        ):
+            self.assertEqual(
+                self.task.reward_terms(self.physics)["strict_capture"], 0.0
+            )
+
+        self._set_physics_state(
+            (0.0, 0.0), qvel=(STRICT_CAPTURE_SPEED, 0.0)
+        )
+        with mock.patch.object(
+            dmc_acrobot.Physics, "to_target", return_value=inside_distance
+        ):
+            self.assertEqual(
+                self.task.reward_terms(self.physics)["strict_capture"], 0.0
+            )
 
     def test_reset_matches_v2_for_the_same_seed(self):
         v2_physics = dmc_acrobot.Physics.from_xml_string(
@@ -833,11 +912,13 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
             "acrobot_speed",
             "acrobot_slow_gate",
             "acrobot_hold",
+            "acrobot_strict_capture",
         }
         self.assertTrue(v4_keys.issubset(reset_info))
         self.assertAlmostEqual(reset_info["acrobot_energy_norm"], 0.0, places=6)
         self.assertAlmostEqual(reset_info["acrobot_slow_gate"], 1.0, places=6)
         self.assertAlmostEqual(reset_info["acrobot_hold"], 0.0, places=6)
+        self.assertEqual(reset_info["acrobot_strict_capture"], 0.0)
         self.assertAlmostEqual(reset_info["acrobot_progress"], 0.05, places=6)
 
         _, _, _, _, step_info = env.step(np.zeros(1, dtype=np.float32))
@@ -863,6 +944,7 @@ class TestAcrobotSwingupV4Reward(unittest.TestCase):
             "acrobot_speed",
             "acrobot_slow_gate",
             "acrobot_hold",
+            "acrobot_strict_capture",
         }
         self.assertTrue(v4_only_keys.isdisjoint(info))
         self.assertIn("acrobot_success", info)
@@ -877,7 +959,10 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
         kwargs = {"random": 0, "angle_noise": 0.0, "velocity_noise": 0.0}
         self.v4 = BalanceV4(**kwargs)
         self.v41 = BalanceV4(
-            **kwargs, energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN
+            **kwargs,
+            energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
+            speed_bounds=V41_SPEED_BOUNDS,
+            speed_margin=V41_SPEED_MARGIN,
         )
         self.v4.initialize_episode(self.physics)
         self.v41.initialize_episode(self.physics)
@@ -903,7 +988,7 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
                 self.v4.reward_terms(self.physics)["reward"],
             )
 
-    def test_rewards_identical_at_or_below_unity_energy(self):
+    def test_energy_progress_identical_at_or_below_unity_energy(self):
         for qpos, qvel in (
             ((np.pi, 0.0), (0.0, 0.0)),
             ((0.0, np.pi), (0.0, 0.0)),
@@ -915,7 +1000,12 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
                 t4 = self.v4.reward_terms(self.physics)
                 t41 = self.v41.reward_terms(self.physics)
                 self.assertLessEqual(t41["energy_norm"], 1.0)
-                self.assertAlmostEqual(t41["reward"], t4["reward"], places=12)
+                self.assertAlmostEqual(
+                    t41["energy_norm"], t4["energy_norm"], places=12
+                )
+                self.assertAlmostEqual(
+                    t41["progress"], t4["progress"], places=12
+                )
 
     def test_overshoot_states_lose_their_ramp_income(self):
         # Fast spin through the top: the regime the v4 pilots converged to.
@@ -939,7 +1029,7 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
         self.assertLess(terms["energy_norm"], 1.15)
         self.assertGreater(terms["progress"], 0.2)
 
-    def test_goal_and_slow_pass_unchanged(self):
+    def test_goal_unchanged_and_moving_pass_loses_hold_income(self):
         self._set_physics_state((0.0, 0.0))
         self.assertAlmostEqual(
             self.v41.reward_terms(self.physics)["reward"], 1.0, places=6
@@ -947,9 +1037,31 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
         self._set_physics_state((0.08, 0.05), qvel=(0.5, 0.4))
         t4 = self.v4.reward_terms(self.physics)
         t41 = self.v41.reward_terms(self.physics)
-        self.assertGreater(t41["reward"], 0.85)
-        # The slow pass sits barely above Ẽ=1, so v4.1 trims it only mildly.
-        self.assertLess(t4["reward"] - t41["reward"], 0.05)
+        self.assertGreater(t4["slow_gate"], 0.9)
+        self.assertLess(t41["slow_gate"], 0.1)
+        self.assertLess(t41["hold"], 0.1 * t4["hold"])
+        self.assertGreater(t4["reward"] - t41["reward"], 0.5)
+
+    def test_v41_speed_gate_defaults_and_landmarks(self):
+        self.assertEqual(V41_SPEED_BOUNDS, (0.0, 0.1))
+        self.assertEqual(V41_SPEED_MARGIN, 0.5)
+        self.assertEqual(self.v41.speed_bounds, V41_SPEED_BOUNDS)
+        self.assertEqual(self.v41.speed_margin, V41_SPEED_MARGIN)
+
+        self._set_physics_state((0.0, 0.0), qvel=(0.1, 0.0))
+        self.assertAlmostEqual(
+            self.v41.reward_terms(self.physics)["slow_gate"], 1.0
+        )
+
+        # 0.6 is exactly upper_bound + margin, so the Gaussian tolerance
+        # reaches its published value_at_margin.
+        self._set_physics_state((0.0, 0.0), qvel=(0.6, 0.0))
+        self.assertAlmostEqual(
+            self.v41.reward_terms(self.physics)["slow_gate"], 0.1
+        )
+        self.assertGreater(
+            self.v4.reward_terms(self.physics)["slow_gate"], 0.9
+        )
 
     def test_invalid_overshoot_margin_rejected(self):
         for margin in (0.0, -0.25, float("nan"), float("inf")):
@@ -969,6 +1081,8 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
             self.assertEqual(
                 env.task.energy_overshoot_margin, V41_ENERGY_OVERSHOOT_MARGIN
             )
+            self.assertEqual(env.task.speed_bounds, V41_SPEED_BOUNDS)
+            self.assertEqual(env.task.speed_margin, V41_SPEED_MARGIN)
             self.assertTrue(env.task.uniform_start)
             starts = []
             for _ in range(40):
@@ -1064,8 +1178,11 @@ class TestAcrobotSwingupV41OvershootMargin(unittest.TestCase):
             wrapped._env.task.energy_overshoot_margin,
             V41_ENERGY_OVERSHOOT_MARGIN,
         )
+        self.assertEqual(wrapped._env.task.speed_bounds, V41_SPEED_BOUNDS)
+        self.assertEqual(wrapped._env.task.speed_margin, V41_SPEED_MARGIN)
         self.assertTrue(wrapped._env.task.uniform_start)
         self.assertIn("acrobot_energy_norm", info)
+        self.assertIn("acrobot_strict_capture", info)
 
         down = DMCContinuousEnv(
             domain_name="acrobot",
@@ -1357,6 +1474,7 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
             "acrobot_speed",
             "acrobot_slow_gate",
             "acrobot_hold",
+            "acrobot_strict_capture",
         }
         self.assertTrue(v3_family_keys.issubset(info))
         self.assertTrue(v4_only_keys.isdisjoint(info))

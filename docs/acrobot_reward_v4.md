@@ -91,8 +91,8 @@ bounds, and the pump trace must correlate with Ẽ under v4 but not under v3.
 ## Wiring
 
 - Env id `acrobot-swingup-v4` in `DMCContinuousEnv`; v4-only info keys
-  `acrobot_energy_norm`, `acrobot_speed`, `acrobot_slow_gate`, `acrobot_hold`
-  (v2/v3 schemas unchanged).
+  `acrobot_energy_norm`, `acrobot_speed`, `acrobot_slow_gate`,
+  `acrobot_hold`, and `acrobot_strict_capture` (v2/v3 schemas unchanged).
 - `evaluations/evaluate_swingup_final.py` accepts the env id; the tip_z > 3
   criterion and folded-extension diagnostics carry over unchanged.
 - Pilot rows in `benchmarks/hyperparams/ct_sac.csv`: `final_mf` and
@@ -106,10 +106,11 @@ bounds, and the pump trace must correlate with Ẽ under v4 but not under v3.
 The v4 pilots reach the top but pass through it with surplus energy (Ẽ > 1,
 fast), so the hold term never triggers — swing-through at rate ≈0.08–0.19,
 not capture at ≈1. v4.1 tightens the energy tolerance margin above Ẽ = 1
-from 1.0 to 0.25 (identical to v4 for Ẽ ≤ 1), so surplus-energy passes lose
-their ramp income and the policy is pushed to regulate Ẽ → 1, where top
-passes are slow and the hold is enterable. See `acrobot_reward_versions.md`
-for the exact piecewise margin.
+from 1.0 to 0.25, so surplus-energy passes lose their ramp income. It also
+tightens the hold speed tolerance from bounds [0, 0.5], margin 2.0 to
+bounds [0, 0.1], margin 0.5. The pumping ramp remains identical to v4 for
+Ẽ ≤ 1, while a moving near-target state now loses hold income much sooner.
+See `acrobot_reward_versions.md` for both tolerances.
 
 **Hanging-start v4.1 failed, and the failure is instructive.** Held-out eval
 (`results/acrobot_v41_v5_eval.csv`): CT-SAC never even reached the height
@@ -135,27 +136,37 @@ requires the penalized overshoot. Energy calibration is pose-independent and
 composes with the reset unchanged; `uniform_start=False` restores the
 near-hanging reset for from-hanging probes and A/B comparison.
 
+**Twenty-second runway.** PPO and CT-SAC now use 20 physical-second v4.1
+episodes for both training and evaluation, leaving time to stabilize after a
+late top arrival and to satisfy the one-second strict capture criterion. The
+total 1 M-step budget, $\gamma=0.995$, and uniform starts are unchanged. PPO
+uses 2,000 fixed steps per episode; irregular CT-SAC uses a 5,000-step cap so
+its heavy small-$\Delta t$ tail has ample headroom to reach the full physical
+horizon under the configured sampler.
+
 Because training now measures capture-from-anywhere, the true task (swing up
 from hanging) is scored two ways. Post-training, `evaluations/eval_acrobot_v41_v5.py`
 evaluates each checkpoint from both starts (`start` column). During training,
 `run_ct_rl.py --eval_hanging` adds a second eval track from the hanging start
 alongside the uniform-start primary: it logs `eval_hanging/*` and saves its
-own gated `best_model_hanging/`, without disturbing the primary `best_model/`.
-Because that hanging track resets every eval episode from down, its hold
-occupancy only rises on genuine from-hanging capture — the start-distribution
-income that trivially satisfies the uniform gate is absent — so
-`best_model_hanging/` is the honest true-task selection (it will simply stay
-empty if no from-hanging capture emerges, which is itself the answer). v5's
+own `best_model_hanging/`, without disturbing the primary `best_model/`.
+For v4.1 PPO and CT-SAC, both checkpoint paths use the same strict event:
+tip distance below 0.2 and joint-speed norm below 0.2 continuously for at
+least one physical second. Selection maximizes the episode success rate,
+then mean maximum residence duration; return is diagnostic only. Physical
+residence uses `dt_used`, so CT-SAC's irregular steps and PPO's fixed steps
+are scored in seconds under the same definition. The hanging track is the
+honest true-task selection because it can satisfy that event only after a
+genuine from-down capture. v5's
 ceiling is a caution: uniform starts made it learnable but held-out height
 occupancy tops out ≈0.12, so uniform-start v4.1 is expected to become
 learnable but not automatically to sustain balance — v4.1's velocity-gated
 hold is a stronger balance signal than v5's raw occupancy, which is the reason
 to prefer it.
 
-(On a resumed run the hanging track's best-so-far is not restored from the
-checkpoint the way the primary eval's is, so `best_model_hanging/` may be
-re-selected from a fresh baseline after a resubmission; the primary
-`best_model/` keeps full resume fidelity.)
+Wall-clock checkpoints persist both the primary and hanging evaluation
+histories and their best strict ranks, so neither best-model path can regress
+after a resumed training chunk.
 
 ## v5: unshaped height occupancy as the control arm
 

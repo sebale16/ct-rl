@@ -1,6 +1,7 @@
 # evaluations/evaluation_helpers.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import os
 from pathlib import Path
@@ -23,11 +24,27 @@ from models.base import Model
 from models.actor_q_critic import ActorQCriticModel
 from models.actor_v_critic import ActorVCriticModel
 from models.coupled_vq import CoupledVqModel
+from evaluations.sustained_capture import (
+    CaptureEpisodeResult,
+    SustainedCaptureSpec,
+    SustainedCaptureTracker,
+)
 from common.utils import (
     load_ct_hyperparams_from_table,
     get_device,
     normalize_eval_range,
 )
+
+
+@dataclass
+class EpisodeEvaluationResults:
+    """Per-episode outputs, including optional physical-time diagnostics."""
+
+    returns: List[float]
+    lengths: List[int]
+    occupancies: Optional[List[float]] = None
+    capture_successes: Optional[List[bool]] = None
+    capture_durations: Optional[List[float]] = None
 
 
 # Global map from algorithm string to the corresponding model or algorithm class
@@ -58,6 +75,8 @@ def evaluate_policy_per_episode(
     deterministic: bool = True,
     reset_seed: Optional[int] = None,
     occupancy_key: Optional[str] = None,
+    capture_spec: Optional[SustainedCaptureSpec] = None,
+    return_metrics: bool = False,
 ):
     """
     Episodic eval for continuous-time model.
@@ -73,6 +92,12 @@ def evaluate_policy_per_episode(
     ``info[occupancy_key]`` each step and its dt-weighted mean over each episode
     is returned as a third list ``episode_occupancies`` (used e.g. for the
     acrobot hold-occupancy best-model gate).
+
+    If ``capture_spec`` is given, strict-capture residence is accumulated in
+    physical time between consecutive qualifying endpoints. With
+    ``return_metrics=True`` all outputs are returned in
+    :class:`EpisodeEvaluationResults`; the legacy tuple return is preserved by
+    default.
     """
     is_vec_env = _is_vec_env(env)
     n_envs = int(getattr(env, "num_envs", 1)) if is_vec_env else 1
@@ -80,9 +105,16 @@ def evaluate_policy_per_episode(
     # A fixed initial reset makes every callback invocation evaluate the same
     # episode/reset and irregular-time streams.  Subsequent episode resets
     # advance those freshly rooted local streams deterministically.
-    obs, _ = env.reset(seed=reset_seed)
+    obs, reset_infos = env.reset(seed=reset_seed)
     if not is_vec_env:
         obs = np.asarray(obs, dtype=np.float32)
+        reset_info_list = [reset_infos]
+    else:
+        reset_info_list = (
+            list(reset_infos)
+            if isinstance(reset_infos, (list, tuple))
+            else [reset_infos] * n_envs
+        )
 
     running_returns = np.zeros((n_envs,), dtype=np.float64)
     running_lengths = np.zeros((n_envs,), dtype=np.int64)
@@ -92,6 +124,13 @@ def evaluate_policy_per_episode(
     episode_returns: List[float] = []
     episode_lengths: List[int] = []
     episode_occupancies: List[float] = []
+    episode_capture_successes: List[bool] = []
+    episode_capture_durations: List[float] = []
+    capture_tracker = (
+        SustainedCaptureTracker(n_envs, capture_spec, reset_info_list)
+        if capture_spec is not None
+        else None
+    )
 
     while len(episode_returns) < n_eval_episodes:
         obs_batch = obs if is_vec_env else obs[None, ...]
@@ -122,29 +161,65 @@ def evaluate_policy_per_episode(
         running_returns += rew_arr
         running_lengths += 1
 
+        info_list = (
+            list(infos)
+            if is_vec_env and isinstance(infos, (list, tuple))
+            else [infos] * n_envs
+        )
+
         if occupancy_key is not None:
-            dt_arr = (
-                np.asarray(next_t, dtype=np.float64).reshape(-1)
-                - np.asarray(t, dtype=np.float64).reshape(-1)
+            dt_arr = np.asarray(
+                [
+                    float(info_list[i].get("dt_used", np.nan))
+                    for i in range(n_envs)
+                ],
+                dtype=np.float64,
             )
-            if dt_arr.size != n_envs:
-                dt_arr = np.full((n_envs,), float(dt_arr.reshape(-1)[0]))
-            if is_vec_env:
-                occ_infos = infos if isinstance(infos, (list, tuple)) else [infos] * n_envs
-                occ_arr = np.asarray(
-                    [float(occ_infos[i].get(occupancy_key, 0.0)) for i in range(n_envs)],
-                    dtype=np.float64,
+            missing_dt = ~np.isfinite(dt_arr) | (dt_arr <= 0.0)
+            if np.any(missing_dt):
+                t_arr = np.asarray(t, dtype=np.float64).reshape(-1)
+                next_t_arr = np.asarray(next_t, dtype=np.float64).reshape(-1)
+                if t_arr.size == 1:
+                    t_arr = np.full(n_envs, float(t_arr[0]))
+                if next_t_arr.size == 1:
+                    next_t_arr = np.full(n_envs, float(next_t_arr[0]))
+                fallback = next_t_arr - t_arr
+                for i in np.where(missing_dt)[0]:
+                    if done_arr[i] and "terminal_next_t" in info_list[i]:
+                        fallback[i] = (
+                            float(info_list[i]["terminal_next_t"]) - t_arr[i]
+                        )
+                dt_arr[missing_dt] = fallback[missing_dt]
+            if not np.all(np.isfinite(dt_arr)) or np.any(dt_arr <= 0.0):
+                raise ValueError(
+                    f"evaluation step durations must be finite and > 0, got {dt_arr}"
                 )
-            else:
-                occ_arr = np.asarray(
-                    [float(infos.get(occupancy_key, 0.0))], dtype=np.float64
-                )
+            occ_arr = np.asarray(
+                [
+                    float(info_list[i].get(occupancy_key, 0.0))
+                    for i in range(n_envs)
+                ],
+                dtype=np.float64,
+            )
             running_occ_w += occ_arr * dt_arr
             running_dt += dt_arr
 
-        if is_vec_env:
-            info_list = infos if isinstance(infos, (list, tuple)) else [infos] * n_envs
+        capture_results: List[Optional[CaptureEpisodeResult]] = [None] * n_envs
+        if capture_tracker is not None:
+            for i in range(n_envs):
+                reset_info = (
+                    info_list[i].get("reset_info")
+                    if bool(done_arr[i]) and is_vec_env
+                    else None
+                )
+                capture_results[i] = capture_tracker.update_slot(
+                    i,
+                    info_list[i],
+                    done=bool(done_arr[i]),
+                    reset_info=reset_info,
+                )
 
+        if is_vec_env:
             # Record stats at the end of episode of a subset of envs inside the vec_env
             done_indices = np.where(done_arr)[0]
             for i in done_indices:
@@ -162,6 +237,14 @@ def evaluate_policy_per_episode(
                     episode_occupancies.append(
                         float(running_occ_w[i] / running_dt[i])
                         if running_dt[i] > 0 else 0.0
+                    )
+                if capture_tracker is not None:
+                    capture_result = capture_results[i]
+                    if capture_result is None:
+                        raise RuntimeError("missing terminal capture result")
+                    episode_capture_successes.append(capture_result.success)
+                    episode_capture_durations.append(
+                        capture_result.max_duration_seconds
                     )
 
                 running_returns[i] = 0.0
@@ -194,6 +277,14 @@ def evaluate_policy_per_episode(
                         float(running_occ_w[0] / running_dt[0])
                         if running_dt[0] > 0 else 0.0
                     )
+                if capture_tracker is not None:
+                    capture_result = capture_results[0]
+                    if capture_result is None:
+                        raise RuntimeError("missing terminal capture result")
+                    episode_capture_successes.append(capture_result.success)
+                    episode_capture_durations.append(
+                        capture_result.max_duration_seconds
+                    )
 
                 running_returns[0] = 0.0
                 running_lengths[0] = 0
@@ -201,11 +292,41 @@ def evaluate_policy_per_episode(
                 running_dt[0] = 0.0
 
                 # single env must reset explicitly
-                obs, _ = env.reset()
+                obs, reset_info = env.reset()
                 obs = np.asarray(obs, dtype=np.float32)
+                if capture_tracker is not None:
+                    capture_tracker.reset_slot(0, reset_info)
             else:
                 obs = np.asarray(next_obs, dtype=np.float32)
 
+    metrics = EpisodeEvaluationResults(
+        returns=episode_returns,
+        lengths=episode_lengths,
+        occupancies=(episode_occupancies if occupancy_key is not None else None),
+        capture_successes=(
+            episode_capture_successes if capture_spec is not None else None
+        ),
+        capture_durations=(
+            episode_capture_durations if capture_spec is not None else None
+        ),
+    )
+    if return_metrics:
+        return metrics
+    if occupancy_key is not None and capture_spec is not None:
+        return (
+            episode_returns,
+            episode_lengths,
+            episode_occupancies,
+            episode_capture_successes,
+            episode_capture_durations,
+        )
+    if capture_spec is not None:
+        return (
+            episode_returns,
+            episode_lengths,
+            episode_capture_successes,
+            episode_capture_durations,
+        )
     if occupancy_key is not None:
         return episode_returns, episode_lengths, episode_occupancies
     return episode_returns, episode_lengths
