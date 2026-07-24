@@ -106,14 +106,21 @@ def rollout(env, pol, seed):
 
 def discover():
     specs = []  # dict(framework, algo, env_id, mode, seed, kind, path)
-    # CT-SAC runs: (env_id, mode, run_tag)
-    ct = [
-        ("acrobot-swingup-v4.1", "final_mf", "acrov41_mf_v2"),
-        ("acrobot-swingup-v5", "mf_hz_g0999", "acrov5_v2"),
-        ("acrobot-swingup-v5", "mf_hz_g09995", "acrov5_v2"),
-    ]
-    for env_id, mode, tag in ct:
-        for d in sorted(glob.glob(f"saved_models/ct_sac/{env_id}/{mode}/seed_*/*{tag}")):
+    # Tags default to the v3 matched6 batch (acrobot-swingup-v4.1 only, the env
+    # with the shared strict sustained-capture checkpoint rule); override via
+    # env to re-evaluate an earlier batch (e.g. the v2 v4.1/v5 runs).
+    #   ACRO_EVAL_CT       -> "env_id:mode[,env_id:mode...]" for CT-SAC
+    #   ACRO_EVAL_CT_TAG   -> CT-SAC run-dir tag suffix
+    #   ACRO_EVAL_PPO_ENVS -> comma-separated env_ids for discrete PPO
+    #   ACRO_EVAL_PPO_DESC -> PPO run-dir --desc substring
+    ct_tag = os.environ.get("ACRO_EVAL_CT_TAG", "acrov41_mf_v3")
+    ppo_desc = os.environ.get("ACRO_EVAL_PPO_DESC", "v3")
+    ct_spec = os.environ.get("ACRO_EVAL_CT", "acrobot-swingup-v4.1:final_mf")
+    ppo_envs = os.environ.get("ACRO_EVAL_PPO_ENVS", "acrobot-swingup-v4.1")
+    # CT-SAC runs: (env_id, mode) all discovered under tag ct_tag
+    ct = [tuple(x.split(":")) for x in ct_spec.split(",") if x.strip()]
+    for env_id, mode in ct:
+        for d in sorted(glob.glob(f"saved_models/ct_sac/{env_id}/{mode}/seed_*/*{ct_tag}")):
             seed = int(d.split("/seed_")[1].split("/")[0])
             for kind, p in [("final", f"{d}/final_model.pth"),
                             ("best", f"{d}/best_model/best_model.pth"),
@@ -121,16 +128,17 @@ def discover():
                 if os.path.isfile(p):
                     specs.append(dict(framework="ct", algo="ct_sac", env_id=env_id,
                                       mode=mode, seed=seed, kind=kind, path=p))
-    # Discrete-time SB3 PPO baseline (--desc v2 runs)
+    # Discrete-time SB3 PPO baseline (--desc ppo_desc runs)
     for algo in ("ppo",):
-        for env_id in ("acrobot-swingup-v4.1", "acrobot-swingup-v5"):
+        for env_id in [e for e in ppo_envs.split(",") if e.strip()]:
             for d in sorted(glob.glob(
-                    f"saved_models/{algo}/{env_id}/final_mf/seed_*/*v2*")):
+                    f"saved_models/{algo}/{env_id}/final_mf/seed_*/*{ppo_desc}*")):
                 if not os.path.isdir(d):
                     continue
                 seed = int(d.split("/seed_")[1].split("/")[0])
                 for kind, p in [("final", f"{d}/final_model.zip"),
-                                ("best", f"{d}/best_model/best_model.zip")]:
+                                ("best", f"{d}/best_model/best_model.zip"),
+                                ("best_hanging", f"{d}/best_model_hanging/best_model.zip")]:
                     if os.path.isfile(p):
                         specs.append(dict(framework="sb3", algo=algo, env_id=env_id,
                                           mode="final_mf", seed=seed, kind=kind, path=p))
