@@ -14,3 +14,5 @@ third,humanoid-walk,irregular,0.025,0.005,0.01,0.04,1000,25,tail_p=0.8;tail_spli
 second,trading,irregular,2.0,1.0,1.0,11.0,2100,4000,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,2,True,True,1000000,0.98,300000,0.001,256,1,1,20000,normal,sigma=0.1,0.02,2,0.1,0.2,2000,100000,40000
 top,trading,irregular,2.0,1.0,1.0,11.0,2100,4000,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,2,True,True,1000000,0.98,300000,0.001,256,1,1,20000,normal,sigma=0.1,0.02,2,0.4,1.0,2000,100000,40000
 third,trading,irregular,2.0,1.0,1.0,11.0,2100,4000,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,2,True,True,1000000,0.98,300000,0.001,256,1,1,20000,normal,sigma=0.2,0.02,2,0.2,0.5,2000,100000,40000
+final_mf,acrobot-swingup-v4.2,irregular,0.01,0.002,0.002,0.03,5000,20,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,2,True,True,1000000,0.995,300000,0.00073,256,1,1,10000,normal,sigma=0.1,0.02,2,0.2,0.3,2000,100000,25000
+final_mf,cartpole-two_poles-curriculum,irregular,0.01,0.002,0.002,0.03,5000,20,tail_p=0.99;tail_split=0.9,1,"400,300","400,300",ReLU,2,True,True,1000000,0.995,300000,0.00073,256,1,1,10000,normal,sigma=0.1,0.02,2,0.2,0.3,2000,100000,25000

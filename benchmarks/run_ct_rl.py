@@ -32,6 +32,7 @@ from models.noise import (
 from common.callbacks import (
     CallbackList,
     CheckpointCallback,
+    CurriculumFractionCallback,
     EvalCallback,
     WallClockCheckpointCallback,
 )
@@ -114,13 +115,37 @@ def make_ct_env(
     return env
 
 
+# Fraction of the training budget over which the reset curriculum widens from
+# its near-upright band to the full circle; the remaining budget trains on the
+# full (uniform) start distribution with the capture value already in place.
+CURRICULUM_SPAN_FRAC = 0.5
+
+
+def _iter_dmc_envs(env):
+    """Yield the ``DMCContinuousEnv`` instances inside vector/monitor wrappers."""
+    subs = getattr(env, "envs", None)
+    if subs:
+        for sub in subs:
+            yield from _iter_dmc_envs(sub)
+        return
+    seen = set()
+    cur = env
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, DMCContinuousEnv):
+            yield cur
+            return
+        cur = getattr(cur, "env", None)
+
+
 def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
     """Choose a mechanics-aware layout through vector/wrapper layers.
 
-    Raw cartpole has information that the generic ``[q; qdot]`` layout cannot
-    infer from tensor shapes: its cart translation is invariant and its single
-    actuator drives only the slider. Other raw hinge/slide domains keep the
-    generic fallback until they have an equally explicit layout.
+    Raw CartPole chains and Acrobot have mechanism information that the generic
+    ``[q; qdot]`` layout cannot infer from tensor shapes: exact periodicity,
+    mass invariances, joint limits, and sparse actuator placement. Other raw
+    hinge/slide domains keep the generic fallback until they have an equally
+    explicit layout.
 
     ``layout_cls`` is injected to keep the optional model-based import local and
     make this selection rule independently testable.
@@ -180,6 +205,7 @@ def run_algorithm(
     init_weights: str | None = None,
     best_model_gate: str | None = None,
     eval_hanging: bool = False,
+    curriculum_steps: int | None = None,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -236,6 +262,22 @@ def run_algorithm(
 
     if total_timesteps_override is not None:
         total_timesteps = total_timesteps_override
+
+    # Reset curriculum (acrobot swingup-v4.2, cartpole two_poles-curriculum):
+    # the training env widens its start band over ``curr_total`` steps;
+    # evaluation must use a fixed start, so force the curriculum off in every
+    # eval env kwargs (the task defaults it on).
+    is_curriculum_env = env_id.endswith(("-v4.2", "-curriculum"))
+    if is_curriculum_env:
+        _eval_task_kwargs = dict(eval_env_kwargs.get("task_kwargs", {}))
+        _eval_task_kwargs["curriculum"] = False
+        eval_env_kwargs = dict(eval_env_kwargs)
+        eval_env_kwargs["task_kwargs"] = _eval_task_kwargs
+        curr_total = (
+            int(curriculum_steps)
+            if curriculum_steps is not None
+            else int(CURRICULUM_SPAN_FRAC * total_timesteps)
+        )
 
     # Build logs and saved_models save paths
     log_dir = build_save_path(
@@ -596,6 +638,29 @@ def run_algorithm(
 
     callbacks = [checkpoint_callback, eval_callback]
 
+    # Drive the reset curriculum from global training progress.  The setter
+    # fans the fraction out to every training env; eval envs were built with
+    # the curriculum off and are left untouched.
+    if is_curriculum_env:
+        curriculum_envs = list(_iter_dmc_envs(train_env))
+
+        def _set_curriculum_fraction(frac, _envs=curriculum_envs):
+            for e in _envs:
+                e.set_curriculum_fraction(frac)
+
+        callbacks.append(
+            CurriculumFractionCallback(
+                set_fraction=_set_curriculum_fraction,
+                total_steps=curr_total,
+                verbose=1,
+            )
+        )
+        print(
+            f"[curriculum] reset band widens to full over {curr_total} steps "
+            f"({len(curriculum_envs)} train env(s)); eval starts fixed.",
+            flush=True,
+        )
+
     # Optional second eval track from the canonical hanging start, run
     # alongside the (uniform-start) primary eval.  For acrobot v4.1/v5 the
     # training resets are uniform random, so the primary eval and its
@@ -757,6 +822,13 @@ def parse_args():
         "uniform-start primary eval. For acrobot v4.1/v5.",
     )
     parser.add_argument(
+        "--curriculum_steps",
+        type=int,
+        default=None,
+        help="Steps over which the acrobot v4.2 reset band widens to the full "
+        "circle. Default: half the training budget. Ignored for other tasks.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -895,6 +967,7 @@ def main():
                 init_weights=args.init_weights,
                 best_model_gate=args.best_model_gate,
                 eval_hanging=args.eval_hanging,
+                curriculum_steps=args.curriculum_steps,
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:
