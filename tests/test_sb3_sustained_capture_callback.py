@@ -14,6 +14,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without SB3
     SB3_IMPORT_ERROR = exc
 else:
     from common.sb3_callbacks import (
+        CurriculumFractionCallback,
         SB3CaptureEvaluation,
         SustainedCaptureEvalCallback,
         evaluate_sb3_policy_with_capture,
@@ -395,6 +396,68 @@ class SB3SustainedCaptureTests(unittest.TestCase):
             any(key.startswith("eval/") for key in recorded_keys),
             recorded_keys,
         )
+
+
+class _RecordingVecEnv:
+    """Minimal VecEnv stand-in that records env_method calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def env_method(self, name, *args, **kwargs):
+        self.calls.append((name, args))
+        return [None]
+
+
+@unittest.skipUnless(SB3_IMPORT_ERROR is None, "stable-baselines3 not installed")
+class TestCurriculumFractionCallback(unittest.TestCase):
+    def _make(self, total_steps):
+        env = _RecordingVecEnv()
+        model = MagicMock()
+        model.num_timesteps = 0
+        model.get_env.return_value = env
+        cb = CurriculumFractionCallback(total_steps=total_steps)
+        cb.init_callback(model)
+        return cb, model, env
+
+    def _pushed(self, env):
+        return [
+            args[0]
+            for name, args in env.calls
+            if name == "set_curriculum_fraction"
+        ]
+
+    def test_pushes_fraction_from_training_progress(self):
+        cb, model, env = self._make(100)
+        model.num_timesteps = 0
+        cb.on_training_start({}, {})
+        for t in (50, 100, 200):
+            model.num_timesteps = t
+            cb.on_step()
+        pushed = self._pushed(env)
+        self.assertEqual(pushed[0], 0.0)
+        self.assertIn(0.5, pushed)
+        self.assertEqual(pushed[-1], 1.0)
+        self.assertLessEqual(max(pushed), 1.0)
+
+    def test_resume_uses_restored_timesteps(self):
+        cb, model, env = self._make(200)
+        model.num_timesteps = 150
+        cb.on_training_start({}, {})
+        self.assertAlmostEqual(self._pushed(env)[-1], 0.75)
+
+    def test_dedupes_repeated_fraction(self):
+        cb, model, env = self._make(1000)
+        model.num_timesteps = 500
+        cb.on_step()
+        cb.on_step()
+        self.assertEqual(self._pushed(env), [0.5])
+
+    def test_inert_when_total_nonpositive(self):
+        cb, model, env = self._make(0)
+        model.num_timesteps = 50
+        cb.on_step()
+        self.assertEqual(self._pushed(env), [1.0])
 
 
 if __name__ == "__main__":

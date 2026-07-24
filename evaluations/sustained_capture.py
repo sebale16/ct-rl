@@ -17,6 +17,17 @@ import numpy as np
 STRICT_CAPTURE_INFO_KEY = "acrobot_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
+# The velocity-gated capture reward and the 20 s runway are shared by v4.1 and
+# the v4.2 curriculum, so both use the same strict-capture checkpoint rule.
+STRICT_CAPTURE_ENV_IDS = frozenset(
+    {"acrobot-swingup-v4.1", "acrobot-swingup-v4.2"}
+)
+# Every algorithm evaluated on those tasks selects checkpoints under this one
+# capture definition, so the model-free, continuous-time, and oracle arms are
+# ranked identically.
+STRICT_CAPTURE_ALGORITHMS = frozenset(
+    {"ppo", "sac", "td3", "ct_sac", "ct_td3"}
+)
 
 
 @dataclass(frozen=True)
@@ -174,8 +185,8 @@ def strict_capture_spec_for(
     under different definitions.
     """
 
-    if env_id != STRICT_CAPTURE_ENV_ID:
+    if env_id not in STRICT_CAPTURE_ENV_IDS:
         return None
-    if algorithm.lower() not in {"ppo", "ct_sac"}:
+    if algorithm.lower() not in STRICT_CAPTURE_ALGORITHMS:
         return None
     return SustainedCaptureSpec()

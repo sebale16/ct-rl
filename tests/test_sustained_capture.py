@@ -90,23 +90,24 @@ class TestSustainedCaptureTracker(unittest.TestCase):
         self.assertGreater(longer_tie, shorter_tie)
 
     def test_strict_checkpoint_rule_is_scoped_to_requested_pair(self):
-        self.assertIsInstance(
-            strict_capture_spec_for(
-                algorithm="ct_sac", env_id="acrobot-swingup-v4.1"
-            ),
-            SustainedCaptureSpec,
-        )
-        self.assertIsInstance(
-            strict_capture_spec_for(
-                algorithm="ppo", env_id="acrobot-swingup-v4.1"
-            ),
-            SustainedCaptureSpec,
-        )
+        # All benchmarked algorithms share the rule on the two velocity-gated
+        # capture tasks (v4.1 and the v4.2 curriculum), so every arm is ranked
+        # by the same capture definition.
+        for algorithm in ("ct_sac", "ct_td3", "ppo", "sac", "td3"):
+            for env_id in ("acrobot-swingup-v4.1", "acrobot-swingup-v4.2"):
+                with self.subTest(algorithm=algorithm, env_id=env_id):
+                    self.assertIsInstance(
+                        strict_capture_spec_for(
+                            algorithm=algorithm, env_id=env_id
+                        ),
+                        SustainedCaptureSpec,
+                    )
+        # Out of scope: the unshaped v5 arm, the pre-capture v4 reward, and
+        # any algorithm the benchmark does not run.
         for algorithm, env_id in (
-            ("sac", "acrobot-swingup-v4.1"),
-            ("ct_td3", "acrobot-swingup-v4.1"),
-            ("ppo", "acrobot-swingup-v4"),
             ("ct_sac", "acrobot-swingup-v5"),
+            ("ppo", "acrobot-swingup-v4"),
+            ("a2c", "acrobot-swingup-v4.1"),
         ):
             with self.subTest(algorithm=algorithm, env_id=env_id):
                 self.assertIsNone(

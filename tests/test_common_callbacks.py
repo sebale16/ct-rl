@@ -12,6 +12,7 @@ from common.callbacks import (
     CallbackList,
     EveryNTimesteps,
     CheckpointCallback,
+    CurriculumFractionCallback,
     ProgressBarCallback,
     EvalCallback,
     StopTrainingOnRewardThreshold,
@@ -280,6 +281,43 @@ class TestCallbacks(unittest.TestCase):
             np.asarray(saved["capture_successes"].tolist(), dtype=bool),
             [[False, False], [False, False], [True, False]],
         )
+
+    def test_curriculum_fraction_callback_tracks_training_progress(self):
+        algo = MockAlgorithm()
+        seen = []
+        cb = CurriculumFractionCallback(
+            set_fraction=seen.append, total_steps=100
+        )
+        cb.init_callback(algo)
+        algo.num_timesteps = 0
+        cb.on_training_start({}, {})
+        self.assertEqual(seen[-1], 0.0)
+        for t, expected in [(25, 0.25), (50, 0.5), (100, 1.0), (150, 1.0)]:
+            algo.num_timesteps = t
+            cb.on_step()
+            self.assertAlmostEqual(seen[-1], expected)
+
+    def test_curriculum_fraction_callback_resumes_from_restored_timesteps(self):
+        # On resume num_timesteps is already advanced before the first rollout;
+        # the start fraction must reflect it, not zero.
+        algo = MockAlgorithm()
+        seen = []
+        cb = CurriculumFractionCallback(
+            set_fraction=seen.append, total_steps=200
+        )
+        cb.init_callback(algo)
+        algo.num_timesteps = 150
+        cb.on_training_start({}, {})
+        self.assertAlmostEqual(seen[-1], 0.75)
+
+    def test_curriculum_fraction_callback_inert_when_total_nonpositive(self):
+        algo = MockAlgorithm()
+        seen = []
+        cb = CurriculumFractionCallback(set_fraction=seen.append, total_steps=0)
+        cb.init_callback(algo)
+        algo.num_timesteps = 50
+        cb.on_step()
+        self.assertEqual(seen[-1], 1.0)
 
     def test_stop_on_reward_threshold(self):
         # This callback needs a parent EvalCallback

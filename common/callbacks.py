@@ -241,6 +241,42 @@ class LogEveryNTimesteps(EveryNTimesteps):
         return True
 
 
+class CurriculumFractionCallback(BaseCallback):
+    """Drive a task reset curriculum from global training progress.
+
+    Each step this sets ``fraction = min(1, num_timesteps / total_steps)`` on
+    the training environment through ``set_fraction``.  Keying off
+    ``num_timesteps`` — which is restored on resume — keeps the schedule
+    continuous across checkpointed training chunks, where a per-environment
+    step count would restart from zero.  ``total_steps <= 0`` pins the fraction
+    at 1 (curriculum complete), so a completed or disabled schedule is inert.
+    """
+
+    def __init__(
+        self,
+        set_fraction: Callable[[float], None],
+        total_steps: int,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose=verbose)
+        self.set_fraction = set_fraction
+        self.total_steps = int(total_steps)
+
+    def _fraction(self) -> float:
+        if self.total_steps <= 0:
+            return 1.0
+        return float(min(1.0, max(0.0, self.num_timesteps / self.total_steps)))
+
+    def _on_training_start(self) -> None:
+        # Apply before the first rollout so the earliest resets already reflect
+        # progress (nonzero after a resume).
+        self.set_fraction(self._fraction())
+
+    def _on_step(self) -> bool:
+        self.set_fraction(self._fraction())
+        return True
+
+
 class CheckpointCallback(BaseCallback):
     """
     Callback for saving a model every `save_freq` steps

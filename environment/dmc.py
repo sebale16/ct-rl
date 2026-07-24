@@ -31,8 +31,10 @@ from .acrobot_v2 import (
     swingup_v3,
     swingup_v4,
     swingup_v41,
+    swingup_v42,
     swingup_v5,
 )
+from .double_cartpole_v2 import two_poles_curriculum
 from .base import ContinuousEnv
 
 
@@ -222,10 +224,19 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v3": swingup_v3,
             "swingup-v4": swingup_v4,
             "swingup-v4.1": swingup_v41,
+            "swingup-v4.2": swingup_v42,
             "swingup-v5": swingup_v5,
+        }
+        local_cartpole_tasks = {
+            "two_poles-curriculum": two_poles_curriculum,
         }
         if domain_name == "acrobot" and task_name in local_acrobot_tasks:
             self._env = local_acrobot_tasks[task_name](
+                environment_kwargs=environment_kwargs,
+                **task_kwargs,
+            )
+        elif domain_name == "cartpole" and task_name in local_cartpole_tasks:
+            self._env = local_cartpole_tasks[task_name](
                 environment_kwargs=environment_kwargs,
                 **task_kwargs,
             )
@@ -310,6 +321,25 @@ class DMCContinuousEnv(ContinuousEnv):
             self.observation_space = spaces.Box(
                 low=-np.inf, high=np.inf, shape=(nq + nv,), dtype=np.float32
             )
+
+    @property
+    def has_curriculum(self) -> bool:
+        """Whether the underlying task exposes a reset curriculum to drive."""
+        task = getattr(self._env, "task", None)
+        return bool(getattr(task, "curriculum", False)) and hasattr(
+            task, "set_curriculum_fraction"
+        )
+
+    def set_curriculum_fraction(self, fraction: float) -> None:
+        """Forward curriculum progress in [0, 1] to the underlying task.
+
+        No-op when the task has no curriculum, so callers can drive every
+        training env uniformly regardless of task type.
+        """
+        task = getattr(self._env, "task", None)
+        setter = getattr(task, "set_curriculum_fraction", None)
+        if callable(setter):
+            setter(fraction)
 
     def close(self) -> None:
         with self._drift_rollout_lock:

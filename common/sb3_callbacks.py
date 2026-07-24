@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import numpy as np
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.vec_env import sync_envs_normalization
 
 from evaluations.sustained_capture import (
@@ -298,3 +298,39 @@ class SustainedCaptureEvalCallback(EvalCallback):
         if continue_training and self.callback is not None:
             continue_training = self._on_event()
         return continue_training
+
+
+class CurriculumFractionCallback(BaseCallback):
+    """Drive a dm_control reset curriculum from SB3 training progress.
+
+    Each step this pushes ``fraction = min(1, num_timesteps / total_steps)`` to
+    every training env via ``env_method("set_curriculum_fraction", ...)``.
+    Keying off ``num_timesteps`` — restored by SB3 on a resumed ``learn`` — keeps
+    the schedule continuous across training chunks.  ``total_steps <= 0`` pins
+    the fraction at 1 (curriculum complete).  Pushes are de-duplicated at
+    millesimal resolution so the vectorized method call fires only when the
+    schedule actually advances.
+    """
+
+    def __init__(self, total_steps: int, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self.total_steps = int(total_steps)
+        self._last_pushed: Optional[float] = None
+
+    def _fraction(self) -> float:
+        if self.total_steps <= 0:
+            return 1.0
+        return float(min(1.0, max(0.0, self.num_timesteps / self.total_steps)))
+
+    def _apply(self) -> None:
+        frac = round(self._fraction(), 3)
+        if frac != self._last_pushed:
+            self._last_pushed = frac
+            self.training_env.env_method("set_curriculum_fraction", frac)
+
+    def _on_training_start(self) -> None:
+        self._apply()
+
+    def _on_step(self) -> bool:
+        self._apply()
+        return True

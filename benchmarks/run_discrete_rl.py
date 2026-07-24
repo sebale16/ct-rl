@@ -35,11 +35,19 @@ from common.utils import (
     normalize_eval_range,
     get_eval_episode_count,
 )
-from common.sb3_callbacks import SustainedCaptureEvalCallback
+from common.sb3_callbacks import (
+    CurriculumFractionCallback,
+    SustainedCaptureEvalCallback,
+)
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import strict_capture_spec_for
 
 _MONITOR_COUNTER = count()
+
+# Fraction of the training budget over which the acrobot v4.2 reset band widens
+# from its near-upright cap to the full circle; the rest trains on the full
+# start distribution. Matches the continuous-time runner.
+CURRICULUM_SPAN_FRAC = 0.5
 
 
 def make_env(env_id, monitor_root, seed, env_meta=None, dataset_path=None):
@@ -127,6 +135,7 @@ def run_sb3_benchmark(
     n_eval_episodes: int = 10,
     eval_range: str | None = None,
     eval_hanging: bool = False,
+    curriculum_steps: int | None = None,
 ):
     """
     Runs a single Stable-Baselines3 benchmark experiment.
@@ -152,8 +161,8 @@ def run_sb3_benchmark(
     capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
     if eval_hanging and capture_spec is None:
         raise ValueError(
-            "--eval_hanging is supported only for PPO on "
-            "acrobot-swingup-v4.1"
+            "--eval_hanging requires the strict-capture selection, defined "
+            "only for the acrobot swingup-v4.1 / v4.2 tasks"
         )
 
     if env_id.startswith("trading") and eval_range is not None:
@@ -167,6 +176,22 @@ def run_sb3_benchmark(
 
     if total_timesteps_override is not None:
         total_timesteps = total_timesteps_override
+
+    # Reset curriculum (acrobot swingup-v4.2, cartpole two_poles-curriculum):
+    # training envs widen their start band over curr_total steps; evaluation
+    # must use a fixed start, so force the curriculum off in the eval metadata
+    # (the hanging copy inherits it).
+    is_curriculum_env = env_id.endswith(("-v4.2", "-curriculum"))
+    if is_curriculum_env:
+        eval_task_kwargs = dict(eval_env_meta.get("task_kwargs") or {})
+        eval_task_kwargs["curriculum"] = False
+        eval_env_meta = dict(eval_env_meta)
+        eval_env_meta["task_kwargs"] = eval_task_kwargs
+        curr_total = (
+            int(curriculum_steps)
+            if curriculum_steps is not None
+            else int(CURRICULUM_SPAN_FRAC * total_timesteps)
+        )
 
     # If increment modeling is enabled, adjust env
     if increment_modeling:
@@ -328,6 +353,17 @@ def run_sb3_benchmark(
 
     # Combine callbacks
     callbacks.append(log_callback)
+
+    # Drive the reset curriculum from global training progress (eval envs were
+    # built with the curriculum off and are left untouched).
+    if is_curriculum_env:
+        callbacks.append(CurriculumFractionCallback(total_steps=curr_total))
+        print(
+            f"[curriculum] reset band widens to full over {curr_total} steps "
+            f"({n_envs} train env(s)); eval starts fixed.",
+            flush=True,
+        )
+
     callback = CallbackList(callbacks)
 
     # Train
@@ -387,8 +423,15 @@ def parse_args():
         "--eval_hanging",
         action="store_true",
         help="Add a second strict-capture evaluation track from the canonical "
-        "hanging start for PPO on acrobot-swingup-v4.1 "
+        "hanging start for the acrobot swingup-v4.1 / v4.2 tasks "
         "(saves best_model_hanging/ and logs eval_hanging/*).",
+    )
+    parser.add_argument(
+        "--curriculum_steps",
+        type=int,
+        default=None,
+        help="Steps over which the acrobot v4.2 reset band widens to the full "
+        "circle. Default: half the training budget. Ignored for other tasks.",
     )
     parser.add_argument(
         "--seed",
@@ -470,6 +513,7 @@ def main():
                 n_eval_episodes=args.n_eval_episodes,
                 eval_range=eval_range,
                 eval_hanging=args.eval_hanging,
+                curriculum_steps=args.curriculum_steps,
             )
         except (FileNotFoundError, KeyError) as e:
             print(f"\nCould not run {algo_name} due to a configuration error: {e}\n")

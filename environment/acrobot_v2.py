@@ -268,6 +268,8 @@ class BalanceV4(BalanceV3):
         speed_bounds: tuple[float, float] = _SPEED_BOUNDS,
         speed_margin: float = _SPEED_MARGIN,
         uniform_start: bool = False,
+        curriculum: bool = False,
+        curriculum_min_spread: float = 0.5,
     ) -> None:
         super().__init__(
             random=random,
@@ -307,8 +309,30 @@ class BalanceV4(BalanceV3):
         if not np.isfinite(self.speed_margin) or self.speed_margin <= 0.0:
             raise ValueError("speed_margin must be finite and positive")
         self.uniform_start = bool(uniform_start)
+        self.curriculum = bool(curriculum)
+        self.curriculum_min_spread = float(curriculum_min_spread)
+        if not np.isfinite(self.curriculum_min_spread) or not (
+            0.0 < self.curriculum_min_spread <= np.pi
+        ):
+            raise ValueError(
+                "curriculum_min_spread must be finite and in (0, pi]"
+            )
+        # Curriculum progress in [0, 1]; 0 = tightest near-upright band.  The
+        # trainer drives it from global training progress each step.
+        self._curriculum_fraction = 0.0
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
+
+    def set_curriculum_fraction(self, fraction: float) -> None:
+        """Set curriculum progress in [0, 1] (0 = tightest near-upright band)."""
+        frac = float(fraction)
+        if not np.isfinite(frac):
+            raise ValueError("curriculum fraction must be finite")
+        self._curriculum_fraction = float(np.clip(frac, 0.0, 1.0))
+
+    @property
+    def curriculum_fraction(self) -> float:
+        return self._curriculum_fraction
 
     @staticmethod
     def _mechanical_energy(physics) -> float:
@@ -343,11 +367,37 @@ class BalanceV4(BalanceV3):
         self._energy_hang = energy_hang
         self._energy_span = span
 
+    def _initialize_curriculum_episode(self, physics) -> None:
+        """Reset from a band around the upright whose width grows with progress.
+
+        The half-width grows from ``curriculum_min_spread`` at fraction 0 to
+        pi at fraction 1, so early episodes start near the upright rest pose
+        (high energy, a short controlled fall to the goal) and later episodes
+        span the full circle, including the near-hanging pose.  At fraction 1
+        the draw is uniform on [-pi, pi] for both joints, matching the uniform
+        reset, so the curriculum reset is a schedule over the same support that
+        lowers the least-energy reachable start from near Ẽ = 1 toward Ẽ = 0.
+        """
+        spread = self.curriculum_min_spread + self._curriculum_fraction * (
+            np.pi - self.curriculum_min_spread
+        )
+        offsets = self.random.uniform(-spread, spread, 2)
+        # Wrap into (-pi, pi]; identity for spread <= pi, kept for safety.
+        qpos = np.arctan2(np.sin(offsets), np.cos(offsets))
+        qvel_noise = self.random.uniform(
+            -self.velocity_noise, self.velocity_noise, physics.model.nv
+        )
+        physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        physics.named.data.qvel[:] = qvel_noise
+        suite_base.Task.initialize_episode(self, physics)
+
     def initialize_episode(self, physics) -> None:
         # Energy calibration is pose-independent, so the reset choice below
         # composes with it cleanly.
         self._calibrate_energy(physics)
-        if self.uniform_start:
+        if self.curriculum:
+            self._initialize_curriculum_episode(physics)
+        elif self.uniform_start:
             self._initialize_uniform_episode(physics)
         else:
             super().initialize_episode(physics)
@@ -514,6 +564,59 @@ def swingup_v41(
         speed_bounds=speed_bounds,
         speed_margin=speed_margin,
         uniform_start=uniform_start,
+    )
+    return control.Environment(
+        physics,
+        task,
+        time_limit=float(time_limit),
+        **dict(environment_kwargs or {}),
+    )
+
+
+def swingup_v42(
+    *,
+    time_limit: float = 10.0,
+    random=None,
+    environment_kwargs: Optional[Dict[str, Any]] = None,
+    angle_noise: float = 0.05,
+    velocity_noise: float = 0.01,
+    hold_weight: float = 0.8,
+    speed_bounds: tuple[float, float] = V41_SPEED_BOUNDS,
+    speed_margin: float = V41_SPEED_MARGIN,
+    curriculum: bool = True,
+    curriculum_min_spread: float = 0.5,
+    uniform_start: bool = True,
+):
+    """Construct ``acrobot-swingup-v4.2``: v4.1 reward with a reverse curriculum.
+
+    The per-step reward is identical to v4.1 — the same pumping ramp with the
+    tightened overshoot margin and the same velocity-gated hold.  Only the
+    training reset changes: instead of a fixed uniform draw, episodes start in
+    a band around the upright whose half-width grows with training progress,
+    from ``curriculum_min_spread`` up to the full circle.  Early episodes then
+    begin already near the top, where the slow capture v4.1 rewards is directly
+    learnable; as the band widens the start energy reaches down toward hanging,
+    so the capture value learned first propagates onto progressively longer
+    swing-ups.
+
+    The trainer drives progress by calling ``set_curriculum_fraction`` on the
+    task each step.  ``curriculum=False`` disables the schedule and falls back
+    to ``uniform_start`` (used for evaluation, where the start distribution
+    must be fixed); at fraction 1 the curriculum reset already coincides with
+    the uniform draw.
+    """
+    physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
+    task = BalanceV4(
+        random=random,
+        angle_noise=angle_noise,
+        velocity_noise=velocity_noise,
+        hold_weight=hold_weight,
+        energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
+        speed_bounds=speed_bounds,
+        speed_margin=speed_margin,
+        uniform_start=uniform_start,
+        curriculum=curriculum,
+        curriculum_min_spread=curriculum_min_spread,
     )
     return control.Environment(
         physics,

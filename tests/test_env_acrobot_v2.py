@@ -21,6 +21,7 @@ try:
         swingup_v3,
         swingup_v4,
         swingup_v41,
+        swingup_v42,
         swingup_v5,
     )
 
@@ -1480,6 +1481,119 @@ class TestAcrobotSwingupV5GymObjective(unittest.TestCase):
         self.assertTrue(v4_only_keys.isdisjoint(info))
         self.assertEqual(info["acrobot_progress"], 0.0)
         self.assertEqual(info["acrobot_gym_height_success"], 0.0)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV42Curriculum(unittest.TestCase):
+    _MIN_SPREAD = 0.5
+
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV4(
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            curriculum=True,
+            curriculum_min_spread=self._MIN_SPREAD,
+        )
+
+    def _draw_qpos(self, fraction, n=400):
+        self.task.set_curriculum_fraction(fraction)
+        draws = np.empty((n, 2))
+        for i in range(n):
+            self.task.initialize_episode(self.physics)
+            draws[i] = np.asarray(self.physics.data.qpos, dtype=np.float64)
+        return draws
+
+    def test_fraction_zero_confines_starts_to_the_upright_band(self):
+        # Upright rest is (shoulder, elbow) = (0, 0); at fraction 0 both joints
+        # stay within +/- curriculum_min_spread of it.
+        draws = self._draw_qpos(0.0)
+        self.assertLessEqual(np.abs(draws).max(), self._MIN_SPREAD + 1e-9)
+        # And the band is actually used, not collapsed to a point.
+        self.assertGreater(np.abs(draws).max(), 0.4 * self._MIN_SPREAD)
+
+    def test_band_half_width_grows_monotonically_with_fraction(self):
+        widths = [np.abs(self._draw_qpos(f)).max() for f in (0.0, 0.25, 0.5, 1.0)]
+        for lo, hi in zip(widths, widths[1:]):
+            self.assertLess(lo, hi)
+
+    def test_fraction_one_matches_the_uniform_reset_range(self):
+        curriculum = self._draw_qpos(1.0)
+        # Independent uniform-reset task with the same RNG seed / noise.
+        uniform_task = BalanceV4(
+            random=0, angle_noise=0.0, velocity_noise=0.0, uniform_start=True
+        )
+        uniform = np.empty_like(curriculum)
+        for i in range(len(uniform)):
+            uniform_task.initialize_episode(self.physics)
+            uniform[i] = np.asarray(self.physics.data.qpos, dtype=np.float64)
+        # Both span essentially the full [-pi, pi] circle on each joint.
+        for arr in (curriculum, uniform):
+            self.assertGreater(arr.max(), np.pi - 0.1)
+            self.assertLess(arr.min(), -(np.pi - 0.1))
+        # Distributions match in spread (same underlying uniform draw at f=1).
+        np.testing.assert_allclose(
+            curriculum.std(axis=0), uniform.std(axis=0), atol=0.15
+        )
+
+    def test_set_curriculum_fraction_clamps_to_unit_interval(self):
+        self.task.set_curriculum_fraction(-0.5)
+        self.assertEqual(self.task.curriculum_fraction, 0.0)
+        self.task.set_curriculum_fraction(2.0)
+        self.assertEqual(self.task.curriculum_fraction, 1.0)
+        self.task.set_curriculum_fraction(0.3)
+        self.assertAlmostEqual(self.task.curriculum_fraction, 0.3)
+        with self.assertRaises(ValueError):
+            self.task.set_curriculum_fraction(float("nan"))
+
+    def test_invalid_min_spread_rejected(self):
+        for bad in (0.0, -0.1, np.pi + 0.1, float("nan")):
+            with self.assertRaises(ValueError):
+                BalanceV4(random=0, curriculum=True, curriculum_min_spread=bad)
+
+    def test_factory_v42_pairs_curriculum_reset_with_the_v41_reward(self):
+        env = swingup_v42(
+            time_limit=0.1,
+            random=7,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            task = env.task
+            self.assertIsInstance(task, BalanceV4)
+            self.assertTrue(task.curriculum)
+            # Reward identical to v4.1: tightened overshoot margin and slow gate.
+            self.assertEqual(
+                task.energy_overshoot_margin, V41_ENERGY_OVERSHOOT_MARGIN
+            )
+            self.assertEqual(task.speed_bounds, V41_SPEED_BOUNDS)
+            self.assertEqual(task.speed_margin, V41_SPEED_MARGIN)
+        finally:
+            env.close()
+
+    def test_curriculum_disabled_falls_back_to_the_uniform_reset(self):
+        # Evaluation builds the task with curriculum off; it must then honor
+        # uniform_start regardless of any fraction pushed onto it.
+        task = BalanceV4(
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            curriculum=False,
+            uniform_start=True,
+        )
+        task.set_curriculum_fraction(0.0)
+        draws = np.empty((200, 2))
+        for i in range(len(draws)):
+            task.initialize_episode(self.physics)
+            draws[i] = np.asarray(self.physics.data.qpos, dtype=np.float64)
+        # Full uniform range, not the tight fraction-0 band.
+        self.assertGreater(draws.max(), np.pi - 0.2)
+        self.assertLess(draws.min(), -(np.pi - 0.2))
 
 
 if __name__ == "__main__":
