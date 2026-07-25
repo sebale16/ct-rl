@@ -48,7 +48,8 @@ OUT = os.environ.get("ACRO_EVAL_OUT", "results/launch6_eval.csv")
 TAG = os.environ.get("LAUNCH_TAG", "launch6_v1")
 
 ENVS = ["acrobot-swingup-v4.2", "cartpole-two_poles-curriculum"]
-CT_ARMS = [("ct_sac", "final_mf"), ("ct_td3", "final_mf")]
+CT_ARMS = [("ct_sac", "final_mf"), ("ct_sac", "final_oracle_rollout"),
+           ("ct_td3", "final_mf")]
 SB3_ARMS = [("ppo", "final_mf"), ("sac", "final_mf")]
 STARTS = [("uniform", True), ("hanging", False)]  # (label, uniform_start)
 
