@@ -105,7 +105,7 @@ def _with_start(env_kwargs, uniform_start):
 def rollout(env, pol, seed, capture_spec):
     obs, reset_info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
-    ret, T, steps, done = 0.0, 0.0, 0, False
+    ret, rw_dt, T, steps, done = 0.0, 0.0, 0.0, 0, False
     maxtip, occ_h, occ_hold = -1e9, 0.0, 0.0
     tracker = (
         SustainedCaptureTracker(1, capture_spec, [reset_info])
@@ -119,13 +119,13 @@ def rollout(env, pol, seed, capture_spec):
         if tracker is not None:
             cap = tracker.update_slot(0, info, done=done)
         dt = float(nt) - float(t)
-        T += dt; steps += 1; ret += float(r)
+        T += dt; steps += 1; ret += float(r); rw_dt += float(r) * dt
         tip = float(info.get("acrobot_tip_height", -1e9))
         maxtip = max(maxtip, tip)
         occ_h += dt * (1.0 if tip > 3.0 else 0.0)
         occ_hold += dt * float(info.get("acrobot_hold", 0.0))
         obs = np.asarray(nobs, dtype=np.float32)
-    return dict(ret=ret, T=T, steps=steps, maxtip=maxtip,
+    return dict(ret=ret, rw_dt=rw_dt, T=T, steps=steps, maxtip=maxtip,
                 height_occ=occ_h / max(T, 1e-9),
                 hold_occ=occ_hold / max(T, 1e-9), cap=cap)
 
@@ -173,7 +173,7 @@ def main():
         capture_spec = SustainedCaptureSpec() if is_acro else None
         for start_label, uniform_start in STARTS:
             ek_s = _with_start(ek, uniform_start)
-            rets, Ts, rates, tips, hocc, holdocc = [], [], [], [], [], []
+            rets, Ts, rates, tavg, rps, tips, hocc, holdocc = [], [], [], [], [], [], [], []
             csucc, cdur = [], []
             for j in range(N_EVAL):
                 env = make_ct_env(env_id=s["env_id"], seed=SEED0 + j, env_kwargs=ek_s)
@@ -184,6 +184,9 @@ def main():
                     env.close()
                 rets.append(m["ret"]); Ts.append(m["T"])
                 rates.append(m["ret"] / max(m["T"], 1e-9))
+                # dt-weighted time-average reward (fair, timing-invariant) + per-step
+                tavg.append(m["rw_dt"] / max(m["T"], 1e-9))
+                rps.append(m["ret"] / max(m["steps"], 1))
                 tips.append(m["maxtip"]); hocc.append(m["height_occ"])
                 holdocc.append(m["hold_occ"])
                 if capture_spec is not None and m["cap"] is not None:
@@ -199,6 +202,8 @@ def main():
                 n_eval=N_EVAL,
                 mean_return=round(float(np.mean(rets)), 2),
                 mean_T=round(float(np.mean(Ts)), 2),
+                mean_timeavg_reward=round(float(np.mean(tavg)), 4),
+                mean_reward_per_step=round(float(np.mean(rps)), 4),
                 mean_reward_rate=round(float(np.mean(rates)), 4),
                 max_tip_height=round(float(np.max(tips)), 3) if is_acro else "",
                 mean_height_occ=round(float(np.mean(hocc)), 4) if is_acro else "",
@@ -210,7 +215,7 @@ def main():
             rows.append(row)
             print(f"  {s['algo']}/{s['env_id'].split('-')[0] if is_acro else 'cartpole'}"
                   f"/s{s['seed']}/{s['kind']}/{start_label}: ret={row['mean_return']} "
-                  f"rate={row['mean_reward_rate']} strict={row['strict_capture_success_rate']}",
+                  f"timeavg_r={row['mean_timeavg_reward']} strict={row['strict_capture_success_rate']}",
                   flush=True)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", newline="") as f:
