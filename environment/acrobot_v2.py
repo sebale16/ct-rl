@@ -806,7 +806,8 @@ def swingup_v5(
 V6_STATE_WEIGHTS = (50.0, 50.0, 4.0, 2.0)
 V6_ACTION_WEIGHT = 1.0
 V6_COST_SCALE = 0.001
-# Kinetic energy below which the per-joule ratio has no direction to report.
+# Kinetic energy below which the per-joule ratio has no direction to report and
+# ``velocity_cost_per_joule``/``coordination_loss`` are NaN rather than 0.
 _COST_PER_JOULE_MIN_KINETIC = 1e-9
 
 
@@ -984,9 +985,15 @@ class BalanceV6(CurriculumReset, MechanicalEnergy, BalanceV3):
             )
             coordination_loss = float(np.clip(coordination_loss, 0.0, 1.0))
         else:
-            # At rest there is no direction to read.  Zero is outside the
-            # physical range of the ratio, so it never reads as "efficient".
-            cost_per_joule, coordination_loss = 0.0, 0.0
+            # At rest there is no direction to read, and any finite sentinel
+            # would enter the logged running mean: zero sits below the ratio's
+            # lower bound, so resting steps would drag the mean toward
+            # "perfectly coordinated" — the exact misreading these terms exist
+            # to prevent, and worst on a collapsed policy, which rests most.
+            # NaN is dropped by the Monitor instead, leaving the logged value
+            # to mean coordination *while moving*.  ``energy_norm`` and
+            # ``kinetic_norm`` stay finite and report whether it moves at all.
+            cost_per_joule, coordination_loss = float("nan"), float("nan")
 
         elbow = float(qpos[1])
         extension = float(np.clip((1.0 + np.cos(elbow)) / 2.0, 0.0, 1.0))

@@ -326,17 +326,29 @@ policy that deterministic evaluation cannot show:
   `coordination_loss` normalizes it onto [0, 1] between the cheapest and dearest
   directions at the current pose, which the raw ratio needs because the bounds
   move with the elbow angle — [0.0025, 0.0606] extended, [0.0060, 0.0127] folded
-  at θ₂ = 2. At rest the ratio reports 0, outside its physical range, so it can
-  never be misread as efficient.
+  at θ₂ = 2.
 
 | what the policy is doing | vel_cost | energy_norm | cost/J | coordination_loss |
 |---|---|---|---|---|
-| hanging still | 0.0000 | 0.00 | 0.0000 | 0.00 |
+| hanging still | 0.0000 | 0.00 | NaN | NaN |
 | coordinated pump @ 25 % | 0.0242 | 0.25 | 0.0025 | 0.00 |
 | coordinated pump @ 100 % | 0.0966 | 1.00 | 0.0025 | 0.00 |
 | flailing @ 25 % | 0.5941 | 0.25 | 0.0606 | 1.00 |
 | flailing @ 100 % | 2.3763 | 1.00 | 0.0606 | 1.00 |
-| upright at rest | 0.0000 | 1.00 | 0.0000 | 0.00 |
+| upright at rest | 0.0000 | 1.00 | NaN | NaN |
+
+Both ratios are NaN at rest rather than 0. A scale-free direction reading has no
+value when there is no motion, and any finite sentinel would enter the logged
+running mean: zero sits below the ratio's own lower bound, so resting steps
+would pull the mean toward "perfectly coordinated" — the misreading these terms
+exist to prevent, and worst on a collapsed policy, which rests the most. A
+policy resting 70 % of the time and flailing the rest would log
+0.7·0 + 0.3·1 = 0.30 under a zero sentinel, against a true 1.00 whenever it
+moves. The Monitor drops non-finite values, so the logged number means
+coordination *while moving*; `energy_norm` and `kinetic_norm` stay finite and
+carry whether it moves at all. `coordination_loss` is therefore never
+interpretable alone — 0 and NaN are different states, and the energy terms
+separate them.
 
 The pair is what makes the α ladder readable, since all three of its failure
 modes present as a return stuck near the hanging floor: α too low leaves

@@ -1962,12 +1962,29 @@ class TestAcrobotSwingupV6ExplorationDiagnostics(unittest.TestCase):
         self.assertAlmostEqual(rest["energy_norm"], 0.0, places=9)
         self.assertAlmostEqual(pumped["energy_norm"], 1.0, places=6)
 
-    def test_ratio_reads_zero_at_rest_which_is_outside_its_physical_range(self):
+    def test_ratio_is_nan_at_rest_so_it_never_enters_a_running_mean(self):
         rest = self._terms([np.pi, 0.0], [0.0, 0.0])
-        self.assertEqual(rest["velocity_cost_per_joule"], 0.0)
-        self.assertEqual(rest["coordination_loss"], 0.0)
-        lo, _ = self.task._cost_per_joule_bounds(self.physics)
-        self.assertGreater(lo, 0.0)  # zero can never mean "efficient"
+        self.assertTrue(np.isnan(rest["velocity_cost_per_joule"]))
+        self.assertTrue(np.isnan(rest["coordination_loss"]))
+        # The energy terms stay finite: they are what reports "not moving".
+        self.assertEqual(rest["kinetic_norm"], 0.0)
+        self.assertEqual(rest["energy_norm"], 0.0)
+        # And the reward itself is never NaN.
+        self.assertTrue(np.isfinite(rest["reward"]))
+
+    def test_resting_steps_cannot_drag_the_coordination_mean_toward_zero(self):
+        # A finite sentinel at rest would bias the logged mean toward
+        # "coordinated" exactly on a collapsed policy, which rests the most.
+        rest = self._terms([np.pi, 0.0], [0.0, 0.0])["coordination_loss"]
+        flail = self._terms([np.pi, 0.0], self._mode_state(self.dear, 1.0))[
+            "coordination_loss"
+        ]
+        self.assertAlmostEqual(flail, 1.0, places=6)
+        # Mean over a 70 % resting / 30 % flailing rollout, NaN dropped as the
+        # Monitor drops it, is the flailing value rather than 0.3.
+        samples = np.array([rest] * 7 + [flail] * 3)
+        self.assertAlmostEqual(float(np.nanmean(samples)), 1.0, places=6)
+        self.assertEqual(int(np.count_nonzero(~np.isnan(samples))), 3)
 
     def test_coordination_loss_is_pose_normalized(self):
         # Bounds move with the elbow angle; the normalized reading does not.
@@ -2033,10 +2050,15 @@ class TestAcrobotSwingupV6UniformStart(unittest.TestCase):
             self.physics.data.qvel[:] = qvel
             self.physics.data.ctrl[:] = ctrl
             self.physics.forward()
-            self.assertEqual(
-                scheduled.reward_terms(self.physics),
-                uniform.reward_terms(self.physics),
-            )
+            left = scheduled.reward_terms(self.physics)
+            right = uniform.reward_terms(self.physics)
+            self.assertEqual(set(left), set(right))
+            for key, value in left.items():
+                # The per-joule terms are NaN at rest, so compare NaN-aware.
+                if isinstance(value, float) and np.isnan(value):
+                    self.assertTrue(np.isnan(right[key]), msg=key)
+                else:
+                    self.assertEqual(value, right[key], msg=key)
 
     def test_task_carries_no_band_schedule(self):
         task = swingup_v6_uniform(time_limit=0.1, random=0).task
