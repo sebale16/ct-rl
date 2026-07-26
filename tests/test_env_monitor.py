@@ -64,3 +64,76 @@ class TestEnvMonitor(unittest.TestCase):
         ep_info = info["episode"]
         self.assertEqual(ep_info["l"], episode_len)
         self.assertAlmostEqual(ep_info["r"], float(episode_len))
+
+
+class DiagnosticEnv(DummyEnv):
+    """Emits a per-step scalar that rises by 1 each step, plus a constant."""
+
+    def _step_physics(self, action, dt):
+        obs, reward, terminated, truncated, _, dt = super()._step_physics(action, dt)
+        info = {"diag": float(self._state), "other": 7.0}
+        if self._state == 2:
+            info["sometimes"] = 5.0
+            info["bad"] = float("nan")
+        return obs, reward, terminated, truncated, info, dt
+
+
+class TestMonitorInfoKeywords(unittest.TestCase):
+    """``info_keywords`` logs behavior-policy diagnostics as running means."""
+
+    def _run(self, keywords, steps=4):
+        from common.logger import get_logger
+
+        env = Monitor(DiagnosticEnv(episode_length=10), info_keywords=keywords)
+        env.reset()
+        for _ in range(steps):
+            env.step_dt(env.action_space.sample())
+        return get_logger().name_to_value
+
+    def test_named_keys_are_logged_as_running_means(self):
+        values = self._run(("diag",), steps=4)
+        # diag takes 1, 2, 3, 4 -> mean 2.5, namespaced under rollout/.
+        self.assertAlmostEqual(values["rollout/diag"], 2.5)
+
+    def test_unnamed_info_keys_are_not_logged(self):
+        values = self._run(("diag",), steps=4)
+        self.assertNotIn("rollout/other", values)
+
+    def test_default_is_no_diagnostic_logging(self):
+        from common.logger import get_logger
+
+        before = dict(get_logger().name_to_value)
+        env = Monitor(DiagnosticEnv(episode_length=10))
+        env.reset()
+        for _ in range(3):
+            env.step_dt(env.action_space.sample())
+        after = get_logger().name_to_value
+        self.assertEqual(
+            [k for k in after if k.startswith("rollout/") and k not in before], []
+        )
+
+    def test_absent_and_non_finite_values_are_skipped(self):
+        values = self._run(("sometimes", "bad", "missing"), steps=4)
+        # Present on exactly one step, so the mean is that step's value.
+        self.assertAlmostEqual(values["rollout/sometimes"], 5.0)
+        # NaN must never enter a running mean, and absent keys create none.
+        self.assertNotIn("rollout/bad", values)
+        self.assertNotIn("rollout/missing", values)
+
+
+class TestRolloutInfoKeys(unittest.TestCase):
+    """The runner attaches the v6 exploration diagnostics and nothing else."""
+
+    def test_v6_arms_share_the_diagnostic_set(self):
+        from benchmarks.run_ct_rl import rollout_info_keys
+
+        keys = rollout_info_keys("acrobot-swingup-v6")
+        self.assertEqual(keys, rollout_info_keys("acrobot-swingup-v6-uniform"))
+        self.assertIn("acrobot_energy_norm", keys)
+        self.assertIn("acrobot_coordination_loss", keys)
+
+    def test_other_tasks_get_no_diagnostics(self):
+        from benchmarks.run_ct_rl import rollout_info_keys
+
+        for env_id in ("cheetah-run", "acrobot-swingup-v4.2", "cartpole-swingup"):
+            self.assertEqual(rollout_info_keys(env_id), ())

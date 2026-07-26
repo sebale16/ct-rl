@@ -17,10 +17,15 @@ import numpy as np
 STRICT_CAPTURE_INFO_KEY = "acrobot_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
-# The velocity-gated capture reward and the 20 s runway are shared by v4.1 and
-# the v4.2 curriculum, so both use the same strict-capture checkpoint rule.
+# v4.1 and the v4.2 curriculum share the velocity-gated capture reward and the
+# 20 s runway; the v6 pair replaces that reward with a quadratic cost but keeps
+# the runway, so all four select checkpoints under this one strict-capture rule
+# and stay rankable against each other.  For v6 that is load-bearing rather than
+# cosmetic: its reward is a cost, so ranking checkpoints by reward would prefer
+# whichever policy spends least time swinging.
 STRICT_CAPTURE_ENV_IDS = frozenset(
-    {"acrobot-swingup-v4.1", "acrobot-swingup-v4.2"}
+    {"acrobot-swingup-v4.1", "acrobot-swingup-v4.2",
+     "acrobot-swingup-v6", "acrobot-swingup-v6-uniform"}
 )
 # Every algorithm evaluated on those tasks selects checkpoints under this one
 # capture definition, so the model-free, continuous-time, and oracle arms are

@@ -16,6 +16,12 @@ sustained-capture success rate + mean max residence (distance<0.2, speed<0.2,
 >=1 physical second) applied uniformly to every algorithm on that env.
 Cartpole rows leave the acrobot-only columns as nan.
 
+``LAUNCH_ENVS``, ``LAUNCH_CT_ARMS`` and ``LAUNCH_SB3_ARMS`` override the env and
+arm lists ("algo:mode" pairs, comma separated) so a later batch reuses this
+harness unchanged; unset, they reproduce launch6_v1.  On a task without a
+``hold`` reward term (acrobot-swingup-v6) the hold-occupancy column reads 0 and
+the height and strict-capture columns carry the comparison.
+
 Sharding: set SHARD="i/N" to process only spec indices with index % N == i and
 write to ``${ACRO_EVAL_OUT%.csv}_shard{i}.csv`` (merge externally). No sharding
 => single CSV at ACRO_EVAL_OUT.  MUJOCO_GL=disable (no rendering).
@@ -47,10 +53,27 @@ SEED0 = 20000
 OUT = os.environ.get("ACRO_EVAL_OUT", "results/launch6_eval.csv")
 TAG = os.environ.get("LAUNCH_TAG", "launch6_v1")
 
-ENVS = ["acrobot-swingup-v4.2", "cartpole-two_poles-curriculum"]
-CT_ARMS = [("ct_sac", "final_mf"), ("ct_sac", "final_oracle_rollout"),
-           ("ct_td3", "final_mf")]
-SB3_ARMS = [("ppo", "final_mf"), ("sac", "final_mf")]
+def _arms(var, default):
+    """Parse an "algo:mode,algo:mode" override, else keep the launch6 default."""
+    raw = os.environ.get(var, "").strip()
+    if not raw:
+        return default
+    return [tuple(p.split(":", 1)) for p in raw.split(",") if p.strip()]
+
+
+# Overridable so a later batch (e.g. the acrobot-swingup-v6 quadratic-cost pair)
+# reuses this harness without editing it; the defaults reproduce launch6_v1.
+ENVS = [
+    e for e in os.environ.get(
+        "LAUNCH_ENVS", "acrobot-swingup-v4.2,cartpole-two_poles-curriculum"
+    ).split(",") if e.strip()
+]
+CT_ARMS = _arms(
+    "LAUNCH_CT_ARMS",
+    [("ct_sac", "final_mf"), ("ct_sac", "final_oracle_rollout"),
+     ("ct_td3", "final_mf")],
+)
+SB3_ARMS = _arms("LAUNCH_SB3_ARMS", [("ppo", "final_mf"), ("sac", "final_mf")])
 STARTS = [("uniform", True), ("hanging", False)]  # (label, uniform_start)
 
 

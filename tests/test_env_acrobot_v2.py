@@ -13,16 +13,22 @@ try:
         BalanceV3,
         BalanceV4,
         BalanceV5,
+        BalanceV6,
         STRICT_CAPTURE_DISTANCE,
         STRICT_CAPTURE_SPEED,
         V41_ENERGY_OVERSHOOT_MARGIN,
         V41_SPEED_BOUNDS,
         V41_SPEED_MARGIN,
+        V6_ACTION_WEIGHT,
+        V6_COST_SCALE,
+        V6_STATE_WEIGHTS,
         swingup_v3,
         swingup_v4,
         swingup_v41,
         swingup_v42,
         swingup_v5,
+        swingup_v6,
+        swingup_v6_uniform,
     )
 
     HAVE_DMC = True
@@ -1594,6 +1600,511 @@ class TestAcrobotSwingupV42Curriculum(unittest.TestCase):
         # Full uniform range, not the tight fraction-0 band.
         self.assertGreater(draws.max(), np.pi - 0.2)
         self.assertLess(draws.min(), -(np.pi - 0.2))
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV6QuadraticCost(unittest.TestCase):
+    """The AR-EAPO quadratic cost (Choe et al., 2024, eq. 16) on v4.2's reset."""
+
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV6(
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            curriculum=False,
+            uniform_start=False,
+        )
+
+    def _terms(self, qpos, qvel=(0.0, 0.0), ctrl=0.0):
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+        self.physics.data.ctrl[:] = ctrl
+        self.physics.forward()
+        return self.task.reward_terms(self.physics)
+
+    def test_defaults_are_the_published_ar_eapo_weights(self):
+        self.assertEqual(V6_STATE_WEIGHTS, (50.0, 50.0, 4.0, 2.0))
+        self.assertEqual(V6_ACTION_WEIGHT, 1.0)
+        self.assertEqual(V6_COST_SCALE, 0.001)
+        self.assertEqual(self.task.state_weights, V6_STATE_WEIGHTS)
+        self.assertEqual(self.task.action_weight, V6_ACTION_WEIGHT)
+        self.assertEqual(self.task.cost_scale, V6_COST_SCALE)
+        self.assertEqual(self.task.reward_offset, 0.0)
+
+    def test_reward_is_minus_the_weighted_square_of_state_and_command(self):
+        qpos, qvel, ctrl = (0.4, -0.3), (1.5, -2.5), 0.6
+        terms = self._terms(qpos, qvel, ctrl)
+        w = V6_STATE_WEIGHTS
+        expected = -V6_COST_SCALE * (
+            w[0] * qpos[0] ** 2
+            + w[1] * qpos[1] ** 2
+            + w[2] * qvel[0] ** 2
+            + w[3] * qvel[1] ** 2
+            + V6_ACTION_WEIGHT * ctrl**2
+        )
+        self.assertAlmostEqual(terms["reward"], expected, places=12)
+        # The three parts sum back to the cost.
+        self.assertAlmostEqual(
+            terms["angle_cost"] + terms["velocity_cost"] + terms["action_cost"],
+            -expected,
+            places=12,
+        )
+
+    def test_only_the_upright_rest_pose_at_zero_command_is_costless(self):
+        self.assertEqual(self._terms((0.0, 0.0))["reward"], 0.0)
+        for qpos, qvel, ctrl in (
+            ((np.pi, 0.0), (0.0, 0.0), 0.0),  # hanging
+            ((0.0, np.pi), (0.0, 0.0), 0.0),  # folded above the pivot
+            ((0.0, 0.0), (0.0, 0.0), 1.0),  # upright but pushing
+            ((0.0, 0.0), (3.0, 0.0), 0.0),  # upright but spinning through
+        ):
+            self.assertLess(self._terms(qpos, qvel, ctrl)["reward"], 0.0)
+
+    def test_position_cost_is_monotone_along_the_swing_up(self):
+        # Every shoulder angle between hanging and upright pays strictly less
+        # than the one below it: the slope v4's energy shell does not provide.
+        angles = np.linspace(np.pi, 0.0, 25)
+        rewards_along = [self._terms((float(a), 0.0))["reward"] for a in angles]
+        for lo, hi in zip(rewards_along, rewards_along[1:]):
+            self.assertLess(lo, hi)
+        self.assertAlmostEqual(rewards_along[-1], 0.0, places=12)
+
+    def test_hanging_rest_pays_the_published_cost(self):
+        # alpha * Q_1 * pi^2 with the published alpha = 0.001, Q_1 = 50.
+        self.assertAlmostEqual(
+            self._terms((np.pi, 0.0))["reward"],
+            -V6_COST_SCALE * V6_STATE_WEIGHTS[0] * np.pi**2,
+            places=12,
+        )
+
+    def test_angle_error_is_wrapped_across_the_branch_cut(self):
+        below = self._terms((np.pi - 1e-3, 0.0))["reward"]
+        at = self._terms((np.pi, 0.0))["reward"]
+        above = self._terms((-np.pi + 1e-3, 0.0))["reward"]
+        self.assertAlmostEqual(below, above, places=12)
+        self.assertLess(at, below)
+        # A full turn is the same pose, so it costs the same.
+        self.assertAlmostEqual(
+            self._terms((0.3, 0.0))["reward"],
+            self._terms((0.3 + 2.0 * np.pi, 0.0))["reward"],
+            places=10,
+        )
+
+    def test_reward_offset_shifts_uniformly_and_leaves_costs_untouched(self):
+        offset = 0.5
+        shifted = BalanceV6(
+            random=0, curriculum=False, uniform_start=False, reward_offset=offset
+        )
+        for qpos, qvel in (((np.pi, 0.0), (0.0, 0.0)), ((0.2, -0.4), (2.0, 3.0))):
+            base = self._terms(qpos, qvel)
+            self.physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+            self.physics.data.qvel[:] = qvel
+            self.physics.data.ctrl[:] = 0.0
+            self.physics.forward()
+            moved = shifted.reward_terms(self.physics)
+            self.assertAlmostEqual(moved["reward"], base["reward"] + offset, 12)
+            self.assertAlmostEqual(moved["angle_cost"], base["angle_cost"], 12)
+            self.assertAlmostEqual(
+                moved["velocity_cost"], base["velocity_cost"], 12
+            )
+
+    def test_weights_can_be_reweighted_per_component(self):
+        task = BalanceV6(
+            random=0,
+            curriculum=False,
+            uniform_start=False,
+            state_weights=(1.0, 0.0, 0.0, 0.0),
+            action_weight=0.0,
+            cost_scale=1.0,
+        )
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = (0.5, 2.0)
+        self.physics.data.qvel[:] = (7.0, -9.0)
+        self.physics.data.ctrl[:] = 1.0
+        self.physics.forward()
+        terms = task.reward_terms(self.physics)
+        self.assertAlmostEqual(terms["reward"], -0.25, places=12)
+        self.assertEqual(terms["velocity_cost"], 0.0)
+        self.assertEqual(terms["action_cost"], 0.0)
+
+    def test_progress_diagnostic_spans_the_unit_interval(self):
+        self.assertAlmostEqual(self._terms((0.0, 0.0))["progress"], 1.0, 12)
+        self.assertAlmostEqual(
+            self._terms((np.pi, np.pi))["progress"], 0.0, places=12
+        )
+        self.assertAlmostEqual(
+            self.task.max_angle_cost,
+            V6_COST_SCALE
+            * (V6_STATE_WEIGHTS[0] + V6_STATE_WEIGHTS[1])
+            * np.pi**2,
+            places=12,
+        )
+
+    def test_strict_capture_matches_the_shared_v4_family_thresholds(self):
+        near = self._terms((0.0, 0.0), (0.5 * STRICT_CAPTURE_SPEED, 0.0))
+        self.assertEqual(near["strict_capture"], 1.0)
+        self.assertLess(near["tip_distance"], STRICT_CAPTURE_DISTANCE)
+        fast = self._terms((0.0, 0.0), (2.0 * STRICT_CAPTURE_SPEED, 0.0))
+        self.assertEqual(fast["strict_capture"], 0.0)
+        self.assertEqual(self._terms((np.pi, 0.0))["strict_capture"], 0.0)
+
+    def test_invalid_parameters_are_rejected(self):
+        for bad in ((50.0, 50.0, 4.0), (50.0, 50.0, 4.0, -1.0), (np.nan,) * 4):
+            with self.assertRaises(ValueError):
+                BalanceV6(random=0, state_weights=bad)
+        for bad in (0.0, -1.0, float("nan")):
+            with self.assertRaises(ValueError):
+                BalanceV6(random=0, cost_scale=bad)
+        for bad in (-1.0, float("nan")):
+            with self.assertRaises(ValueError):
+                BalanceV6(random=0, action_weight=bad)
+        with self.assertRaises(ValueError):
+            BalanceV6(random=0, reward_offset=float("nan"))
+        with self.assertRaises(ValueError):
+            BalanceV6(random=0, curriculum=True, curriculum_min_spread=0.0)
+
+    def test_factory_pairs_the_cost_with_the_v42_curriculum_reset(self):
+        env = swingup_v6(
+            time_limit=0.1,
+            random=7,
+            environment_kwargs={"flat_observation": True},
+            angle_noise=0.0,
+            velocity_noise=0.0,
+        )
+        try:
+            env.reset()
+            task = env.task
+            self.assertIsInstance(task, BalanceV6)
+            self.assertTrue(task.curriculum)
+            self.assertTrue(task.uniform_start)
+            self.assertEqual(task.state_weights, V6_STATE_WEIGHTS)
+            # Curriculum band and its fraction plumbing behave exactly as v4.2's.
+            task.set_curriculum_fraction(0.0)
+            draws = np.empty((200, 2))
+            for i in range(len(draws)):
+                task.initialize_episode(env.physics)
+                draws[i] = np.asarray(env.physics.data.qpos, dtype=np.float64)
+            self.assertLessEqual(
+                np.abs(draws).max(), task.curriculum_min_spread + 1e-9
+            )
+        finally:
+            env.close()
+
+    def test_episode_runs_to_the_time_limit_without_terminating(self):
+        # A continuing task: the average-reward criterion needs the cost to be
+        # unavoidable rather than escapable by ending the episode.
+        env = swingup_v6(time_limit=0.2, random=1)
+        try:
+            time_step = env.reset()
+            steps, total = 0, 0.0
+            while not time_step.last():
+                time_step = env.step(np.array([1.0], dtype=np.float32))
+                total += float(time_step.reward)
+                steps += 1
+            self.assertGreater(steps, 1)
+            self.assertLess(total, 0.0)
+            # Truncation, not termination: dm_control keeps discount 1.
+            self.assertEqual(float(time_step.discount), 1.0)
+        finally:
+            env.close()
+
+    def test_wrapper_registration_exposes_cost_terms_and_not_v4_terms(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v6",
+            seed=0,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+            task_kwargs={"curriculum": False, "uniform_start": False},
+        )
+        self.addCleanup(env.close)
+        self.assertTrue(env.raw_state_obs)
+        self.assertFalse(env.has_curriculum)
+        obs, info = env.reset()
+        self.assertEqual(obs.shape, (4,))
+        _, reward, terminated, truncated, info = env.step(
+            np.array([1.0], dtype=np.float32)
+        )
+        self.assertFalse(terminated)
+        self.assertLess(reward, 0.0)
+        for key in (
+            "acrobot_angle_cost",
+            "acrobot_velocity_cost",
+            "acrobot_action_cost",
+            "acrobot_energy_norm",
+            "acrobot_kinetic_norm",
+            "acrobot_velocity_cost_per_joule",
+            "acrobot_coordination_loss",
+            "acrobot_speed",
+            "acrobot_strict_capture",
+            "acrobot_gym_height_success",
+        ):
+            self.assertIn(key, info)
+        # energy_norm is a shared physics diagnostic; slow_gate/hold are v4
+        # reward terms and have no counterpart under the quadratic cost.
+        for key in ("acrobot_slow_gate", "acrobot_hold"):
+            self.assertNotIn(key, info)
+        del truncated
+
+    def test_curriculum_env_ids_and_capture_rule_cover_v6(self):
+        from evaluations.sustained_capture import strict_capture_spec_for
+
+        for env_id in ("acrobot-swingup-v6", "acrobot-swingup-v6-uniform"):
+            self.assertIsNotNone(
+                strict_capture_spec_for(algorithm="ct_sac", env_id=env_id)
+            )
+        # The trainer attaches the curriculum callback by env-id suffix: the
+        # scheduled arm must match it and the uniform arm must not.
+        suffixes = ("-v4.2", "-v6", "-curriculum")
+        self.assertTrue("acrobot-swingup-v6".endswith(suffixes))
+        self.assertFalse("acrobot-swingup-v6-uniform".endswith(suffixes))
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV6ExplorationDiagnostics(unittest.TestCase):
+    """energy_norm and the per-joule ratio factor the velocity cost apart."""
+
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+        self.task = BalanceV6(
+            random=0, curriculum=False, uniform_start=False,
+            angle_noise=0.0, velocity_noise=0.0,
+        )
+        self.task._ensure_energy_calibrated(self.physics)
+        self.span = self.task._energy_span
+        self.M = self._mass_at([np.pi, 0.0])
+        W = self.task.velocity_cost_matrix
+        # Generalized modes of the pencil (W, M): cheapest and dearest per joule.
+        self.cheap, self.dear = self._generalized_modes(W, self.M)
+
+    @staticmethod
+    def _generalized_modes(W, M):
+        L = np.linalg.cholesky(M)
+        S = np.linalg.solve(L, np.linalg.solve(L, W).T)
+        _, vecs = np.linalg.eigh(0.5 * (S + S.T))
+        back = np.linalg.solve(L.T, vecs)
+        return back[:, 0], back[:, -1]
+
+    def _mass_at(self, qpos):
+        self.physics.data.qvel[:] = 0.0
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        self.physics.forward()
+        return self.task._mass_matrix(self.physics)
+
+    def _terms(self, qpos, qvel):
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+        self.physics.data.qvel[:] = np.asarray(qvel, dtype=np.float64)
+        self.physics.data.ctrl[:] = 0.0
+        self.physics.forward()
+        return self.task.reward_terms(self.physics)
+
+    def _mode_state(self, mode, fraction):
+        """q̇ at the hanging pose carrying `fraction` of the span in `mode`."""
+        return mode * np.sqrt(2.0 * fraction * self.span / float(mode @ self.M @ mode))
+
+    def test_span_is_the_hanging_to_upright_energy_barrier(self):
+        self.physics.data.qvel[:] = 0.0
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = [0.0, 0.0]
+        self.physics.forward()
+        up = self.task._mechanical_energy(self.physics)
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = [np.pi, 0.0]
+        self.physics.forward()
+        hang = self.task._mechanical_energy(self.physics)
+        self.assertAlmostEqual(self.span, up - hang, places=9)
+        self.assertGreater(self.span, 0.0)
+
+    def test_energy_norm_counts_potential_as_well_as_kinetic(self):
+        # Hanging at rest holds none of the budget; upright at rest holds all of
+        # it as potential, with no kinetic share at all.
+        low = self._terms([np.pi, 0.0], [0.0, 0.0])
+        self.assertAlmostEqual(low["energy_norm"], 0.0, places=9)
+        self.assertAlmostEqual(low["kinetic_norm"], 0.0, places=9)
+        top = self._terms([0.0, 0.0], [0.0, 0.0])
+        self.assertAlmostEqual(top["energy_norm"], 1.0, places=9)
+        self.assertAlmostEqual(top["kinetic_norm"], 0.0, places=9)
+        # At the hanging pose the whole budget must be kinetic, so the two agree.
+        moving = self._terms([np.pi, 0.0], self._mode_state(self.cheap, 0.5))
+        self.assertAlmostEqual(moving["energy_norm"], 0.5, places=6)
+        self.assertAlmostEqual(moving["kinetic_norm"], 0.5, places=6)
+
+    def test_per_joule_ratio_is_flat_in_amplitude_within_a_mode(self):
+        for mode in (self.cheap, self.dear):
+            ratios = [
+                self._terms([np.pi, 0.0], self._mode_state(mode, f))[
+                    "velocity_cost_per_joule"
+                ]
+                for f in (0.1, 0.5, 1.0)
+            ]
+            for r in ratios[1:]:
+                self.assertAlmostEqual(r, ratios[0], places=9)
+
+    def test_per_joule_ratio_separates_coordination_from_flailing(self):
+        cheap = self._terms([np.pi, 0.0], self._mode_state(self.cheap, 1.0))
+        dear = self._terms([np.pi, 0.0], self._mode_state(self.dear, 1.0))
+        self.assertGreater(dear["velocity_cost_per_joule"], 20.0 * cheap["velocity_cost_per_joule"])
+        self.assertAlmostEqual(cheap["coordination_loss"], 0.0, places=6)
+        self.assertAlmostEqual(dear["coordination_loss"], 1.0, places=6)
+
+    def test_velocity_cost_alone_cannot_separate_rest_from_coordinated_pumping(self):
+        # The property motivating the pair: an efficient pump at full swing-up
+        # energy is cheaper than a fifth of the hanging position cost, so the
+        # cost column looks like rest while energy_norm does not.
+        rest = self._terms([np.pi, 0.0], [0.0, 0.0])
+        pumped = self._terms([np.pi, 0.0], self._mode_state(self.cheap, 1.0))
+        self.assertLess(pumped["velocity_cost"], 0.2 * rest["angle_cost"])
+        self.assertAlmostEqual(rest["energy_norm"], 0.0, places=9)
+        self.assertAlmostEqual(pumped["energy_norm"], 1.0, places=6)
+
+    def test_ratio_reads_zero_at_rest_which_is_outside_its_physical_range(self):
+        rest = self._terms([np.pi, 0.0], [0.0, 0.0])
+        self.assertEqual(rest["velocity_cost_per_joule"], 0.0)
+        self.assertEqual(rest["coordination_loss"], 0.0)
+        lo, _ = self.task._cost_per_joule_bounds(self.physics)
+        self.assertGreater(lo, 0.0)  # zero can never mean "efficient"
+
+    def test_coordination_loss_is_pose_normalized(self):
+        # Bounds move with the elbow angle; the normalized reading does not.
+        for qpos in ([np.pi, 0.0], [np.pi, 1.0], [1.6, 1.5], [0.0, 2.0]):
+            M = self._mass_at(qpos)
+            cheap, dear = self._generalized_modes(self.task.velocity_cost_matrix, M)
+            lo = self._terms(qpos, cheap * 3.0)["coordination_loss"]
+            hi = self._terms(qpos, dear * 3.0)["coordination_loss"]
+            self.assertAlmostEqual(lo, 0.0, places=6, msg=f"at {qpos}")
+            self.assertAlmostEqual(hi, 1.0, places=6, msg=f"at {qpos}")
+
+    def test_bounds_bracket_every_direction_and_vary_with_pose(self):
+        rng = np.random.RandomState(0)
+        self._mass_at([np.pi, 0.0])
+        lo, hi = self.task._cost_per_joule_bounds(self.physics)
+        for _ in range(200):
+            terms = self._terms([np.pi, 0.0], rng.normal(size=2) * 5.0)
+            self.assertGreaterEqual(terms["velocity_cost_per_joule"], lo - 1e-12)
+            self.assertLessEqual(terms["velocity_cost_per_joule"], hi + 1e-12)
+        self._mass_at([np.pi, 2.0])
+        folded = self.task._cost_per_joule_bounds(self.physics)
+        self.assertNotAlmostEqual(folded[1], hi, places=3)
+
+    def test_diagnostics_do_not_enter_the_reward(self):
+        # reward must stay exactly the published cost, diagnostics aside.
+        terms = self._terms([0.4, -0.3], [1.5, -2.5])
+        w = V6_STATE_WEIGHTS
+        expected = -V6_COST_SCALE * (
+            w[0] * 0.4**2 + w[1] * 0.3**2 + w[2] * 1.5**2 + w[3] * 2.5**2
+        )
+        self.assertAlmostEqual(terms["reward"], expected, places=12)
+
+    def test_calibration_restores_the_state_it_clobbers(self):
+        task = BalanceV6(random=0, curriculum=False, uniform_start=False)
+        self.physics.named.data.qpos[["shoulder", "elbow"]] = [0.7, -1.1]
+        self.physics.data.qvel[:] = [2.0, -3.0]
+        self.physics.data.ctrl[:] = 0.5
+        self.physics.forward()
+        task._ensure_energy_calibrated(self.physics)
+        np.testing.assert_allclose(self.physics.data.qpos, [0.7, -1.1], atol=1e-12)
+        np.testing.assert_allclose(self.physics.data.qvel, [2.0, -3.0], atol=1e-12)
+        np.testing.assert_allclose(self.physics.data.ctrl, [0.5], atol=1e-12)
+
+
+@unittest.skipUnless(HAVE_DMC, "dm_control / Acrobot-v2 not available")
+class TestAcrobotSwingupV6UniformStart(unittest.TestCase):
+    """``swingup-v6-uniform``: the v6 cost with no reset schedule at all."""
+
+    def setUp(self):
+        self.physics = dmc_acrobot.Physics.from_xml_string(
+            *dmc_acrobot.get_model_and_assets()
+        )
+
+    def test_reward_is_identical_to_the_curriculum_arm(self):
+        scheduled = swingup_v6(time_limit=0.1, random=0).task
+        uniform = swingup_v6_uniform(time_limit=0.1, random=0).task
+        for qpos, qvel, ctrl in (
+            ((np.pi, 0.0), (0.0, 0.0), 0.0),
+            ((0.0, 0.0), (0.0, 0.0), 0.0),
+            ((0.7, -1.3), (4.0, -6.0), 0.8),
+        ):
+            self.physics.named.data.qpos[["shoulder", "elbow"]] = qpos
+            self.physics.data.qvel[:] = qvel
+            self.physics.data.ctrl[:] = ctrl
+            self.physics.forward()
+            self.assertEqual(
+                scheduled.reward_terms(self.physics),
+                uniform.reward_terms(self.physics),
+            )
+
+    def test_task_carries_no_band_schedule(self):
+        task = swingup_v6_uniform(time_limit=0.1, random=0).task
+        self.assertFalse(task.curriculum)
+        self.assertTrue(task.uniform_start)
+        # Pushing a fraction onto it must not narrow the start distribution.
+        task.set_curriculum_fraction(0.0)
+        draws = np.empty((300, 2))
+        for i in range(len(draws)):
+            task.initialize_episode(self.physics)
+            draws[i] = np.asarray(self.physics.data.qpos, dtype=np.float64)
+        self.assertGreater(draws.max(), np.pi - 0.2)
+        self.assertLess(draws.min(), -(np.pi - 0.2))
+
+    def test_uniform_start_false_restores_the_hanging_reset(self):
+        env = swingup_v6_uniform(
+            time_limit=0.1,
+            random=0,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            uniform_start=False,
+        )
+        try:
+            env.reset()
+            np.testing.assert_allclose(
+                np.asarray(env.physics.data.qpos, dtype=np.float64),
+                [np.pi, 0.0],
+                atol=1e-9,
+            )
+        finally:
+            env.close()
+
+    def test_wrapper_registration_reports_no_curriculum_to_drive(self):
+        env = DMCContinuousEnv(
+            domain_name="acrobot",
+            task_name="swingup-v6-uniform",
+            seed=0,
+            raw_state_obs=True,
+            time_sampling="uniform",
+            dt=0.01,
+            physics_dt=0.002,
+            episode_duration=0.1,
+        )
+        self.addCleanup(env.close)
+        self.assertFalse(env.has_curriculum)
+        obs, info = env.reset()
+        self.assertEqual(obs.shape, (4,))
+        self.assertIn("acrobot_angle_cost", info)
+        # The no-op setter still has to be safe to call on every training env.
+        env.set_curriculum_fraction(0.5)
+        _, reward, terminated, _, _ = env.step(np.array([1.0], dtype=np.float32))
+        self.assertFalse(terminated)
+        self.assertLess(reward, 0.0)
+
+    def test_both_v6_arms_are_configured_for_every_shared_mode(self):
+        import csv
+
+        with open("benchmarks/hyperparams/ct_sac.csv", newline="") as f:
+            rows = list(csv.DictReader(f))
+        modes = {
+            env_id: {
+                r["mode"] for r in rows if r["env_id"] == env_id
+            }
+            for env_id in ("acrobot-swingup-v6", "acrobot-swingup-v6-uniform")
+        }
+        self.assertEqual(modes["acrobot-swingup-v6"], modes["acrobot-swingup-v6-uniform"])
+        self.assertIn("final_mf", modes["acrobot-swingup-v6"])
+        self.assertIn("final_oracle_rollout", modes["acrobot-swingup-v6"])
 
 
 if __name__ == "__main__":

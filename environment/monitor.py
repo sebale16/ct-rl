@@ -16,6 +16,11 @@ class Monitor(Wrapper):
     """
     A monitor wrapper for continuous-time environments.
     It keeps track of episode returns and lengths.
+
+    ``info_keywords`` names per-step scalars in ``info`` to log as running means
+    under ``rollout/<key>``.  These are read from the behavior policy's own
+    steps, so they describe what the agent is actually doing while exploring —
+    which deterministic evaluation cannot show.
     """
 
     def __init__(
@@ -51,6 +56,12 @@ class Monitor(Wrapper):
             self.env.step_dt(action)
         )
         self.rewards.append(reward)
+
+        for key in self.info_keywords:
+            if key in info:
+                value = float(info[key])
+                if np.isfinite(value):
+                    record_mean(f"rollout/{key}", value)
 
         done = terminated or truncated
         if done:

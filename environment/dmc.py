@@ -33,6 +33,8 @@ from .acrobot_v2 import (
     swingup_v41,
     swingup_v42,
     swingup_v5,
+    swingup_v6,
+    swingup_v6_uniform,
 )
 from .double_cartpole_v2 import two_poles_curriculum
 from .base import ContinuousEnv
@@ -226,6 +228,8 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v4.1": swingup_v41,
             "swingup-v4.2": swingup_v42,
             "swingup-v5": swingup_v5,
+            "swingup-v6": swingup_v6,
+            "swingup-v6-uniform": swingup_v6_uniform,
         }
         local_cartpole_tasks = {
             "two_poles-curriculum": two_poles_curriculum,
@@ -535,6 +539,12 @@ class DMCContinuousEnv(ContinuousEnv):
             "slow_gate": "acrobot_slow_gate",
             "hold": "acrobot_hold",
             "strict_capture": "acrobot_strict_capture",
+            "angle_cost": "acrobot_angle_cost",
+            "velocity_cost": "acrobot_velocity_cost",
+            "action_cost": "acrobot_action_cost",
+            "kinetic_norm": "acrobot_kinetic_norm",
+            "velocity_cost_per_joule": "acrobot_velocity_cost_per_joule",
+            "coordination_loss": "acrobot_coordination_loss",
         }
         for term_name, info_name in optional_terms.items():
             if term_name in terms:

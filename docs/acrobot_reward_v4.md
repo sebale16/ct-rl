@@ -204,3 +204,174 @@ sources: genuine task termination (discount 0) maps to `terminated`, while
 dm_control's internal step limit (discount 1) and the wrapper's own episode
 duration map to `truncated`, so bootstrapping is only ever cut on true
 terminal states.
+
+## v6: quadratic cost (AR-EAPO reward)
+
+### Evidence from v4.2
+
+The launch6 batch (6 seeds, 1 M steps, 20 held-out episodes per checkpoint)
+gives v4.2 a working uniform track and a dead hanging track:
+
+| arm | uniform ret | hanging ret | hanging frac tip>3 | strict capture |
+|---|---|---|---|---|
+| ct_sac final_mf (final) | 264 ± 41 | 41.1 ± 0.8 | 0.000 | 0.00 |
+| ct_sac final_oracle_rollout (final) | 583 ± 90 | 303 ± 221 | 0.350 | 0.00 |
+| ppo final_mf (final) | 122 ± 41 | 82 ± 67 | 0.458 | 0.00 |
+| sac final_mf (final) | 104 ± 24 | 20.6 ± 0.5 | 0.000 | 0.00 |
+
+41.1 over 20 s is 0.010/step, and 0.010/step is exactly what v4.1's reward pays
+at the hanging rest pose: `hold` is 0 there and `energy_close` sits at its
+`value_at_margin` floor, so `(1 − hold_weight)·ramp` = 0.2·(0.1·0.5) = 0.01.
+The model-free policy collects the floor and never leaves it. The convergence
+check rules out undertraining — every CT-SAC seed plateaus with a negative
+final-quarter slope (−4 to −13 per 100 k) — so widening the reset band pushed
+the start energy down toward hanging faster than the capture value propagated
+outward, and the curriculum lost the top rather than extending its basin.
+
+### Definition
+
+`acrobot-swingup-v6` (`BalanceV6`) replaces the ramp-and-hold blend with the
+quadratic state-and-command cost of Choe et al. (2024), eq. 16:
+
+    r(s, a) = −α[(s − g)ᵀ Q (s − g) + aᵀ R a]
+
+over s = [θ₁, θ₂, θ̇₁, θ̇₂] with g = 0 the upright rest pose,
+Q = diag(50, 50, 4, 2), R = 1, α = 0.001. Every configuration is separated
+from the goal by a strictly monotone position cost, which is the property v4.1
+lacks at hanging. Two deviations from the published form, both forced by this
+mechanism:
+
+* angle errors are wrapped into (−π, π] before squaring, since the raw
+  difference is discontinuous at the branch cut and both resets sample it;
+* R multiplies the normalized command a ∈ [−1, 1] rather than a torque in N·m,
+  so `action_weight` carries the paper's R·τ_max².
+
+The reward is a cost: ≤ 0, zero only at the upright rest pose with zero
+command, never clipped. Nothing terminates, so the task is the continuing MDP
+the paper's average-reward criterion assumes. `reward_offset` adds a constant
+and leaves the optimum unchanged under both the discounted-soft and the
+average-reward objective, since no state is absorbing and the time limit
+truncates with bootstrapping; it exists only to put returns on the scale of the
+[0, 1]-reward arms.
+
+### Audit (per-step rates, `BalanceV6` on the real model)
+
+| state | r | angle | velocity | action |
+|---|---|---|---|---|
+| upright rest | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| upright rest, full command | −0.0010 | 0.0000 | 0.0000 | 0.0010 |
+| hanging rest | −0.4935 | 0.4935 | 0.0000 | 0.0000 |
+| folded above the pivot (θ₂ = π) | −0.4935 | 0.4935 | 0.0000 | 0.0000 |
+| upright, θ̇ = (5, 10) | −0.3000 | 0.0000 | 0.3000 | 0.0000 |
+| hard pump, θ̇ = (16, 58) | −7.8754 | 0.1234 | 7.7520 | 0.0000 |
+
+The last row is the term to watch, and reading it as "Q is mis-scaled" is wrong.
+The swing-up must acquire E_up − E_hang = 39.24 J, but the cost of carrying that
+energy is set by which generalized mode holds it, and M(hanging) is strongly
+anisotropic (eigenvalues 0.072 and 2.964):
+
+| mode carrying the full 39.24 J | θ̇ [rad/s] | velocity cost |
+|---|---|---|
+| whole arm together, (−1, −0.66) | (−4.5, −2.9) | 0.097 |
+| elbow flapping against shoulder, (−0.33, 1) | (−10.3, 31.2) | 2.376 |
+
+Same energy, 24× apart, against a hanging position cost of 0.4935. A coordinated
+swing-up is ~5× cheaper per step than hanging still, so the optimum is well
+placed and the weights actively prefer efficient pumping over flailing.
+
+The exposure is the path, not the optimum. The acrobot is elbow-actuated, and
+M⁻¹[0, 1] aligns with the expensive mode at 1.000 and with the cheap one at
+0.275: raw elbow torque excites exactly the motion the reward charges most for,
+and reaching the cheap mode requires resonant pumping that transfers energy
+across. Cost of leaving the hanging pose therefore depends on skill already
+held — 0.591/step (1.2× do-nothing) coordinated, 8.416/step (17.1×) at the
+measured bang-bang thrash |θ̇| = (16.6, 58.4). Hanging at rest is a strict local
+optimum, since position cost moves second-order under a small perturbation while
+velocity cost turns on immediately. This is the tension Choe et al. name in
+their intro (§I, point 1); their counterweights are MaxEnt at τ = 2 against
+rewards of order 0.5 — entropy outweighing reward ≈ 4:1 — and the average-reward
+criterion.
+
+Two consequences for the arms here. The reverse curriculum is the direct
+instrument: fraction 0 starts inside the basin where no barrier exists, and the
+band widens outward from a policy that already pumps efficiently, which is the
+regime v4.2 could not reach. Second, `algo_alpha=auto` targets entropy −1 and
+pins no reward-to-entropy ratio, so it does not reproduce the paper's 4:1. The
+`fixed_a2p0` / `fixed_a0p5` / `fixed_a0p1` ladder brackets it: the entropy target
+of −1 nat makes α·|H| ≈ α, so those three sit at roughly 4:1, 1:1 and 0.2:1
+against the 0.4935/step hanging-to-top reward gap, with 2.0 the paper's τ
+transplanted directly. Each row is its env's `final_mf` with `algo_alpha` the
+only field changed.
+
+### Exploration diagnostics
+
+The velocity cost multiplies two independent quantities — how much energy is in
+motion, and how wastefully it is carried — so on its own it cannot separate a
+collapsed policy from a well-coordinated one. An efficient pump holding the full
+swing-up budget costs 0.0966, under a fifth of the hanging position cost, which
+is indistinguishable from rest in a training curve. Two per-step terms factor it
+apart, logged from the behavior policy's own rollouts under `rollout/` (the
+Monitor's `info_keywords`), since exploration is a property of the stochastic
+policy that deterministic evaluation cannot show:
+
+* `energy_norm` = (E − E_hang)/span, the fraction of the 39.24 J swing-up budget
+  currently held, counting kinetic and potential together. Pumping raises total
+  energy, while within one swing the kinetic share trades against potential at
+  swing frequency, so this is the slow variable the policy controls. 0 = hanging
+  at rest, 1 = enough to sit at the top, >1 = overshoot. Shared with v4.x, so
+  the runs stay comparable. `kinetic_norm` reports the kinetic share alone.
+* `velocity_cost_per_joule` = (q̇ᵀWq̇)/KE, a generalized Rayleigh quotient of the
+  pencil (W, M(q)) and therefore scale-free in q̇: it reads coordination with the
+  amplitude divided out, flat across energy levels within a mode.
+  `coordination_loss` normalizes it onto [0, 1] between the cheapest and dearest
+  directions at the current pose, which the raw ratio needs because the bounds
+  move with the elbow angle — [0.0025, 0.0606] extended, [0.0060, 0.0127] folded
+  at θ₂ = 2. At rest the ratio reports 0, outside its physical range, so it can
+  never be misread as efficient.
+
+| what the policy is doing | vel_cost | energy_norm | cost/J | coordination_loss |
+|---|---|---|---|---|
+| hanging still | 0.0000 | 0.00 | 0.0000 | 0.00 |
+| coordinated pump @ 25 % | 0.0242 | 0.25 | 0.0025 | 0.00 |
+| coordinated pump @ 100 % | 0.0966 | 1.00 | 0.0025 | 0.00 |
+| flailing @ 25 % | 0.5941 | 0.25 | 0.0606 | 1.00 |
+| flailing @ 100 % | 2.3763 | 1.00 | 0.0606 | 1.00 |
+| upright at rest | 0.0000 | 1.00 | 0.0000 | 0.00 |
+
+The pair is what makes the α ladder readable, since all three of its failure
+modes present as a return stuck near the hanging floor: α too low leaves
+`energy_norm` ≈ 0 (collapsed to rest, raise it), α too high leaves
+`coordination_loss` near 1 with energy going in (random flailing, lower it), and
+a workable α shows `energy_norm` climbing while `coordination_loss` falls
+(pumping, capture not yet timed — give it steps).
+
+The discount horizon governs how heavily the transient is weighted, and matters
+only while the policy is still in the expensive mode. At γ = 0.995 per
+`dt_default` = 0.01 s, β = −ln γ / dt = 0.501/s and 1/β ≈ 2.0 s, so a 1.4 s
+swing-up carries 1 − e^(−β·1.4) = 50 % of the discounted weight against 1.4/20 =
+7 % under the average-reward criterion over the reset cycle. `mf_hz_g09995`
+(γ = 0.9995, 1/β = 20.0 s = one full cycle) is the closest reachable
+approximation without adding a gain estimate to the critic.
+
+### Wiring
+
+Two env ids over the one reward isolate the reset exactly as v4.1/v4.2 do:
+
+* `acrobot-swingup-v6` keeps the v4.2 reverse curriculum, driven by
+  `set_curriculum_fraction` from global training progress;
+* `acrobot-swingup-v6-uniform` carries no band schedule at all — every episode
+  draws both joints uniformly on [−π, π], so `has_curriculum` is False and the
+  trainer attaches no curriculum callback. It rejects `curriculum=True` rather
+  than ignoring it, while still accepting the `curriculum=False` the runner and
+  the eval harness pass generically to pin eval starts.
+
+Both run 20 s episodes (`env_max_steps` 5000) in three modes: `final_mf` and
+`final_oracle_rollout` at γ = 0.995, matching the v4.2 rows field for field so
+the comparison is reward-only, plus `mf_hz_g09995` at γ = 0.9995.
+
+Both are in `STRICT_CAPTURE_ENV_IDS`, which is load-bearing rather than
+cosmetic here: the reward is a cost, so ranking checkpoints by reward would
+select whichever policy spends least time swinging. Selection stays on capture
+rate then mean maximum residence, identical to v4.1/v4.2, and `best_model_gate`
+is superseded as before. The hold-occupancy eval column reads 0 on v6, which
+has no `hold` term; the height and strict-capture columns carry the comparison.

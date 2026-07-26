@@ -111,8 +111,34 @@ def make_ct_env(
 
     # Continuous-time Monitor wrapper
     if log_dir:
-        env = Monitor(env)
+        env = Monitor(env, info_keywords=rollout_info_keys(env_id))
     return env
+
+
+# Per-step diagnostics logged from the behavior policy's own rollouts, by task.
+# The acrobot v6 set factors its velocity cost into the two things it confounds:
+# ``energy_norm`` is the swing-up energy budget currently held, which pumping
+# raises, and ``coordination_loss`` is where that energy sits between the
+# cheapest and dearest directions of the mass metric at the current pose.  A
+# stalled run is diagnosable from the pair — no energy going in is a collapsed
+# policy, energy going in at coordination_loss near 1 is flailing.
+ROLLOUT_INFO_KEYS = {
+    "acrobot-swingup-v6": (
+        "acrobot_energy_norm",
+        "acrobot_kinetic_norm",
+        "acrobot_velocity_cost",
+        "acrobot_velocity_cost_per_joule",
+        "acrobot_coordination_loss",
+    ),
+}
+ROLLOUT_INFO_KEYS["acrobot-swingup-v6-uniform"] = ROLLOUT_INFO_KEYS[
+    "acrobot-swingup-v6"
+]
+
+
+def rollout_info_keys(env_id: str) -> tuple[str, ...]:
+    """Per-step info scalars the Monitor should log for this task."""
+    return ROLLOUT_INFO_KEYS.get(env_id, ())
 
 
 # Fraction of the training budget over which the reset curriculum widens from
@@ -268,11 +294,11 @@ def run_algorithm(
     if total_timesteps_override is not None:
         total_timesteps = total_timesteps_override
 
-    # Reset curriculum (acrobot swingup-v4.2, cartpole two_poles-curriculum):
+    # Reset curriculum (acrobot swingup-v4.2 / v6, cartpole two_poles-curriculum):
     # the training env widens its start band over ``curr_total`` steps;
     # evaluation must use a fixed start, so force the curriculum off in every
     # eval env kwargs (the task defaults it on).
-    is_curriculum_env = env_id.endswith(("-v4.2", "-curriculum"))
+    is_curriculum_env = env_id.endswith(("-v4.2", "-v6", "-curriculum"))
     if is_curriculum_env:
         _eval_task_kwargs = dict(eval_env_kwargs.get("task_kwargs", {}))
         _eval_task_kwargs["curriculum"] = False
