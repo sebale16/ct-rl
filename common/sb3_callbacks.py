@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
@@ -16,6 +16,7 @@ from evaluations.sustained_capture import (
     SustainedCaptureTracker,
     capture_selection_rank,
 )
+from common.mastery_curriculum import MasteryCurriculum
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,8 @@ class SustainedCaptureEvalCallback(EvalCallback):
             raise ValueError("log_prefix must be non-empty")
         self.best_capture_success_rate = -np.inf
         self.best_capture_duration = -np.inf
+        self.last_capture_success_rate: Optional[float] = None
+        self.last_capture_duration: Optional[float] = None
         self.evaluations_capture_successes: list[list[bool]] = []
         self.evaluations_capture_durations: list[list[float]] = []
 
@@ -212,6 +215,8 @@ class SustainedCaptureEvalCallback(EvalCallback):
         capture_rate, mean_capture_duration = capture_selection_rank(
             results.capture_successes, results.capture_durations
         )
+        self.last_capture_success_rate = float(capture_rate)
+        self.last_capture_duration = float(mean_capture_duration)
 
         self.evaluations_timesteps.append(self.num_timesteps)
         self.evaluations_results.append(results.rewards)
@@ -293,11 +298,73 @@ class SustainedCaptureEvalCallback(EvalCallback):
             f"{self.log_prefix}/best_strict_capture_mean_max_duration",
             self.best_capture_duration,
         )
-        self.logger.dump(self.num_timesteps)
 
+        # Child callbacks consume this evaluation result and may add metrics
+        # (for example the newly selected curriculum stage), so run them before
+        # flushing the logger.
         if continue_training and self.callback is not None:
             continue_training = self._on_event()
+        self.logger.dump(self.num_timesteps)
         return continue_training
+
+
+class MasteryCurriculumCallback(BaseCallback):
+    """SB3 adapter advancing a curriculum after strict-capture evaluation."""
+
+    def __init__(
+        self,
+        set_stage: Callable[[int], None],
+        num_stages: int,
+        success_threshold: float = 0.8,
+        consecutive_evals: int = 1,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        if not callable(set_stage):
+            raise TypeError("set_stage must be callable")
+        self.set_stage = set_stage
+        self.curriculum = MasteryCurriculum(
+            num_stages=num_stages,
+            success_threshold=success_threshold,
+            consecutive_evals=consecutive_evals,
+        )
+
+    @property
+    def stage(self) -> int:
+        return self.curriculum.stage
+
+    @property
+    def num_stages(self) -> int:
+        return self.curriculum.num_stages
+
+    def state_dict(self) -> dict[str, Any]:
+        return self.curriculum.state_dict()
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.curriculum.load_state_dict(state)
+        self.set_stage(self.stage)
+
+    def _on_step(self) -> bool:
+        parent = getattr(self, "parent", None)
+        success_rate = getattr(parent, "last_capture_success_rate", None)
+        if success_rate is None:
+            return True
+
+        rate = float(success_rate)
+        advanced = self.curriculum.observe(rate)
+        if advanced:
+            self.set_stage(self.stage)
+            if self.verbose > 0:
+                print(
+                    f"[curriculum] probe success={rate:.3f}; "
+                    f"advanced to stage {self.stage}/"
+                    f"{self.curriculum.num_stages - 1}",
+                    flush=True,
+                )
+
+        self.logger.record("curriculum/stage", self.stage)
+        self.logger.record("curriculum/probe_success_rate", rate)
+        return True
 
 
 class CurriculumFractionCallback(BaseCallback):

@@ -176,6 +176,18 @@ This isolates whether v4's shaping is necessary. Outcome: learnable from uniform
 starts, height occupancy $\le 0.12$ held-out — partial balance, no sustained
 capture, so the shaped velocity-gated hold remains the stronger balance signal.
 
+## v4.3 and v6.1 — mastery-gated tip-state branches
+
+These IDs preserve the v4.1 and v6 rewards respectively and replace only the
+reset curriculum. The first reset starts near the target with Cartesian tip
+velocity directed toward it, explicitly teaching braking. Subsequent starts
+have zero velocity and lower the tip through a discrete height ladder to exact
+hanging at rest. A level changes only after deterministic evaluation shows
+that the tip was stabilized continuously for one physical second from the
+current height; no global-step schedule is involved. See
+[`tip_height_curriculum.md`](tip_height_curriculum.md) for the geometry,
+threshold, and configuration.
+
 ---
 
 ## Summary
@@ -188,4 +200,6 @@ capture, so the shaped velocity-gated hold remains the stronger balance signal.
 | v4 | $0.2\,\text{ramp} + 0.8\,\text{hold}$ | swing-up found (tip 4.0, 48 % over height), fast swing-through |
 | v4.1 | v4 with overshoot margin $1.0\to0.25$, slow gate $(0,0.1)$; uniform starts, 20 s | from uniform CT-SAC brakes (hold 0.12); from hanging no hold |
 | v4.2 | v4.1 reward, reset energy scheduled $\tilde{E}: 1 \to 0$ | queued |
+| v4.3 | v4.1 reward, mastery-gated tip height/velocity reset | new branch |
 | v5 | $\mathbb{1}[\text{tip } z > 3]$ occupancy | learnable, occupancy $\le 0.12$, partial balance |
+| v6.1 | v6 reward, mastery-gated tip height/velocity reset | new branch |

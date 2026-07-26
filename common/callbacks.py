@@ -16,6 +16,7 @@ from evaluations.sustained_capture import (
     SustainedCaptureSpec,
     capture_selection_rank,
 )
+from common.mastery_curriculum import MasteryCurriculum
 
 if TYPE_CHECKING:
     from algorithms.base import BaseAlgorithm
@@ -277,6 +278,71 @@ class CurriculumFractionCallback(BaseCallback):
         return True
 
 
+class MasteryCurriculumCallback(BaseCallback):
+    """Advance a discrete curriculum from the parent capture evaluation.
+
+    Attach this as :class:`EvalCallback`'s ``callback_after_eval``.  Each event
+    consumes the parent's latest strict-capture success rate; a mastered probe
+    advances one stage and synchronizes that stage through ``set_stage``.
+    """
+
+    def __init__(
+        self,
+        set_stage: Callable[[int], None],
+        num_stages: int,
+        success_threshold: float = 0.8,
+        consecutive_evals: int = 1,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose=verbose)
+        if not callable(set_stage):
+            raise TypeError("set_stage must be callable")
+        self.set_stage = set_stage
+        self.curriculum = MasteryCurriculum(
+            num_stages=num_stages,
+            success_threshold=success_threshold,
+            consecutive_evals=consecutive_evals,
+        )
+
+    @property
+    def stage(self) -> int:
+        return self.curriculum.stage
+
+    @property
+    def num_stages(self) -> int:
+        return self.curriculum.num_stages
+
+    def state_dict(self) -> dict[str, Any]:
+        return self.curriculum.state_dict()
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.curriculum.load_state_dict(state)
+        self.set_stage(self.stage)
+
+    def _on_step(self) -> bool:
+        parent = getattr(self, "parent", None)
+        success_rate = getattr(parent, "last_capture_success_rate", None)
+        if success_rate is None:
+            # A non-capture EvalCallback has no mastery evidence to consume.
+            return True
+
+        rate = float(success_rate)
+        advanced = self.curriculum.observe(rate)
+        if advanced:
+            self.set_stage(self.stage)
+            if self.verbose > 0:
+                print(
+                    f"[curriculum] probe success={rate:.3f}; "
+                    f"advanced to stage {self.stage}/"
+                    f"{self.curriculum.num_stages - 1}",
+                    flush=True,
+                )
+
+        self.logger.record("curriculum/stage", self.stage)
+        self.logger.record("curriculum/probe_success_rate", rate)
+        return True
+
+
 class CheckpointCallback(BaseCallback):
     """
     Callback for saving a model every `save_freq` steps
@@ -504,6 +570,8 @@ class EvalCallback(EventCallback):
         self.last_mean_reward = -np.inf
         self.best_capture_success_rate = -np.inf
         self.best_capture_duration = -np.inf
+        self.last_capture_success_rate: Optional[float] = None
+        self.last_capture_duration: Optional[float] = None
         self._last_eval_timesteps = 0
 
         self.evaluations_timesteps: List[int] = []
@@ -603,6 +671,8 @@ class EvalCallback(EventCallback):
             capture_rate, mean_capture_duration = capture_selection_rank(
                 capture_successes.tolist(), capture_durations.tolist()
             )
+            self.last_capture_success_rate = float(capture_rate)
+            self.last_capture_duration = float(mean_capture_duration)
         else:
             eval_out = evaluate_policy_per_episode(
                 model=self.algorithm.model,
@@ -621,6 +691,8 @@ class EvalCallback(EventCallback):
             capture_durations = None
             capture_rate = None
             mean_capture_duration = None
+            self.last_capture_success_rate = None
+            self.last_capture_duration = None
 
         mean_occ = (
             float(np.mean(occupancies))
@@ -703,12 +775,15 @@ class EvalCallback(EventCallback):
                 f"{self.log_prefix}/best_strict_capture_mean_max_duration",
                 float(self.best_capture_duration),
             )
-        dump(step=self.num_timesteps)
 
-        # After-eval callback
+        # Let after-eval consumers record metrics from this result before the
+        # logger is flushed.  This is load-bearing for mastery curricula:
+        # otherwise their stage transition appears one evaluation late and a
+        # final transition may never be written at all.
         if continue_training:
             continue_training = self._on_event()
 
+        dump(step=self.num_timesteps)
         return continue_training
 
 

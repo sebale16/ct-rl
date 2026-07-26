@@ -29,6 +29,9 @@ hanging to the goal.  It comes as a matched pair over that one reward, which
 isolates the reset from the reward exactly as v4.1/v4.2 do:
 ``swingup-v6`` keeps the v4.2 reverse-curriculum reset, and
 ``swingup-v6-uniform`` replaces it with the fixed uniform-random draw.
+``swingup-v4.3`` and ``swingup-v6.1`` are reward-preserving branches with a
+performance-gated tip-height/velocity curriculum: braking first, then
+zero-velocity starts lowered to exact hanging.
 """
 
 from __future__ import annotations
@@ -42,6 +45,8 @@ from dm_control.rl import control
 from dm_control.suite import acrobot
 from dm_control.suite import base as suite_base
 from dm_control.utils import rewards
+
+from .tip_curriculum import TipHeightVelocityCurriculum
 
 
 STRICT_CAPTURE_DISTANCE = 0.2
@@ -1125,6 +1130,285 @@ def swingup_v6_uniform(
         reward_offset=reward_offset,
         uniform_start=uniform_start,
         curriculum=False,
+    )
+    return control.Environment(
+        physics,
+        task,
+        time_limit=float(time_limit),
+        **dict(environment_kwargs or {}),
+    )
+
+
+# The performance-gated curriculum variants below intentionally live beside,
+# rather than replace, the historical v4.2/v6 angle-band curricula.  Their
+# reset ladder is expressed only in absolute tip height and incoming Cartesian
+# tip speed.  Keeping the reward classes as the second MRO parent makes the
+# reward computation byte-for-byte the established v4.1/v6 implementation.
+ACROBOT_TIP_HEIGHT_BOUNDS = (0.0, 4.0)
+ACROBOT_BRAKE_TIP_HEIGHT = 3.8
+ACROBOT_BRAKE_TIP_SPEED = 1.0
+ACROBOT_DESCENT_TIP_HEIGHTS = (3.5, 3.0, 2.0, 1.0, 0.0)
+
+
+class _AcrobotTipHeightVelocityCurriculum(TipHeightVelocityCurriculum):
+    """Map the mechanism-neutral tip curriculum onto Acrobot coordinates."""
+
+    _TIP_SITE = "tip"
+
+    def _configure_acrobot_tip_curriculum(
+        self,
+        *,
+        curriculum: bool,
+        brake_tip_height: float,
+        brake_tip_speed: float,
+        descent_tip_heights: tuple[float, ...],
+    ) -> None:
+        self._configure_tip_curriculum(
+            curriculum=curriculum,
+            tip_height_bounds=ACROBOT_TIP_HEIGHT_BOUNDS,
+            brake_tip_height=brake_tip_height,
+            brake_tip_speed=brake_tip_speed,
+            descent_tip_heights=descent_tip_heights,
+        )
+
+    def _initialize_acrobot_tip_episode(self, physics) -> None:
+        """Reset to the current extended-link height/speed pair.
+
+        With the elbow extended, ``tip_z = 2 + 2 cos(q1)``.  Mirroring ``q1``
+        and its velocity preserves the task symmetry.  The shoulder velocity
+        has half the requested Cartesian tip speed because the extended arm is
+        two length units long.
+        """
+
+        if self.curriculum:
+            level = self.curriculum_level
+            tip_height = float(level.tip_height)
+            tip_speed = float(level.incoming_tip_speed)
+            side = self._curriculum_side()
+        else:
+            # Fixed evaluation is the exact canonical hanging state, regardless
+            # of the angle/velocity noise accepted by the historical bases.
+            tip_height = ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            tip_speed = 0.0
+            side = 1.0
+
+        shoulder = float(
+            np.arccos(np.clip((tip_height - 2.0) / 2.0, -1.0, 1.0))
+        )
+        if np.isclose(
+            tip_height,
+            ACROBOT_TIP_HEIGHT_BOUNDS[0],
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            # +pi is the repository's canonical representation of hanging.
+            side = 1.0
+
+        physics.named.data.qpos[["shoulder", "elbow"]] = [
+            side * shoulder,
+            0.0,
+        ]
+        physics.data.qvel[:] = 0.0
+        physics.named.data.qvel[["shoulder", "elbow"]] = [
+            -side * tip_speed / 2.0,
+            0.0,
+        ]
+        suite_base.Task.initialize_episode(self, physics)
+
+    @classmethod
+    def _tip_cartesian_velocity(cls, physics) -> np.ndarray:
+        """Return the world-frame linear velocity of the tip site."""
+
+        nv = int(physics.model.nv)
+        jacobian = np.zeros((3, nv), dtype=np.float64)
+        rotational = np.zeros((3, nv), dtype=np.float64)
+        tip_id = int(physics.model.name2id(cls._TIP_SITE, "site"))
+        mujoco.mj_jacSite(
+            physics.model.ptr,
+            physics.data.ptr,
+            jacobian,
+            rotational,
+            tip_id,
+        )
+        qvel = np.asarray(physics.data.qvel, dtype=np.float64).reshape(nv)
+        return jacobian @ qvel
+
+    @classmethod
+    def _tip_cartesian_speed(cls, physics) -> float:
+        return float(np.linalg.norm(cls._tip_cartesian_velocity(physics)))
+
+    def initialize_episode(self, physics) -> None:
+        # Both reward parents use the same model-derived energy references.
+        self._calibrate_energy(physics)
+        self._initialize_acrobot_tip_episode(physics)
+
+    def curriculum_terms(self, physics) -> Dict[str, float]:
+        """Mechanism-neutral reset state exposed by the Gym wrapper."""
+
+        terms = self.curriculum_diagnostics()
+        terms.update(
+            {
+                "curriculum_enabled": float(self.curriculum),
+                "tip_speed": self._tip_cartesian_speed(physics),
+            }
+        )
+        return terms
+
+    def reward_terms(self, physics) -> Dict[str, float]:
+        """Add tip/curriculum diagnostics without changing the parent reward."""
+
+        terms = super().reward_terms(physics)
+        tip_speed = self._tip_cartesian_speed(physics)
+        terms["tip_speed"] = tip_speed
+        terms.update(self.curriculum_diagnostics())
+        terms["curriculum_enabled"] = float(self.curriculum)
+        terms["strict_capture"] = float(
+            float(terms["tip_distance"]) < STRICT_CAPTURE_DISTANCE
+            and tip_speed < STRICT_CAPTURE_SPEED
+        )
+        return terms
+
+
+class BalanceV43(_AcrobotTipHeightVelocityCurriculum, BalanceV4):
+    """The exact v4.1 reward with a performance-gated tip reset ladder."""
+
+    def __init__(
+        self,
+        *,
+        random=None,
+        angle_noise: float = 0.05,
+        velocity_noise: float = 0.01,
+        hold_weight: float = 0.8,
+        curriculum: bool = True,
+        brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
+        brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
+        descent_tip_heights: tuple[
+            float, ...
+        ] = ACROBOT_DESCENT_TIP_HEIGHTS,
+    ) -> None:
+        super().__init__(
+            random=random,
+            angle_noise=angle_noise,
+            velocity_noise=velocity_noise,
+            hold_weight=hold_weight,
+            energy_overshoot_margin=V41_ENERGY_OVERSHOOT_MARGIN,
+            speed_bounds=V41_SPEED_BOUNDS,
+            speed_margin=V41_SPEED_MARGIN,
+            uniform_start=False,
+            curriculum=False,
+        )
+        self._configure_acrobot_tip_curriculum(
+            curriculum=curriculum,
+            brake_tip_height=brake_tip_height,
+            brake_tip_speed=brake_tip_speed,
+            descent_tip_heights=descent_tip_heights,
+        )
+
+
+def swingup_v43(
+    *,
+    time_limit: float = 20.0,
+    random=None,
+    environment_kwargs: Optional[Dict[str, Any]] = None,
+    angle_noise: float = 0.05,
+    velocity_noise: float = 0.01,
+    hold_weight: float = 0.8,
+    curriculum: bool = True,
+    brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
+    brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
+    descent_tip_heights: tuple[float, ...] = ACROBOT_DESCENT_TIP_HEIGHTS,
+):
+    """Construct ``acrobot-swingup-v4.3``."""
+
+    physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
+    task = BalanceV43(
+        random=random,
+        angle_noise=angle_noise,
+        velocity_noise=velocity_noise,
+        hold_weight=hold_weight,
+        curriculum=curriculum,
+        brake_tip_height=brake_tip_height,
+        brake_tip_speed=brake_tip_speed,
+        descent_tip_heights=descent_tip_heights,
+    )
+    return control.Environment(
+        physics,
+        task,
+        time_limit=float(time_limit),
+        **dict(environment_kwargs or {}),
+    )
+
+
+class BalanceV61(_AcrobotTipHeightVelocityCurriculum, BalanceV6):
+    """The exact v6 quadratic reward with the tip reset ladder."""
+
+    def __init__(
+        self,
+        *,
+        random=None,
+        angle_noise: float = 0.05,
+        velocity_noise: float = 0.01,
+        state_weights: tuple[float, ...] = V6_STATE_WEIGHTS,
+        action_weight: float = V6_ACTION_WEIGHT,
+        cost_scale: float = V6_COST_SCALE,
+        reward_offset: float = 0.0,
+        curriculum: bool = True,
+        brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
+        brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
+        descent_tip_heights: tuple[
+            float, ...
+        ] = ACROBOT_DESCENT_TIP_HEIGHTS,
+    ) -> None:
+        super().__init__(
+            random=random,
+            angle_noise=angle_noise,
+            velocity_noise=velocity_noise,
+            state_weights=state_weights,
+            action_weight=action_weight,
+            cost_scale=cost_scale,
+            reward_offset=reward_offset,
+            uniform_start=False,
+            curriculum=False,
+        )
+        self._configure_acrobot_tip_curriculum(
+            curriculum=curriculum,
+            brake_tip_height=brake_tip_height,
+            brake_tip_speed=brake_tip_speed,
+            descent_tip_heights=descent_tip_heights,
+        )
+
+
+def swingup_v61(
+    *,
+    time_limit: float = 20.0,
+    random=None,
+    environment_kwargs: Optional[Dict[str, Any]] = None,
+    angle_noise: float = 0.05,
+    velocity_noise: float = 0.01,
+    state_weights: tuple[float, ...] = V6_STATE_WEIGHTS,
+    action_weight: float = V6_ACTION_WEIGHT,
+    cost_scale: float = V6_COST_SCALE,
+    reward_offset: float = 0.0,
+    curriculum: bool = True,
+    brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
+    brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
+    descent_tip_heights: tuple[float, ...] = ACROBOT_DESCENT_TIP_HEIGHTS,
+):
+    """Construct ``acrobot-swingup-v6.1``."""
+
+    physics = acrobot.Physics.from_xml_string(*acrobot.get_model_and_assets())
+    task = BalanceV61(
+        random=random,
+        angle_noise=angle_noise,
+        velocity_noise=velocity_noise,
+        state_weights=state_weights,
+        action_weight=action_weight,
+        cost_scale=cost_scale,
+        reward_offset=reward_offset,
+        curriculum=curriculum,
+        brake_tip_height=brake_tip_height,
+        brake_tip_speed=brake_tip_speed,
+        descent_tip_heights=descent_tip_heights,
     )
     return control.Environment(
         physics,

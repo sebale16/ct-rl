@@ -1,4 +1,4 @@
-"""Shared physical-time tracking for strict Acrobot capture.
+"""Shared physical-time tracking for strict swing-up capture.
 
 The environment publishes an instantaneous endpoint predicate.  This module
 turns that predicate into an episodic residence metric without attributing the
@@ -15,17 +15,24 @@ import numpy as np
 
 
 STRICT_CAPTURE_INFO_KEY = "acrobot_strict_capture"
+CARTPOLE_STRICT_CAPTURE_INFO_KEY = "cartpole_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
-# v4.1 and the v4.2 curriculum share the velocity-gated capture reward and the
-# 20 s runway; the v6 pair replaces that reward with a quadratic cost but keeps
-# the runway, so all four select checkpoints under this one strict-capture rule
-# and stay rankable against each other.  For v6 that is load-bearing rather than
-# cosmetic: its reward is a cost, so ranking checkpoints by reward would prefer
-# whichever policy spends least time swinging.
+# The Acrobot capture-oriented tasks share one physical checkpoint rule even
+# when their rewards differ; CartPole v2 uses the same distance/speed/duration
+# thresholds with its task-specific info key.  For v6 this is load-bearing
+# rather than cosmetic: its reward is a cost, so reward-only selection can
+# prefer a policy merely because it spends less time swinging.
 STRICT_CAPTURE_ENV_IDS = frozenset(
-    {"acrobot-swingup-v4.1", "acrobot-swingup-v4.2",
-     "acrobot-swingup-v6", "acrobot-swingup-v6-uniform"}
+    {
+        "acrobot-swingup-v4.1",
+        "acrobot-swingup-v4.2",
+        "acrobot-swingup-v4.3",
+        "acrobot-swingup-v6",
+        "acrobot-swingup-v6-uniform",
+        "acrobot-swingup-v6.1",
+        "cartpole-two_poles-v2",
+    }
 )
 # Every algorithm evaluated on those tasks selects checkpoints under this one
 # capture definition, so the model-free, continuous-time, and oracle arms are
@@ -194,4 +201,9 @@ def strict_capture_spec_for(
         return None
     if algorithm.lower() not in STRICT_CAPTURE_ALGORITHMS:
         return None
-    return SustainedCaptureSpec()
+    info_key = (
+        CARTPOLE_STRICT_CAPTURE_INFO_KEY
+        if env_id == "cartpole-two_poles-v2"
+        else STRICT_CAPTURE_INFO_KEY
+    )
+    return SustainedCaptureSpec(info_key=info_key)

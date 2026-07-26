@@ -34,6 +34,7 @@ from common.callbacks import (
     CheckpointCallback,
     CurriculumFractionCallback,
     EvalCallback,
+    MasteryCurriculumCallback,
     WallClockCheckpointCallback,
 )
 from common.checkpoint import load_checkpoint
@@ -48,6 +49,10 @@ from common.utils import (
     set_seed,
 )
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
+from environment.tip_curriculum import (
+    FRACTION_CURRICULUM_ENV_IDS,
+    PERFORMANCE_CURRICULUM_ENV_IDS,
+)
 
 
 def _create_action_noise_from_hyperparams(
@@ -132,6 +137,9 @@ ROLLOUT_INFO_KEYS = {
     ),
 }
 ROLLOUT_INFO_KEYS["acrobot-swingup-v6-uniform"] = ROLLOUT_INFO_KEYS[
+    "acrobot-swingup-v6"
+]
+ROLLOUT_INFO_KEYS["acrobot-swingup-v6.1"] = ROLLOUT_INFO_KEYS[
     "acrobot-swingup-v6"
 ]
 
@@ -237,6 +245,8 @@ def run_algorithm(
     best_model_gate: str | None = None,
     eval_hanging: bool = False,
     curriculum_steps: int | None = None,
+    curriculum_success_threshold: float = 0.8,
+    curriculum_consecutive_evals: int = 1,
 ) -> bool:
     """
     Runs a single RL algorithm experiment.
@@ -294,16 +304,26 @@ def run_algorithm(
     if total_timesteps_override is not None:
         total_timesteps = total_timesteps_override
 
-    # Reset curriculum (acrobot swingup-v4.2 / v6, cartpole two_poles-curriculum):
-    # the training env widens its start band over ``curr_total`` steps;
-    # evaluation must use a fixed start, so force the curriculum off in every
-    # eval env kwargs (the task defaults it on).
-    is_curriculum_env = env_id.endswith(("-v4.2", "-v6", "-curriculum"))
+    # Keep the historical fraction curricula and the new mastery curricula
+    # separate. Both use a fixed final-task distribution for checkpoint
+    # selection; mastery tasks additionally get a changing-stage probe env.
+    is_fraction_curriculum = env_id in FRACTION_CURRICULUM_ENV_IDS
+    is_performance_curriculum = env_id in PERFORMANCE_CURRICULUM_ENV_IDS
+    is_curriculum_env = is_fraction_curriculum or is_performance_curriculum
+    curriculum_probe_env_kwargs = None
     if is_curriculum_env:
+        if is_performance_curriculum:
+            curriculum_probe_env_kwargs = dict(eval_env_kwargs)
+            probe_task_kwargs = dict(
+                curriculum_probe_env_kwargs.get("task_kwargs", {})
+            )
+            probe_task_kwargs["curriculum"] = True
+            curriculum_probe_env_kwargs["task_kwargs"] = probe_task_kwargs
         _eval_task_kwargs = dict(eval_env_kwargs.get("task_kwargs", {}))
         _eval_task_kwargs["curriculum"] = False
         eval_env_kwargs = dict(eval_env_kwargs)
         eval_env_kwargs["task_kwargs"] = _eval_task_kwargs
+    if is_fraction_curriculum:
         curr_total = (
             int(curriculum_steps)
             if curriculum_steps is not None
@@ -368,6 +388,27 @@ def run_algorithm(
         if eval_n_envs > 1
         else make_eval_env_fn(seed=seed + 1000)
     )
+
+    curriculum_probe_env = None
+    if curriculum_probe_env_kwargs is not None:
+        probe_kwargs = dict(curriculum_probe_env_kwargs)
+        probe_n_envs = int(probe_kwargs.pop("n_envs", eval_n_envs))
+        make_probe_env_fn = partial(
+            make_ct_env,
+            env_id=env_id,
+            env_kwargs=probe_kwargs,
+            npz_path=EVAL_NPZ,
+        )
+        curriculum_probe_env = (
+            VecContinuousEnv(
+                [
+                    lambda i=i: make_probe_env_fn(seed=seed + 3000 + i)
+                    for i in range(probe_n_envs)
+                ]
+            )
+            if probe_n_envs > 1
+            else make_probe_env_fn(seed=seed + 3000)
+        )
 
     # Create algorithm
     algo_map = {
@@ -514,7 +555,7 @@ def run_algorithm(
     if best_model_gate and capture_spec is not None:
         print(
             "[selection] strict sustained capture supersedes "
-            "--best_model_gate for Acrobot v4.1 CT-SAC",
+            "--best_model_gate for this task",
             flush=True,
         )
     elif best_model_gate:
@@ -546,6 +587,55 @@ def run_algorithm(
         gate_min_reward=gate_rew,
         capture_spec=capture_spec,
     )
+
+    mastery_curriculum_callback = None
+    curriculum_probe_callback = None
+    if curriculum_probe_env is not None:
+        if capture_spec is None:
+            raise ValueError(
+                f"{env_id} requires a sustained-capture spec for curriculum "
+                "mastery"
+            )
+        train_curriculum_envs = list(_iter_dmc_envs(train_env))
+        probe_curriculum_envs = list(_iter_dmc_envs(curriculum_probe_env))
+        all_curriculum_envs = train_curriculum_envs + probe_curriculum_envs
+        stage_counts = {
+            env.num_curriculum_stages for env in all_curriculum_envs
+        }
+        if None in stage_counts or len(stage_counts) != 1:
+            raise RuntimeError(
+                "performance curriculum environments must expose one shared "
+                f"stage count, got {stage_counts}"
+            )
+        num_curriculum_stages = int(next(iter(stage_counts)))
+
+        def _set_mastery_curriculum_stage(
+            stage: int, _envs=all_curriculum_envs
+        ) -> None:
+            for curriculum_env in _envs:
+                curriculum_env.set_curriculum_stage(stage)
+
+        mastery_curriculum_callback = MasteryCurriculumCallback(
+            set_stage=_set_mastery_curriculum_stage,
+            num_stages=num_curriculum_stages,
+            success_threshold=curriculum_success_threshold,
+            consecutive_evals=curriculum_consecutive_evals,
+            verbose=1,
+        )
+        curriculum_probe_callback = EvalCallback(
+            eval_env=curriculum_probe_env,
+            eval_freq=max(eval_freq // n_envs, 1),
+            n_eval_episodes=n_eval_episodes,
+            deterministic=True,
+            reset_seed=seed + 3000,
+            log_path=str(log_dir / "curriculum_probe"),
+            best_model_save_path=None,
+            verbose=1,
+            callback_after_eval=mastery_curriculum_callback,
+            capture_spec=capture_spec,
+            log_prefix="curriculum",
+        )
+
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq,
         save_path=str(save_dir),
@@ -561,6 +651,8 @@ def run_algorithm(
                 callback.best_capture_success_rate
             ),
             "best_capture_duration": float(callback.best_capture_duration),
+            "last_capture_success_rate": callback.last_capture_success_rate,
+            "last_capture_duration": callback.last_capture_duration,
             "last_eval_timesteps": int(callback._last_eval_timesteps),
             "evaluations_timesteps": callback.evaluations_timesteps,
             "evaluations_results": callback.evaluations_results,
@@ -594,6 +686,12 @@ def run_algorithm(
         callback.best_capture_duration = state.get(
             "best_capture_duration", callback.best_capture_duration
         )
+        callback.last_capture_success_rate = state.get(
+            "last_capture_success_rate", callback.last_capture_success_rate
+        )
+        callback.last_capture_duration = state.get(
+            "last_capture_duration", callback.last_capture_duration
+        )
         callback._last_eval_timesteps = state.get("last_eval_timesteps", 0)
         callback.evaluations_timesteps = state.get(
             "evaluations_timesteps", []
@@ -619,6 +717,18 @@ def run_algorithm(
         _restore_eval_callback_state(
             eval_callback, resume_extra.get("eval", {})
         )
+        if curriculum_probe_callback is not None:
+            _restore_eval_callback_state(
+                curriculum_probe_callback,
+                resume_extra.get("curriculum_probe_eval", {}),
+            )
+        if (
+            mastery_curriculum_callback is not None
+            and "mastery_curriculum" in resume_extra
+        ):
+            mastery_curriculum_callback.load_state_dict(
+                resume_extra["mastery_curriculum"]
+            )
         if capture_spec is None:
             best_label = f"eval_best_reward={eval_callback.best_mean_reward:.3f}"
         else:
@@ -668,11 +778,13 @@ def run_algorithm(
             )
 
     callbacks = [checkpoint_callback, eval_callback]
+    if curriculum_probe_callback is not None:
+        callbacks.append(curriculum_probe_callback)
 
     # Drive the reset curriculum from global training progress.  The setter
     # fans the fraction out to every training env; eval envs were built with
     # the curriculum off and are left untouched.
-    if is_curriculum_env:
+    if is_fraction_curriculum:
         curriculum_envs = list(_iter_dmc_envs(train_env))
 
         def _set_curriculum_fraction(frac, _envs=curriculum_envs):
@@ -691,6 +803,16 @@ def run_algorithm(
             f"({len(curriculum_envs)} train env(s)); eval starts fixed.",
             flush=True,
         )
+    elif is_performance_curriculum:
+        assert mastery_curriculum_callback is not None
+        print(
+            "[curriculum] tip-height ladder advances only after "
+            f"{n_eval_episodes} deterministic probe episode(s) reach "
+            f"{curriculum_success_threshold:.0%} sustained stabilization "
+            f"for {curriculum_consecutive_evals} consecutive evaluation(s); "
+            "checkpoint selection stays on the fixed hanging task.",
+            flush=True,
+        )
 
     # Optional second eval track from the canonical hanging start, run
     # alongside the (uniform-start) primary eval.  For acrobot v4.1/v5 the
@@ -699,6 +821,7 @@ def run_algorithm(
     # true swing-up-from-down task and saves its own best_model_hanging/,
     # without disturbing the primary best_model.
     hanging_eval_callback = None
+    hanging_eval_env = None
     if eval_hanging:
         hanging_eval_env_kwargs = dict(eval_env_kwargs)
         hanging_task_kwargs = dict(hanging_eval_env_kwargs.get("task_kwargs", {}))
@@ -747,6 +870,14 @@ def run_algorithm(
     if max_seconds is not None and max_seconds > 0:
         def _collect_extra():
             state = {"eval": _eval_callback_state(eval_callback)}
+            if curriculum_probe_callback is not None:
+                state["curriculum_probe_eval"] = _eval_callback_state(
+                    curriculum_probe_callback
+                )
+            if mastery_curriculum_callback is not None:
+                state["mastery_curriculum"] = (
+                    mastery_curriculum_callback.state_dict()
+                )
             if hanging_eval_callback is not None:
                 state["eval_hanging"] = _eval_callback_state(
                     hanging_eval_callback
@@ -779,43 +910,63 @@ def run_algorithm(
         f"algo_kwargs={algo_kwargs}\n\n"
         f"log_kwargs={log_kwargs}\n\n"
     )
-    algorithm.learn(
-        total_timesteps=total_timesteps,
-        callback=callback,
-        log_interval=log_interval,
-    )
+    try:
+        algorithm.learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            log_interval=log_interval,
+        )
 
-    # Distinguish "reached total_timesteps" from "paused for a wall-time
-    # checkpoint". The runner writes a marker file the batch script reads to
-    # decide whether to resubmit the next chunk of the chain.
-    paused = bool(wall_cb is not None and wall_cb.stopped)
-    finished = (algorithm.num_timesteps >= total_timesteps) and not paused
+        # Distinguish "reached total_timesteps" from "paused for a wall-time
+        # checkpoint". The runner writes a marker file the batch script reads to
+        # decide whether to resubmit the next chunk of the chain.
+        paused = bool(wall_cb is not None and wall_cb.stopped)
+        finished = (algorithm.num_timesteps >= total_timesteps) and not paused
 
-    if max_seconds is not None:
-        os.makedirs(ckpt_dir, exist_ok=True)
-        marker = os.path.join(ckpt_dir, "STATUS")
-        with open(marker, "w") as f:
-            f.write(
-                ("DONE" if finished else "INCOMPLETE")
-                + f" num_timesteps={algorithm.num_timesteps}"
-                + f" total_timesteps={total_timesteps}\n"
+        if max_seconds is not None:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            marker = os.path.join(ckpt_dir, "STATUS")
+            with open(marker, "w") as f:
+                f.write(
+                    ("DONE" if finished else "INCOMPLETE")
+                    + f" num_timesteps={algorithm.num_timesteps}"
+                    + f" total_timesteps={total_timesteps}\n"
+                )
+
+        if finished:
+            final_model_path = save_dir / "final_model.pth"
+            algorithm.save(final_model_path)
+            print(
+                "Training finished: reached "
+                f"{algorithm.num_timesteps}/{total_timesteps} steps; "
+                f"saved exact endpoint to {final_model_path}.",
+                flush=True,
             )
-
-    if finished:
-        final_model_path = save_dir / "final_model.pth"
-        algorithm.save(final_model_path)
-        print(
-            f"Training finished: reached {algorithm.num_timesteps}/{total_timesteps} "
-            f"steps; saved exact endpoint to {final_model_path}.",
-            flush=True,
-        )
-    else:
-        print(
-            f"Training paused at {algorithm.num_timesteps}/{total_timesteps} steps "
-            f"(will resume from checkpoint).",
-            flush=True,
-        )
-    return finished
+        else:
+            print(
+                "Training paused at "
+                f"{algorithm.num_timesteps}/{total_timesteps} steps "
+                "(will resume from checkpoint).",
+                flush=True,
+            )
+        return finished
+    finally:
+        # VecContinuousEnv has no aggregate close method. Release every native
+        # DMC environment explicitly, including the extra changing-stage probe,
+        # so multi-algorithm invocations do not accumulate MuJoCo resources.
+        closed: set[int] = set()
+        for root_env in (
+            train_env,
+            eval_env,
+            curriculum_probe_env,
+            hanging_eval_env,
+        ):
+            if root_env is None:
+                continue
+            for dmc_env in _iter_dmc_envs(root_env):
+                if id(dmc_env) not in closed:
+                    dmc_env.close()
+                    closed.add(id(dmc_env))
 
 
 def parse_args():
@@ -858,6 +1009,20 @@ def parse_args():
         default=None,
         help="Steps over which the acrobot v4.2 reset band widens to the full "
         "circle. Default: half the training budget. Ignored for other tasks.",
+    )
+    parser.add_argument(
+        "--curriculum_success_threshold",
+        type=float,
+        default=0.8,
+        help="Deterministic sustained-stabilization success rate required to "
+        "advance a performance-gated tip-height curriculum.",
+    )
+    parser.add_argument(
+        "--curriculum_consecutive_evals",
+        type=int,
+        default=1,
+        help="Consecutive mastery probe evaluations that must clear the "
+        "success threshold before lowering the curriculum tip height.",
     )
     parser.add_argument(
         "--seed",
@@ -999,6 +1164,12 @@ def main():
                 best_model_gate=args.best_model_gate,
                 eval_hanging=args.eval_hanging,
                 curriculum_steps=args.curriculum_steps,
+                curriculum_success_threshold=(
+                    args.curriculum_success_threshold
+                ),
+                curriculum_consecutive_evals=(
+                    args.curriculum_consecutive_evals
+                ),
             )
             all_finished = all_finished and bool(finished)
         except (FileNotFoundError, KeyError) as e:

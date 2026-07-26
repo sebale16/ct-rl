@@ -32,11 +32,13 @@ from .acrobot_v2 import (
     swingup_v4,
     swingup_v41,
     swingup_v42,
+    swingup_v43,
     swingup_v5,
     swingup_v6,
+    swingup_v61,
     swingup_v6_uniform,
 )
-from .double_cartpole_v2 import two_poles_curriculum
+from .double_cartpole_v2 import two_poles_curriculum, two_poles_v2
 from .base import ContinuousEnv
 
 
@@ -227,12 +229,15 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v4": swingup_v4,
             "swingup-v4.1": swingup_v41,
             "swingup-v4.2": swingup_v42,
+            "swingup-v4.3": swingup_v43,
             "swingup-v5": swingup_v5,
             "swingup-v6": swingup_v6,
+            "swingup-v6.1": swingup_v61,
             "swingup-v6-uniform": swingup_v6_uniform,
         }
         local_cartpole_tasks = {
             "two_poles-curriculum": two_poles_curriculum,
+            "two_poles-v2": two_poles_v2,
         }
         if domain_name == "acrobot" and task_name in local_acrobot_tasks:
             self._env = local_acrobot_tasks[task_name](
@@ -330,9 +335,24 @@ class DMCContinuousEnv(ContinuousEnv):
     def has_curriculum(self) -> bool:
         """Whether the underlying task exposes a reset curriculum to drive."""
         task = getattr(self._env, "task", None)
-        return bool(getattr(task, "curriculum", False)) and hasattr(
-            task, "set_curriculum_fraction"
+        return bool(getattr(task, "curriculum", False)) and (
+            hasattr(task, "set_curriculum_fraction")
+            or hasattr(task, "set_curriculum_stage")
         )
+
+    @property
+    def curriculum_kind(self) -> Optional[str]:
+        """Return ``fraction`` or ``performance`` for a curriculum task."""
+
+        task = getattr(self._env, "task", None)
+        if not bool(getattr(task, "curriculum", False)):
+            return None
+        kind = getattr(task, "curriculum_kind", None)
+        if kind is not None:
+            return str(kind)
+        if hasattr(task, "set_curriculum_fraction"):
+            return "fraction"
+        return None
 
     def set_curriculum_fraction(self, fraction: float) -> None:
         """Forward curriculum progress in [0, 1] to the underlying task.
@@ -344,6 +364,37 @@ class DMCContinuousEnv(ContinuousEnv):
         setter = getattr(task, "set_curriculum_fraction", None)
         if callable(setter):
             setter(fraction)
+
+    @property
+    def curriculum_stage(self) -> Optional[int]:
+        task = getattr(self._env, "task", None)
+        stage = getattr(task, "curriculum_stage", None)
+        return None if stage is None else int(stage)
+
+    @property
+    def num_curriculum_stages(self) -> Optional[int]:
+        task = getattr(self._env, "task", None)
+        count = getattr(task, "num_curriculum_stages", None)
+        return None if count is None else int(count)
+
+    def set_curriculum_stage(self, stage: int) -> None:
+        """Forward a performance-gated curriculum level to the task."""
+
+        task = getattr(self._env, "task", None)
+        setter = getattr(task, "set_curriculum_stage", None)
+        if callable(setter):
+            setter(stage)
+
+    def curriculum_state_dict(self) -> Optional[dict[str, Any]]:
+        task = getattr(self._env, "task", None)
+        getter = getattr(task, "curriculum_state_dict", None)
+        return getter() if callable(getter) else None
+
+    def load_curriculum_state_dict(self, state: dict[str, Any]) -> None:
+        task = getattr(self._env, "task", None)
+        loader = getattr(task, "load_curriculum_state_dict", None)
+        if callable(loader):
+            loader(state)
 
     def close(self) -> None:
         with self._drift_rollout_lock:
@@ -496,6 +547,7 @@ class DMCContinuousEnv(ContinuousEnv):
             obs = self._raw_obs() if self.raw_state_obs else _flatten_obs(ts.observation)
             self._last_obs_dmc = obs
             info: Dict[str, Any] = self._acrobot_reward_info(update=False)
+            info.update(self._curriculum_task_info())
             return obs, info
 
     def _acrobot_reward_info(self, *, update: bool) -> Dict[str, Any]:
@@ -550,6 +602,20 @@ class DMCContinuousEnv(ContinuousEnv):
             if term_name in terms:
                 info[info_name] = float(terms[term_name])
         return info
+
+    def _curriculum_task_info(self) -> Dict[str, Any]:
+        """Expose mechanism-neutral diagnostics from local curriculum tasks."""
+
+        task = self._env.task
+        terms_fn = getattr(task, "curriculum_terms", None)
+        if not callable(terms_fn):
+            return {}
+        terms = terms_fn(self._env.physics)
+        prefix = f"{self.domain_name}_"
+        return {
+            prefix + str(name): float(value)
+            for name, value in terms.items()
+        }
 
     def _step_physics(
         self,
@@ -614,6 +680,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "dt_used": float(actual_dt),
         }
         info.update(self._acrobot_reward_info(update=True))
+        info.update(self._curriculum_task_info())
 
         return obs, reward, terminated, truncated, info, float(actual_dt)
 

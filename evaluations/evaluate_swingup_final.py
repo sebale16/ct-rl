@@ -52,7 +52,9 @@ ACROBOT_ENVS = (
     "acrobot-swingup-v3",
     "acrobot-swingup-v4",
     "acrobot-swingup-v4.1",
+    "acrobot-swingup-v4.3",
     "acrobot-swingup-v5",
+    "acrobot-swingup-v6.1",
 )
 SUPPORTED_ENVS = ("cartpole-swingup", *ACROBOT_ENVS)
 REGIMES = ("irregular_train", "uniform_0p01")
@@ -862,10 +864,19 @@ def evaluate_checkpoint(
 ) -> list[dict[str, Any]]:
     """Evaluate one checkpoint in paired regimes and return output rows."""
 
+    # Keep dm_control/MuJoCo imports lazy so manifest and CLI validation remain
+    # usable on machines that only aggregate previously generated results.
+    from environment.tip_curriculum import PERFORMANCE_CURRICULUM_ENV_IDS
+
     regime_kwargs = {
         regime: build_regime_env_kwargs(config.env_kwargs, regime)
         for regime in REGIMES
     }
+    if spec.env_id in PERFORMANCE_CURRICULUM_ENV_IDS:
+        for kwargs in regime_kwargs.values():
+            task_kwargs = dict(kwargs.get("task_kwargs", {}))
+            task_kwargs["curriculum"] = False
+            kwargs["task_kwargs"] = task_kwargs
     envs = {}
     try:
         for regime, kwargs in regime_kwargs.items():

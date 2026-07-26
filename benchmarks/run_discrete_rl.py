@@ -37,10 +37,15 @@ from common.utils import (
 )
 from common.sb3_callbacks import (
     CurriculumFractionCallback,
+    MasteryCurriculumCallback,
     SustainedCaptureEvalCallback,
 )
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import strict_capture_spec_for
+from environment.tip_curriculum import (
+    FRACTION_CURRICULUM_ENV_IDS,
+    PERFORMANCE_CURRICULUM_ENV_IDS,
+)
 
 _MONITOR_COUNTER = count()
 
@@ -136,6 +141,8 @@ def run_sb3_benchmark(
     eval_range: str | None = None,
     eval_hanging: bool = False,
     curriculum_steps: int | None = None,
+    curriculum_success_threshold: float = 0.8,
+    curriculum_consecutive_evals: int = 1,
 ):
     """
     Runs a single Stable-Baselines3 benchmark experiment.
@@ -177,16 +184,23 @@ def run_sb3_benchmark(
     if total_timesteps_override is not None:
         total_timesteps = total_timesteps_override
 
-    # Reset curriculum (acrobot swingup-v4.2, cartpole two_poles-curriculum):
-    # training envs widen their start band over curr_total steps; evaluation
-    # must use a fixed start, so force the curriculum off in the eval metadata
-    # (the hanging copy inherits it).
-    is_curriculum_env = env_id.endswith(("-v4.2", "-curriculum"))
+    is_fraction_curriculum = env_id in FRACTION_CURRICULUM_ENV_IDS
+    is_performance_curriculum = env_id in PERFORMANCE_CURRICULUM_ENV_IDS
+    is_curriculum_env = is_fraction_curriculum or is_performance_curriculum
+    curriculum_probe_meta = None
     if is_curriculum_env:
+        if is_performance_curriculum:
+            curriculum_probe_meta = dict(eval_env_meta)
+            probe_task_kwargs = dict(
+                curriculum_probe_meta.get("task_kwargs") or {}
+            )
+            probe_task_kwargs["curriculum"] = True
+            curriculum_probe_meta["task_kwargs"] = probe_task_kwargs
         eval_task_kwargs = dict(eval_env_meta.get("task_kwargs") or {})
         eval_task_kwargs["curriculum"] = False
         eval_env_meta = dict(eval_env_meta)
         eval_env_meta["task_kwargs"] = eval_task_kwargs
+    if is_fraction_curriculum:
         curr_total = (
             int(curriculum_steps)
             if curriculum_steps is not None
@@ -230,6 +244,21 @@ def run_sb3_benchmark(
             dataset_path=EVAL_NPZ,
         ),
     )
+
+    curriculum_probe_env = None
+    if curriculum_probe_meta is not None:
+        curriculum_probe_env = make_vec_env(
+            make_env,
+            n_envs=eval_n_envs,
+            seed=seed + 3000,
+            env_kwargs=dict(
+                env_id=env_id,
+                monitor_root=log_dir / "curriculum_probe",
+                seed=seed + 3000,
+                env_meta=curriculum_probe_meta,
+                dataset_path=EVAL_NPZ,
+            ),
+        )
 
     # Optional true-task evaluation from the canonical hanging pose. Keep a
     # separate metadata copy so the primary uniform-start evaluation remains
@@ -326,6 +355,55 @@ def run_sb3_benchmark(
     )
 
     callbacks = [checkpoint_callback, eval_callback]
+    if curriculum_probe_env is not None:
+        if capture_spec is None:
+            raise ValueError(
+                f"{env_id} requires a sustained-capture spec for curriculum "
+                "mastery"
+            )
+        stage_counts = set(train_env.get_attr("num_curriculum_stages"))
+        stage_counts.update(
+            curriculum_probe_env.get_attr("num_curriculum_stages")
+        )
+        if None in stage_counts or len(stage_counts) != 1:
+            raise RuntimeError(
+                "performance curriculum environments must expose one shared "
+                f"stage count, got {stage_counts}"
+            )
+
+        def _set_mastery_curriculum_stage(stage: int) -> None:
+            train_env.env_method("set_curriculum_stage", stage)
+            curriculum_probe_env.env_method("set_curriculum_stage", stage)
+
+        mastery_callback = MasteryCurriculumCallback(
+            set_stage=_set_mastery_curriculum_stage,
+            num_stages=int(next(iter(stage_counts))),
+            success_threshold=curriculum_success_threshold,
+            consecutive_evals=curriculum_consecutive_evals,
+            verbose=1,
+        )
+        curriculum_probe_callback = SustainedCaptureEvalCallback(
+            curriculum_probe_env,
+            capture_spec=capture_spec,
+            reset_seed=seed + 3000,
+            n_eval_episodes=n_eval_episodes,
+            best_model_save_path=None,
+            log_path=str(log_dir / "curriculum_probe"),
+            eval_freq=max(eval_freq // n_envs, 1),
+            deterministic=True,
+            render=False,
+            log_prefix="curriculum",
+            callback_after_eval=mastery_callback,
+        )
+        callbacks.append(curriculum_probe_callback)
+        print(
+            "[curriculum] tip-height ladder advances only after "
+            f"{n_eval_episodes} deterministic probe episode(s) reach "
+            f"{curriculum_success_threshold:.0%} sustained stabilization "
+            f"for {curriculum_consecutive_evals} consecutive evaluation(s); "
+            "checkpoint selection stays on the fixed hanging task.",
+            flush=True,
+        )
     if hanging_eval_env is not None:
         assert capture_spec is not None
         print(
@@ -356,7 +434,7 @@ def run_sb3_benchmark(
 
     # Drive the reset curriculum from global training progress (eval envs were
     # built with the curriculum off and are left untouched).
-    if is_curriculum_env:
+    if is_fraction_curriculum:
         callbacks.append(CurriculumFractionCallback(total_steps=curr_total))
         print(
             f"[curriculum] reset band widens to full over {curr_total} steps "
@@ -387,6 +465,8 @@ def run_sb3_benchmark(
         model.save(str(save_dir / "final_model"))
         print("Training finished.")
     finally:
+        if curriculum_probe_env is not None:
+            curriculum_probe_env.close()
         if hanging_eval_env is not None:
             hanging_eval_env.close()
         eval_env.close()
@@ -432,6 +512,20 @@ def parse_args():
         default=None,
         help="Steps over which the acrobot v4.2 reset band widens to the full "
         "circle. Default: half the training budget. Ignored for other tasks.",
+    )
+    parser.add_argument(
+        "--curriculum_success_threshold",
+        type=float,
+        default=0.8,
+        help="Deterministic sustained-stabilization success rate required to "
+        "advance a performance-gated tip-height curriculum.",
+    )
+    parser.add_argument(
+        "--curriculum_consecutive_evals",
+        type=int,
+        default=1,
+        help="Consecutive mastery probes that must clear the threshold before "
+        "the curriculum lowers the starting tip height.",
     )
     parser.add_argument(
         "--seed",
@@ -514,6 +608,12 @@ def main():
                 eval_range=eval_range,
                 eval_hanging=args.eval_hanging,
                 curriculum_steps=args.curriculum_steps,
+                curriculum_success_threshold=(
+                    args.curriculum_success_threshold
+                ),
+                curriculum_consecutive_evals=(
+                    args.curriculum_consecutive_evals
+                ),
             )
         except (FileNotFoundError, KeyError) as e:
             print(f"\nCould not run {algo_name} due to a configuration error: {e}\n")

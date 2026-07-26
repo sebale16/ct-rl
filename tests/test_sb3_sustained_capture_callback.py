@@ -15,6 +15,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without SB3
 else:
     from common.sb3_callbacks import (
         CurriculumFractionCallback,
+        MasteryCurriculumCallback,
         SB3CaptureEvaluation,
         SustainedCaptureEvalCallback,
         evaluate_sb3_policy_with_capture,
@@ -395,6 +396,54 @@ class SB3SustainedCaptureTests(unittest.TestCase):
         self.assertFalse(
             any(key.startswith("eval/") for key in recorded_keys),
             recorded_keys,
+        )
+
+    def test_mastery_stage_is_recorded_before_the_evaluation_dump(self):
+        eval_env = DummyVecEnv([_MinimalGymEnv])
+        self.addCleanup(eval_env.close)
+        model = MagicMock()
+        model.num_timesteps = 1
+        model.get_env.return_value = eval_env
+        model.get_vec_normalize_env.return_value = None
+        model.logger = MagicMock()
+        stages: list[int] = []
+        mastery = MasteryCurriculumCallback(
+            set_stage=stages.append,
+            num_stages=3,
+            success_threshold=0.5,
+        )
+        callback = SustainedCaptureEvalCallback(
+            eval_env,
+            capture_spec=SustainedCaptureSpec(),
+            n_eval_episodes=2,
+            eval_freq=1,
+            deterministic=True,
+            render=False,
+            verbose=0,
+            callback_after_eval=mastery,
+        )
+        callback.init_callback(model)
+        result = SB3CaptureEvaluation(
+            rewards=[1.0, 1.0],
+            lengths=[10, 10],
+            capture_successes=[True, False],
+            capture_durations=[1.0, 0.0],
+        )
+
+        with patch(
+            "common.sb3_callbacks.evaluate_sb3_policy_with_capture",
+            return_value=result,
+        ):
+            self.assertTrue(callback.on_step())
+
+        self.assertEqual(stages, [1])
+        stage_record = call.record("curriculum/stage", 1)
+        dump_call = call.dump(1)
+        self.assertIn(stage_record, model.logger.mock_calls)
+        self.assertIn(dump_call, model.logger.mock_calls)
+        self.assertLess(
+            model.logger.mock_calls.index(stage_record),
+            model.logger.mock_calls.index(dump_call),
         )
 
 
