@@ -136,8 +136,8 @@ def _annotate(
     initial_stage = stage == 0
     final_stage = stage == num_stages - 1
     if initial_stage:
-        stage_kind = "UPRIGHT REST"
-        subtitle = "Exact upright vertical pose at zero starting velocity"
+        stage_kind = "NEAR-UPRIGHT REST"
+        subtitle = "Small displacement from vertical at zero starting velocity"
     elif final_stage:
         stage_kind = "FINAL HANGING"
         subtitle = "Exact hanging state at zero velocity"

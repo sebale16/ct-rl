@@ -20,17 +20,20 @@ Every new reset is specified by only two physical quantities: world-frame tip
 height and Cartesian tip speed. Mirror-symmetric left/right poses are sampled
 where the selected height is not a vertical extreme.
 
-1. The first level is the exact upright vertical configuration at rest.
+1. The first level starts at 99.5% normalized tip height and at rest, a small
+   mirrored displacement from vertical that requires active recovery.
 2. Every level has exactly zero starting velocity; subsequent levels
    monotonically lower the tip.
 3. The last level is the exact hanging configuration at zero velocity and
    remains the training distribution after it is reached.
 
 Default Acrobot levels are `(height, speed)` =
-`(4.0, 0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
-The serial two-pole CartPole uses `(3.0, 0), (2.5, 0), (2.0, 0),
+`(3.98, 0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
+The serial two-pole CartPole uses `(2.98, 0), (2.5, 0), (2.0, 0),
 (1.0, 0), (0.0, 0), (-1.0, 0)`. Heights and speeds are in metres and
-metres/second.
+metres/second. In both mechanisms the first pose is about 8.1 degrees from
+vertical and 0.283 m from the stabilization point, outside the 0.2 m capture
+radius.
 
 For Acrobot the links stay extended and
 `z_tip = 2 + 2 cos(q_shoulder)`. The incoming shoulder velocity is the
@@ -42,20 +45,18 @@ requested distal-tip speed is `2 |q1_dot|`. No reset noise is added.
 ## Mastery gate
 
 Curriculum progress has no timestep schedule. At the normal evaluation
-frequency, a separate deterministic probe evaluates the current level. An
-episode passes only if the tip stays within 0.2 m of the stabilization point
-and below 0.2 m/s continuously for at least one physical second. The default
-level threshold is an 80% pass rate over the probe episodes. A passing probe
-advances exactly one level; failed probes leave the level unchanged.
+frequency, a separate deterministic probe evaluates the current level. In both
+mechanisms an episode passes only if the tip stays within 0.2 m of the
+stabilization point and below 0.2 m/s for five uninterrupted physical seconds
+and remains captured through the episode endpoint. A five-second hold followed
+by a fall does not pass. The default level threshold is an 80% pass rate over
+the probe episodes. A passing probe advances exactly one level; failed probes
+leave the level unchanged.
 
 The changing probe is not used for checkpoint selection. The primary
 evaluation environment is fixed at the final hanging-at-rest task, so
 best-model scores remain comparable throughout training. Performance
 curriculum state is also included in resumable CT checkpoints.
-
-The exact noiseless upright state is an equilibrium in MuJoCo. Consequently,
-a zero-action policy can pass the first level without correction; the later
-lower-height levels are where recovery and swing-up behavior enter.
 
 ## Curriculum telemetry
 

@@ -5,7 +5,7 @@ Both local tasks keep dm_control's stock ``two_poles`` smooth reward unchanged:
 * ``cartpole-two_poles-curriculum`` is the historical fraction-scheduled
   angle-band curriculum.
 * ``cartpole-two_poles-v2`` is the performance-gated tip-height/velocity
-  curriculum.  It begins exactly upright at rest, then lowers the distal tip
+  curriculum.  It begins near upright at rest, then lowers the distal tip
   through zero-velocity starts until reaching exact hanging.
 """
 

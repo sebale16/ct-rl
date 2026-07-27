@@ -38,7 +38,10 @@ from common.callbacks import (
     WallClockCheckpointCallback,
 )
 from common.checkpoint import load_checkpoint
-from evaluations.sustained_capture import strict_capture_spec_for
+from evaluations.sustained_capture import (
+    curriculum_mastery_capture_spec_for,
+    strict_capture_spec_for,
+)
 
 from common.logger import configure
 from common.utils import (
@@ -541,6 +544,14 @@ def run_algorithm(
     eval_freq = log_kwargs.get("eval_freq", 10000)
     log_interval = log_kwargs.get("interval", 1000)
     capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    curriculum_capture_spec = (
+        curriculum_mastery_capture_spec_for(
+            algorithm=algo,
+            env_id=env_id,
+        )
+        if is_performance_curriculum
+        else None
+    )
     if capture_spec is not None:
         print(
             "[selection] best_model uses strict capture: distance<0.2, "
@@ -591,7 +602,7 @@ def run_algorithm(
     mastery_curriculum_callback = None
     curriculum_probe_callback = None
     if curriculum_probe_env is not None:
-        if capture_spec is None:
+        if curriculum_capture_spec is None:
             raise ValueError(
                 f"{env_id} requires a sustained-capture spec for curriculum "
                 "mastery"
@@ -638,7 +649,7 @@ def run_algorithm(
             best_model_save_path=None,
             verbose=1,
             callback_after_eval=mastery_curriculum_callback,
-            capture_spec=capture_spec,
+            capture_spec=curriculum_capture_spec,
             log_prefix="curriculum",
         )
 
@@ -820,10 +831,18 @@ def run_algorithm(
         )
     elif is_performance_curriculum:
         assert mastery_curriculum_callback is not None
+        assert curriculum_capture_spec is not None
+        terminal_requirement = (
+            " through episode end"
+            if curriculum_capture_spec.require_terminal_hold
+            else ""
+        )
         print(
             "[curriculum] tip-height ladder advances only after "
             f"{n_eval_episodes} deterministic probe episode(s) reach "
-            f"{curriculum_success_threshold:.0%} sustained stabilization "
+            f"{curriculum_success_threshold:.0%} stabilization held for "
+            f">={curriculum_capture_spec.duration_seconds:g} physical "
+            f"seconds{terminal_requirement} "
             f"for {curriculum_consecutive_evals} consecutive evaluation(s); "
             "checkpoint selection stays on the fixed hanging task.",
             flush=True,

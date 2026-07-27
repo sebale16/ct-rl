@@ -30,8 +30,8 @@ isolates the reset from the reward exactly as v4.1/v4.2 do:
 ``swingup-v6`` keeps the v4.2 reverse-curriculum reset, and
 ``swingup-v6-uniform`` replaces it with the fixed uniform-random draw.
 ``swingup-v4.3`` and ``swingup-v6.1`` are reward-preserving branches with a
-performance-gated tip-height/velocity curriculum: upright at rest first, then
-lower rest starts down to exact hanging.
+performance-gated tip-height/velocity curriculum: near-upright at rest first,
+then lower rest starts down to exact hanging.
 """
 
 from __future__ import annotations

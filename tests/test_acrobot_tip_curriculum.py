@@ -13,12 +13,14 @@ try:
         BalanceV6,
         BalanceV43,
         BalanceV61,
+        STRICT_CAPTURE_DISTANCE,
         V41_ENERGY_OVERSHOOT_MARGIN,
         V41_SPEED_BOUNDS,
         V41_SPEED_MARGIN,
         swingup_v43,
         swingup_v61,
     )
+    from environment.tip_curriculum import INITIAL_TIP_HEIGHT_NORM
 
     HAVE_DMC = True
 except Exception:  # pragma: no cover - exercised only without dm_control
@@ -48,14 +50,20 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
         task.initialize_episode(self.physics)
         self.physics.forward()
 
-    def test_default_ladder_is_upright_then_resting_descent(self):
+    def test_default_ladder_is_near_upright_then_resting_descent(self):
         task = BalanceV43(random=0)
         levels = task.curriculum_levels
+        expected_initial_height = (
+            ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            + INITIAL_TIP_HEIGHT_NORM
+            * (
+                ACROBOT_TIP_HEIGHT_BOUNDS[1]
+                - ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            )
+        )
 
         self.assertEqual(len(levels), 1 + len(ACROBOT_DESCENT_TIP_HEIGHTS))
-        self.assertEqual(
-            levels[0].tip_height, ACROBOT_TIP_HEIGHT_BOUNDS[1]
-        )
+        self.assertEqual(levels[0].tip_height, expected_initial_height)
         self.assertEqual(levels[0].incoming_tip_speed, 0.0)
         self.assertEqual(
             tuple(level.tip_height for level in levels[1:]),
@@ -95,7 +103,7 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     height_norm,
                 )
 
-    def test_first_reset_is_exact_upright_at_rest(self):
+    def test_first_reset_is_near_upright_at_rest(self):
         for task_type in (BalanceV43, BalanceV61):
             with self.subTest(task_type=task_type.__name__):
                 task = task_type(random=0)
@@ -109,19 +117,32 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     dtype=np.float64,
                 )
                 np.testing.assert_array_equal(
-                    np.asarray(self.physics.data.qpos), np.zeros(2)
-                )
-                np.testing.assert_array_equal(
                     np.asarray(self.physics.data.qvel), np.zeros(2)
                 )
-                np.testing.assert_allclose(tip, target, rtol=0.0, atol=1e-12)
-                self.assertAlmostEqual(
-                    tip[2], ACROBOT_TIP_HEIGHT_BOUNDS[1], places=12
+                expected_height = (
+                    ACROBOT_TIP_HEIGHT_BOUNDS[0]
+                    + INITIAL_TIP_HEIGHT_NORM
+                    * (
+                        ACROBOT_TIP_HEIGHT_BOUNDS[1]
+                        - ACROBOT_TIP_HEIGHT_BOUNDS[0]
+                    )
                 )
+                expected_angle = np.arccos((expected_height - 2.0) / 2.0)
+                self.assertAlmostEqual(
+                    abs(float(self.physics.data.qpos[0])),
+                    expected_angle,
+                    places=12,
+                )
+                self.assertEqual(float(self.physics.data.qpos[1]), 0.0)
+                self.assertAlmostEqual(tip[2], expected_height, places=12)
                 terms = task.reward_terms(self.physics)
-                self.assertEqual(terms["tip_distance"], 0.0)
+                expected_distance = float(np.linalg.norm(target - tip))
+                self.assertGreater(expected_distance, STRICT_CAPTURE_DISTANCE)
+                self.assertAlmostEqual(
+                    terms["tip_distance"], expected_distance, places=12
+                )
                 self.assertEqual(terms["tip_speed"], 0.0)
-                self.assertEqual(terms["strict_capture"], 1.0)
+                self.assertEqual(terms["strict_capture"], 0.0)
 
     def test_descent_resets_have_exact_height_and_zero_velocity(self):
         task = BalanceV43(random=7)
@@ -166,7 +187,6 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
 
     def test_reseed_reproduces_mirrored_reset_sequence(self):
         task = BalanceV43(random=999)
-        task.set_curriculum_stage(1)
 
         def draw_sequence():
             sequence = []

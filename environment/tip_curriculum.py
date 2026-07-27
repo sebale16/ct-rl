@@ -1,9 +1,9 @@
 """Shared tip-height/velocity curriculum state for swing-up tasks.
 
-The curriculum is deliberately discrete.  Its first level is the exact
-upright configuration at rest, so the first skill is maintaining balance.
-Every later level also starts at rest and lowers the tip until the last level
-is the exact hanging configuration.
+The curriculum is deliberately discrete.  Its first level is a small
+near-upright displacement at rest, so the first skill is recovering into and
+maintaining balance.  Every later level also starts at rest and lowers the tip
+until the last level is the exact hanging configuration.
 
 This module owns only the level specification and synchronization protocol.
 Each mechanism maps ``(tip_height, incoming_tip_speed, side)`` to its own
@@ -33,6 +33,7 @@ PERFORMANCE_CURRICULUM_ENV_IDS = frozenset(
         "cartpole-two_poles-v2",
     }
 )
+INITIAL_TIP_HEIGHT_NORM = 0.995
 
 
 @dataclass(frozen=True)
@@ -107,9 +108,18 @@ class TipHeightVelocityCurriculum:
                 "the last descent_tip_height must be the exact hanging height"
             )
 
+        initial_height = hanging_height + INITIAL_TIP_HEIGHT_NORM * (
+            upright_height - hanging_height
+        )
+        if descent[0] >= initial_height:
+            raise ValueError(
+                "the first descent_tip_height must be below the initial "
+                "near-upright height"
+            )
+
         self._tip_height_bounds = (hanging_height, upright_height)
         self._tip_curriculum_levels = (
-            TipCurriculumLevel(upright_height, 0.0),
+            TipCurriculumLevel(initial_height, 0.0),
             *(TipCurriculumLevel(height, 0.0) for height in descent),
         )
         self._curriculum_stage = (

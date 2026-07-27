@@ -17,6 +17,7 @@ import numpy as np
 STRICT_CAPTURE_INFO_KEY = "acrobot_strict_capture"
 CARTPOLE_STRICT_CAPTURE_INFO_KEY = "cartpole_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
+CURRICULUM_CAPTURE_DURATION_SECONDS = 5.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
 # The Acrobot capture-oriented tasks share one physical checkpoint rule even
 # when their rewards differ; CartPole v2 uses the same distance/speed/duration
@@ -40,6 +41,13 @@ STRICT_CAPTURE_ENV_IDS = frozenset(
 STRICT_CAPTURE_ALGORITHMS = frozenset(
     {"ppo", "sac", "td3", "ct_sac", "ct_td3"}
 )
+PERFORMANCE_CURRICULUM_CAPTURE_ENV_IDS = frozenset(
+    {
+        "acrobot-swingup-v4.3",
+        "acrobot-swingup-v6.1",
+        "cartpole-two_poles-v2",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,7 @@ class SustainedCaptureSpec:
     info_key: str = STRICT_CAPTURE_INFO_KEY
     duration_seconds: float = STRICT_CAPTURE_DURATION_SECONDS
     duration_atol: float = 1e-6
+    require_terminal_hold: bool = False
 
     def __post_init__(self) -> None:
         if not self.info_key:
@@ -60,6 +69,8 @@ class SustainedCaptureSpec:
             raise ValueError("capture duration_seconds must be finite and > 0")
         if not np.isfinite(self.duration_atol) or self.duration_atol < 0.0:
             raise ValueError("capture duration_atol must be finite and >= 0")
+        if not isinstance(self.require_terminal_hold, (bool, np.bool_)):
+            raise TypeError("capture require_terminal_hold must be boolean")
 
 
 @dataclass(frozen=True)
@@ -153,9 +164,14 @@ class SustainedCaptureTracker:
             return None
 
         maximum = float(self._max_seconds[slot])
+        qualifying_duration = (
+            float(self._run_seconds[slot])
+            if self.spec.require_terminal_hold
+            else maximum
+        )
         result = CaptureEpisodeResult(
             success=(
-                maximum + self.spec.duration_atol
+                qualifying_duration + self.spec.duration_atol
                 >= self.spec.duration_seconds
             ),
             max_duration_seconds=maximum,
@@ -207,3 +223,31 @@ def strict_capture_spec_for(
         else STRICT_CAPTURE_INFO_KEY
     )
     return SustainedCaptureSpec(info_key=info_key)
+
+
+def curriculum_mastery_capture_spec_for(
+    *, algorithm: str, env_id: str
+) -> Optional[SustainedCaptureSpec]:
+    """Return the stage-advancement capture rule for a curriculum task.
+
+    Every performance curriculum requires a longer uninterrupted hold that is
+    still active when the probe episode ends.  This prevents a transient
+    capture followed by a fall from advancing the reset ladder.  Ordinary
+    checkpoint selection retains the shared one-second maximum-residence rule.
+    """
+
+    checkpoint_spec = strict_capture_spec_for(
+        algorithm=algorithm,
+        env_id=env_id,
+    )
+    if (
+        checkpoint_spec is None
+        or env_id not in PERFORMANCE_CURRICULUM_CAPTURE_ENV_IDS
+    ):
+        return checkpoint_spec
+    return SustainedCaptureSpec(
+        info_key=checkpoint_spec.info_key,
+        duration_seconds=CURRICULUM_CAPTURE_DURATION_SECONDS,
+        duration_atol=checkpoint_spec.duration_atol,
+        require_terminal_hold=True,
+    )
