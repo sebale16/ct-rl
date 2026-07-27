@@ -1150,13 +1150,12 @@ class TestRawStateLayout(unittest.TestCase):
         self.assertGreater(agent._dynamics_updates, 5)
 
 
-class TestContactForcePort(unittest.TestCase):
-    """Explicit contact-force port (contact_force > 0): learned gap functions
-    with unilateral Hunt-Crossley normal forces and regularized Coulomb
-    friction, plus the translation-invariance restriction on M."""
+class TestCompliantContactForcePort(unittest.TestCase):
+    """Compatibility coverage for historical Hunt--Crossley checkpoints."""
 
     def _model(self, contact_force=2, **kw):
         th.manual_seed(0)
+        kw.setdefault("contact_solver", "compliant")
         return PortHamiltonianModel(
             17, 6, mode="structured", structured_hidden=(32, 32),
             contact_force=contact_force, **kw,
@@ -1274,6 +1273,154 @@ class TestContactForcePort(unittest.TestCase):
         m2.load_state_dict(m.state_dict())
         x = th.randn(4, 17); a = th.randn(4, 6)
         self.assertTrue(th.allclose(m.drift(x, a), m2.drift(x, a)))
+
+
+class TestConstraintContactForcePort(unittest.TestCase):
+    """Action-conditioned unilateral contact with Coulomb-cone impulses."""
+
+    def _model(self, contact_force=2, **kw):
+        th.manual_seed(11)
+        return PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(16, 16),
+            contact_force=contact_force, **kw,
+        )
+
+    def _canonical_geometry(self, m, gap=-0.002):
+        """Two flat-ground points: Jn=e_z and Jt=e_x."""
+        K = m.contact_force
+        m.gap_net = th.nn.Linear(m.layout.npos, K)
+        m.tangent_net = th.nn.Linear(m.layout.npos, K)
+        with th.no_grad():
+            m.gap_net.weight.zero_()
+            m.gap_net.weight[:, 0] = 1.0
+            m.gap_net.bias.fill_(gap)
+            m.tangent_net.weight.zero_()
+            m.tangent_net.bias.zero_()
+            # Actuator 0 requests tangential acceleration; actuator 1 changes
+            # the normal load. This makes same-state action response explicit.
+            m.G_a.weight.zero_()
+            m.G_a.weight[0, 0] = 1.0
+            m.G_a.weight[1, 1] = -1.0
+        return m
+
+    def test_constraint_is_the_new_default_and_is_finite(self):
+        m = self._model()
+        self.assertEqual(m.contact_solver, "constraint")
+        x, a = th.randn(3, 17), th.randn(3, 6)
+        drift = m.drift(x, a)
+        diagnostic = m.contact_diagnostics(x, a)
+        self.assertTrue(th.isfinite(drift).all())
+        for value in diagnostic.values():
+            if isinstance(value, th.Tensor):
+                self.assertTrue(th.isfinite(value).all())
+
+    def test_unilateral_and_coulomb_cone_constraints(self):
+        m = self._canonical_geometry(self._model())
+        x = th.zeros(8, 17)
+        a = th.randn(8, 6)
+        d = m.contact_diagnostics(x, a)
+        pn, pt, mu = d["normal_impulse"], d["tangent_impulse"], d["mu"]
+        self.assertGreaterEqual(float(pn.detach().min()), -1e-7)
+        self.assertLessEqual(float((pt.abs() - mu * pn).detach().max()), 2e-6)
+        self.assertLessEqual(float(d["cone_violation"].detach().max()), 2e-6)
+
+    def test_stance_force_responds_to_candidate_action_at_zero_slip(self):
+        m = self._canonical_geometry(self._model())
+        x = th.zeros(4, 17)  # exactly zero current tangential velocity
+        a0 = th.zeros(4, 6)
+        a1 = a0.clone(); a1[:, 0] = 1.0
+        d0 = m.contact_diagnostics(x, a0)
+        d1 = m.contact_diagnostics(x, a1)
+        self.assertTrue(th.allclose(d1["tangent_velocity"], th.zeros(4, 2)))
+        # Static friction reacts to the *free* action-induced slip even though
+        # current slip is zero. A state-only tanh(v_t) law fails this test.
+        self.assertGreater(float(d1["tangent_impulse"].detach().abs().max()), 1e-5)
+        self.assertGreater(
+            float((d1["generalized_force"] - d0["generalized_force"]).detach().abs().max()),
+            1e-4,
+        )
+        self.assertLess(
+            float(d1["post_contact_velocity"][..., 1].detach().abs().mean()),
+            float(d1["free_contact_velocity"][..., 1].detach().abs().mean()),
+        )
+
+    def test_clear_flight_is_exactly_silent(self):
+        m = self._canonical_geometry(self._model(), gap=0.2)
+        x, a = th.zeros(5, 17), th.randn(5, 6)
+        d = m.contact_diagnostics(x, a)
+        self.assertTrue(th.equal(d["gate"], th.zeros_like(d["gate"])))
+        self.assertTrue(
+            th.equal(d["generalized_force"], th.zeros_like(d["generalized_force"]))
+        )
+
+    def test_quiet_initial_envelope_keeps_a_geometry_gradient(self):
+        m = self._model()
+        m = self._canonical_geometry(m, gap=0.98 * m._contact_gate_off)
+        pos, qd = th.zeros(4, 8), th.zeros(4, 9)
+        M = th.eye(9).expand(4, -1, -1)
+        qdd_free = th.zeros(4, 9); qdd_free[:, 1] = -10.0
+        d = m._constraint_contact_solve(pos, qd, M, qdd_free)
+        force_max = float(d["generalized_force"].detach().abs().max())
+        self.assertGreater(force_max, 0.0)
+        self.assertLess(force_max, 1e-3)
+        d["normal_impulse"].sum().backward()
+        self.assertGreater(float(m.gap_net.bias.grad.detach().abs().max()), 0.0)
+
+    def test_constraint_solve_backpropagates_through_action_and_geometry(self):
+        m = self._canonical_geometry(self._model(contact_iterations=5))
+        x = th.zeros(3, 17)
+        a = th.zeros(3, 6); a[:, 0] = 0.7
+        d = m.contact_diagnostics(x, a)
+        loss = d["generalized_force"].square().mean()
+        loss.backward()
+        self.assertIsNotNone(m.G_a.weight.grad)
+        self.assertGreater(float(m.G_a.weight.grad.detach().abs().max()), 0.0)
+        self.assertIsNotNone(m.gap_net.bias.grad)
+        self.assertGreater(float(m.gap_net.bias.grad.detach().abs().max()), 0.0)
+
+    def test_rank_deficient_duplicate_contacts_remain_finite(self):
+        m = self._canonical_geometry(self._model(contact_force=4))
+        d = m.contact_diagnostics(th.zeros(3, 17), th.ones(3, 6))
+        self.assertTrue(th.isfinite(d["generalized_force"]).all())
+        self.assertTrue(th.isfinite(d["solver_residual"]).all())
+
+    def test_one_step_and_rollout_fits_backpropagate_through_solver(self):
+        m = self._model(contact_iterations=4)
+        optimizer = th.optim.Adam(m.parameters(), lr=1e-4)
+        x = 0.1 * th.randn(4, 17)
+        action = th.randn(4, 6)
+        next_x = x + 2e-4 * th.randn(4, 17)
+        one = m.fit_step(
+            x, action, next_x, 0.002, optimizer, max_step=0.002
+        )
+        self.assertTrue(np.isfinite(one))
+        self.assertTrue(m.last_fit_accepted)
+
+        actions = action[:, None].expand(-1, 2, -1).clone()
+        next_states = next_x[:, None].expand(-1, 2, -1).clone()
+        dt = th.full((4, 2, 1), 0.002)
+        roll = m.fit_step_rollout(
+            x, actions, next_states, dt, th.ones_like(dt), optimizer,
+            max_step=0.002,
+        )
+        self.assertTrue(np.isfinite(roll))
+        self.assertTrue(m.last_fit_accepted)
+
+    def test_constraint_and_legacy_checkpoint_roundtrips(self):
+        m = self._model()
+        restored = self._model(contact_solver="compliant")
+        restored.load_state_dict(m.state_dict())
+        self.assertEqual(restored.contact_solver, "constraint")
+        x, a = th.randn(2, 17), th.randn(2, 6)
+        self.assertTrue(th.allclose(m.drift(x, a), restored.drift(x, a)))
+
+        legacy = self._model(contact_solver="compliant")
+        legacy_state = legacy.state_dict().copy()
+        legacy_state.pop("_contact_solver_version")
+        auto = self._model()
+        auto.load_state_dict(legacy_state, strict=True)
+        self.assertEqual(auto.contact_solver, "compliant")
+        self.assertTrue(th.allclose(legacy.drift(x, a), auto.drift(x, a)))
 
 
 class TestRolloutFit(unittest.TestCase):

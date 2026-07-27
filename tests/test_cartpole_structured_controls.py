@@ -125,6 +125,76 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
         ):
             self.assertNotIn(key, algo)
 
+    def test_constraint_contact_controls_parse_and_use_physics_step(self):
+        _, env, _, algo, _ = load_ct_hyperparams_from_table(
+            "ct_sac",
+            "cheetah-run",
+            "mbq_structured_quad_constraint_roll",
+        )
+        self.assertEqual(algo["dynamics_contact_force"], 4)
+        self.assertEqual(algo["dynamics_contact_solver"], "constraint")
+        self.assertNotIn("dynamics_contact_dt", algo)
+        self.assertEqual(algo["dynamics_contact_iterations"], 12)
+        self.assertEqual(algo["dynamics_contact_regularization"], 0.01)
+
+        dynamics_kwargs = _pop_structured_model_kwargs(
+            algo, contact_dt_default=env["physics_dt"]
+        )
+        self.assertEqual(
+            dynamics_kwargs,
+            {
+                "mass_logdet_reg": 0.0,
+                "mass_condition_reg": 0.0,
+                "mass_condition_limit": 1000.0,
+                "contact_solver": "constraint",
+                "contact_dt": 0.002,
+                "contact_iterations": 12,
+                "contact_regularization": 0.01,
+            },
+        )
+        for key in (
+            "dynamics_contact_solver",
+            "dynamics_contact_dt",
+            "dynamics_contact_iterations",
+            "dynamics_contact_regularization",
+        ):
+            self.assertNotIn(key, algo)
+
+    def test_historical_contact_rows_are_explicitly_compliant(self):
+        modes = (
+            "mbq_structured_quad_cforce",
+            "mbq_structured_quad_cforce_roll",
+            "mbq_structured_quad_cforce_buf1m",
+            "mbq_structured_quad_cforce_roll_buf1m",
+        )
+        for mode in modes:
+            with self.subTest(mode=mode):
+                _, env, _, algo, _ = load_ct_hyperparams_from_table(
+                    "ct_sac", "cheetah-run", mode
+                )
+                self.assertEqual(algo["dynamics_contact_solver"], "compliant")
+                dynamics_kwargs = _pop_structured_model_kwargs(
+                    algo, contact_dt_default=env["physics_dt"]
+                )
+                self.assertEqual(dynamics_kwargs["contact_solver"], "compliant")
+                self.assertEqual(dynamics_kwargs["contact_dt"], 0.002)
+
+    def test_explicit_contact_solver_step_overrides_environment_default(self):
+        algo = {
+            "dynamics_contact_solver": "constraint",
+            "dynamics_contact_dt": "0.003",
+            "dynamics_contact_iterations": "7",
+            "dynamics_contact_regularization": "0.02",
+        }
+        dynamics_kwargs = _pop_structured_model_kwargs(
+            algo, contact_dt_default=0.002
+        )
+        self.assertEqual(dynamics_kwargs["contact_solver"], "constraint")
+        self.assertEqual(dynamics_kwargs["contact_dt"], 0.003)
+        self.assertEqual(dynamics_kwargs["contact_iterations"], 7)
+        self.assertEqual(dynamics_kwargs["contact_regularization"], 0.02)
+        self.assertEqual(algo, {})
+
     def test_recovery_uses_new_layout_but_can_load_legacy_sidecars(self):
         fresh = _select_recovery_dof_layout("cartpole", True, 4)
         legacy = _select_recovery_dof_layout(

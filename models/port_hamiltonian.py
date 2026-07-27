@@ -495,6 +495,10 @@ class PortHamiltonianModel(nn.Module):
         dissipation_rank: int = 4,
         human_input_intensity: float = 0.0,
         contact_force: int = 0,
+        contact_solver: str = "constraint",
+        contact_dt: float = 0.002,
+        contact_iterations: int = 12,
+        contact_regularization: float = 0.01,
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
         structured_hidden: Sequence[int] = (128, 128),
@@ -508,6 +512,10 @@ class PortHamiltonianModel(nn.Module):
         self.action_dim = int(action_dim)
         self.human_input_intensity = float(human_input_intensity)
         self.contact_force = int(contact_force)
+        self.contact_solver = str(contact_solver).strip().lower()
+        self.contact_dt = float(contact_dt)
+        self.contact_iterations = int(contact_iterations)
+        self.contact_regularization = float(contact_regularization)
         self.device = th.device(device)
         self._drift_fn = drift_fn
         self.last_fit_accepted: bool = False
@@ -525,6 +533,20 @@ class PortHamiltonianModel(nn.Module):
             raise ValueError(
                 "contact_force > 0 (the explicit contact port) requires mode='structured'."
             )
+        if self.contact_solver not in ("compliant", "constraint"):
+            raise ValueError(
+                "contact_solver must be either 'compliant' or 'constraint', "
+                f"got {contact_solver!r}"
+            )
+        if not np.isfinite(self.contact_dt) or self.contact_dt <= 0.0:
+            raise ValueError("contact_dt must be finite and > 0")
+        if self.contact_iterations < 1:
+            raise ValueError("contact_iterations must be at least 1")
+        if (
+            not np.isfinite(self.contact_regularization)
+            or self.contact_regularization <= 0.0
+        ):
+            raise ValueError("contact_regularization must be finite and > 0")
 
         if self.mode == "mujoco":
             if drift_fn is None:
@@ -662,10 +684,9 @@ class PortHamiltonianModel(nn.Module):
         if self.contact_force > 0:
             # Explicit contact-force port: K learned point contacts against the
             # ground. Each has a gap function g_i(q) and a horizontal foot offset
-            # h_i(q); the generalized force directions are their gradients (J^T
-            # for a point contact), the normal magnitude is a unilateral
-            # Hunt-Crossley law and the tangential one regularized Coulomb
-            # friction. See _contact_parts for the force law.
+            # h_i(q); their gradients form the contact Jacobian. New models use
+            # the coupled action-aware constraint solve below. ``compliant``
+            # retains the historical Hunt--Crossley/tanh force law.
             assert layout.contact_tangent_cfg is not None, (
                 "contact_force > 0 requires dof_layout.contact_tangent_cfg (the "
                 "config DOF of the horizontal translation friction acts along)."
@@ -673,19 +694,45 @@ class PortHamiltonianModel(nn.Module):
             self.gap_net = mlp(self.contact_force)      # g_i(q): signed gap heights
             self.tangent_net = mlp(self.contact_force)  # h_i(q): horizontal offsets
             with th.no_grad():
-                # Quiet-but-reachable init. The gaps must start positive (random
-                # contact forces would corrupt early fitting) yet within the
-                # gradient's reach: at g0 = 2.5 smoothing widths the force is
-                # ~1e-3 while the softplus gradient is still ~0.08. A larger
-                # bias lands in the saturated tail where the gradient vanishes
-                # (e.g. +0.5 = 25 widths -> gradient ~e^-25) and the port can
-                # never activate. Shrinking the final weights keeps g(q) near
-                # the bias across states.
-                self.gap_net[-1].weight.mul_(0.1)
-                self.gap_net[-1].bias.fill_(2.5 * self._contact_gap_width)
-            # Per-contact stiffness k, compression damping c, friction mu, all
-            # positive via softplus; raw 0.5413 => softplus ~= 1.
-            self._contact_raw = nn.Parameter(th.full((3, self.contact_force), 0.5413))
+                # Both formulations start quiet but reachable. The constraint
+                # gate initializes just inside its compact support; the legacy
+                # law uses its historical 2.5-softplus-width initialization.
+                if self.contact_solver == "constraint":
+                    # Start just inside the smooth candidate envelope: the
+                    # contact is nearly silent but the gate derivative is live.
+                    self.gap_net[-1].weight.mul_(0.01)
+                    self.gap_net[-1].bias.fill_(0.98 * self._contact_gate_off)
+                else:
+                    self.gap_net[-1].weight.mul_(0.1)
+                    self.gap_net[-1].bias.fill_(2.5 * self._contact_gap_width)
+            # The persistent marker makes the force-law semantics explicit.
+            # Version 0 is the historical compliant penalty law. Version 1 is
+            # the action-conditioned constraint solve below. It is deliberately
+            # a buffer rather than a Python-only flag so a sidecar roundtrip
+            # restores the formulation that produced it.
+            solver_version = 1 if self.contact_solver == "constraint" else 0
+            self.register_buffer(
+                "_contact_solver_version",
+                th.tensor(solver_version, dtype=th.int64),
+            )
+            if self.contact_solver == "compliant":
+                # Historical semantics and initialization, kept bit-for-bit:
+                # positive stiffness k, compression damping c, and friction mu
+                # through softplus; raw 0.5413 => softplus ~= 1.
+                raw = th.full((3, self.contact_force), 0.5413)
+            else:
+                # Constraint semantics are bounded: restitution
+                # e=0.5*sigmoid(raw0), stabilization beta=0.5*sigmoid(raw1),
+                # and friction mu=2*sigmoid(raw2). Initialize at approximately
+                # (0.05, 0.2, 0.8), respectively.
+                raw = th.stack(
+                    [
+                        th.full((self.contact_force,), float(np.log(0.1 / 0.9))),
+                        th.full((self.contact_force,), float(np.log(0.4 / 0.6))),
+                        th.full((self.contact_force,), float(np.log(0.4 / 0.6))),
+                    ]
+                )
+            self._contact_raw = nn.Parameter(raw)
             onehot = th.zeros(nv)
             onehot[layout.contact_tangent_cfg] = 1.0
             self.register_buffer("_tangent_onehot", onehot)
@@ -822,6 +869,225 @@ class PortHamiltonianModel(nn.Module):
     # the velocity scale of the regularized Coulomb friction.
     _contact_gap_width: float = 0.02
     _contact_stick_vel: float = 0.1
+    _contact_gate_on: float = 0.0
+    _contact_gate_off: float = 0.06
+    _contact_max_correction_vel: float = 5.0
+
+    def _contact_geometry(self, pos: th.Tensor, qd: th.Tensor):
+        """Learned point-contact geometry shared by both force formulations."""
+        B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
+        g = self.gap_net(pos)
+        dg = vmap(jacfwd(self._gaps))(pos)
+        dh = vmap(jacfwd(self._tangents))(pos)
+        zeros = pos.new_zeros(B, K, nv)
+        J_n = zeros.index_copy(2, self._pos_to_cfg, dg)
+        J_t = zeros.index_copy(2, self._pos_to_cfg, dh) + self._tangent_onehot
+        gdot = th.einsum("nkv,nv->nk", J_n, qd)
+        v_t = th.einsum("nkv,nv->nk", J_t, qd)
+        return g, gdot, v_t, J_n, J_t
+
+    def _contact_gate(self, g: th.Tensor) -> th.Tensor:
+        """Compact, C2 contact-candidate gate (one scalar per point).
+
+        Contacts at or below ``gate_on`` are fully enabled and contacts at or
+        above ``gate_off`` are exactly disabled. The quintic smoothstep between
+        them prevents a far-away point from generating friction while retaining
+        a useful geometry gradient near first contact.
+        """
+        width = self._contact_gate_off - self._contact_gate_on
+        u = ((self._contact_gate_off - g) / width).clamp(0.0, 1.0)
+        # Quintic smoothstep: zero first and second derivatives at both ends.
+        # At the constraint model's u=0.02 initialization this is ~7.8e-5,
+        # quiet enough not to perturb the fresh model while still trainable.
+        return u.pow(3) * (10.0 - 15.0 * u + 6.0 * u.square())
+
+    @staticmethod
+    def _project_contact_cones(
+        impulse: th.Tensor, mu: th.Tensor
+    ) -> th.Tensor:
+        """Euclidean projection onto planar Coulomb cones.
+
+        ``impulse`` is ordered ``[normal, tangent]`` per contact and ``mu`` has
+        one coefficient per contact. The closed-form projection is piecewise
+        differentiable and uses only PyTorch operations, so fixed-iteration
+        optimization remains differentiable with respect to mechanics, geometry,
+        action, and friction.
+        """
+        pair = impulse.reshape(*impulse.shape[:-1], -1, 2)
+        normal, tangent = pair[..., 0], pair[..., 1]
+        abs_tangent = tangent.abs()
+        mu = mu.to(dtype=impulse.dtype, device=impulse.device)
+        while mu.ndim < normal.ndim:
+            mu = mu.unsqueeze(0)
+        inside = (normal >= 0.0) & (abs_tangent <= mu * normal)
+        polar = normal + mu * abs_tangent <= 0.0
+        boundary_normal = (normal + mu * abs_tangent) / (1.0 + mu.square())
+        boundary_tangent = mu * boundary_normal * tangent.sign()
+        projected_normal = th.where(
+            inside,
+            normal,
+            th.where(polar, th.zeros_like(normal), boundary_normal),
+        )
+        projected_tangent = th.where(
+            inside,
+            tangent,
+            th.where(polar, th.zeros_like(tangent), boundary_tangent),
+        )
+        return th.stack((projected_normal, projected_tangent), dim=-1).reshape_as(
+            impulse
+        )
+
+    def _constraint_contact_solve(
+        self,
+        pos: th.Tensor,
+        qd: th.Tensor,
+        M: th.Tensor,
+        qdd_free: th.Tensor,
+    ) -> dict[str, th.Tensor]:
+        """Solve a regularized, cone-constrained contact impulse problem.
+
+        The action has already entered ``qdd_free`` through ``G_a a``. Over the
+        response horizon ``contact_dt`` this gives the free velocity. A joint
+        solve through the learned Delassus matrix then chooses normal/tangential
+        impulses for every point simultaneously. Static friction is represented:
+        even at zero current slip, an action-induced free tangential velocity is
+        cancelled when the required impulse lies inside the Coulomb cone.
+        """
+        B, K, nv = pos.shape[0], self.contact_force, self.layout.nv
+        dt = qd.new_tensor(self.contact_dt)
+        g, gdot, v_t, J_n, J_t = self._contact_geometry(pos, qd)
+        gate = self._contact_gate(g)
+        e = 0.5 * th.sigmoid(self._contact_raw[0])
+        beta = 0.5 * th.sigmoid(self._contact_raw[1])
+        mu = 2.0 * th.sigmoid(self._contact_raw[2])
+
+        qd_free = qd + dt * qdd_free
+        J_pair = th.stack((J_n, J_t), dim=2)             # (B,K,2,nv)
+        J = J_pair.reshape(B, 2 * K, nv)
+        contact_v_free = th.einsum("ncv,nv->nc", J, qd_free).reshape(B, K, 2)
+
+        # The compact gate is the differentiable contact-candidate relaxation;
+        # do not add positive clearance to this bias or the quiet initialization
+        # would also be gradient-dead. Penetration recovery is Baumgarte-
+        # stabilized and velocity-capped so a bad learned gap cannot request an
+        # unbounded kick.
+        penetration = (th.relu(-g) / dt).clamp_max(
+            self._contact_max_correction_vel
+        )
+        stabilization_bias = -beta * penetration
+        restitution_bias = e * th.minimum(gdot, th.zeros_like(gdot))
+        normal_bias = (
+            contact_v_free[..., 0]
+            + stabilization_bias
+            + restitution_bias
+        )
+        tangent_bias = contact_v_free[..., 1]
+        physical_bias = th.stack((normal_bias, tangent_bias), dim=-1)
+
+        # Let z be a latent cone impulse and p=gate*z the physical impulse. This
+        # turns the smooth candidate gate into an impedance envelope without
+        # changing the friction ratio. J_solver maps z directly to generalized
+        # impulse, so both the quadratic kinetic term and the linear free-velocity
+        # term use the same virtual-work map.
+        gate_pair = gate.unsqueeze(-1).expand(-1, -1, 2).reshape(B, 2 * K)
+        J_solver = J * gate_pair.unsqueeze(-1)
+        M_inv_Jt_full = th.linalg.solve(M, J.transpose(1, 2))
+        M_inv_Jt = M_inv_Jt_full * gate_pair.unsqueeze(1)
+        W = th.bmm(J_solver, M_inv_Jt)
+        W = 0.5 * (W + W.transpose(1, 2))
+
+        # Scale regularization with the ungated Delassus matrix, retaining the
+        # global mechanical gauge and keeping duplicate learned contact points
+        # nonsingular. A positive diagonal also makes the QP solution unique.
+        W_full = th.bmm(J, M_inv_Jt_full)
+        scale = (
+            W_full.diagonal(dim1=-2, dim2=-1)
+            .mean(-1)
+            .clamp_min(1e-6)
+            .detach()
+        )
+        eye = th.eye(2 * K, dtype=qd.dtype, device=qd.device).unsqueeze(0)
+        H = W + self.contact_regularization * scale[:, None, None] * eye
+        bias = (physical_bias.reshape(B, 2 * K) * gate_pair)
+
+        # Scaled ADMM: one batched dense factorization, then a fixed number of
+        # tiny triangular solves and exact cone projections. Fixed iteration
+        # count avoids data-dependent control flow/synchronization in BPTT.
+        rho = H.diagonal(dim1=-2, dim2=-1).mean(-1).detach().clamp_min(1e-6)
+        factor = th.linalg.cholesky(H + rho[:, None, None] * eye)
+        primal = th.zeros_like(bias)
+        auxiliary = th.zeros_like(bias)
+        dual = th.zeros_like(bias)
+        for _ in range(self.contact_iterations):
+            rhs = -bias + rho[:, None] * (auxiliary - dual)
+            primal = th.cholesky_solve(rhs.unsqueeze(-1), factor).squeeze(-1)
+            relaxed = 1.5 * primal - 0.5 * auxiliary
+            next_auxiliary = self._project_contact_cones(relaxed + dual, mu)
+            dual = dual + relaxed - next_auxiliary
+            auxiliary = next_auxiliary
+
+        latent_impulse = auxiliary
+        physical_impulse_flat = latent_impulse * gate_pair
+        physical_impulse = physical_impulse_flat.reshape(B, K, 2)
+        generalized_impulse = th.einsum(
+            "ncv,nc->nv", J, physical_impulse_flat
+        )
+        delta_qd = th.bmm(
+            M_inv_Jt_full, physical_impulse_flat.unsqueeze(-1)
+        ).squeeze(-1)
+        qd_post = qd_free + delta_qd
+        contact_v_post = th.einsum("ncv,nv->nc", J, qd_post).reshape(B, K, 2)
+
+        # A normalized projected-gradient residual is meaningful across the
+        # learned mass gauge. Cone violation is measured on physical impulses.
+        grad_qp = th.bmm(H, latent_impulse.unsqueeze(-1)).squeeze(-1) + bias
+        lipschitz = H.abs().sum(-1).amax(-1).detach().clamp_min(1e-6)
+        prox = self._project_contact_cones(
+            latent_impulse - grad_qp / lipschitz[:, None], mu
+        )
+        solver_residual = (latent_impulse - prox).norm(dim=-1) / (
+            1.0 + latent_impulse.norm(dim=-1)
+        )
+        normal_impulse = physical_impulse[..., 0]
+        tangent_impulse = physical_impulse[..., 1]
+        cone_violation = th.relu(tangent_impulse.abs() - mu * normal_impulse).amax(
+            dim=-1
+        )
+        discrete_work = (
+            qd_free * generalized_impulse
+        ).sum(-1) + 0.5 * (generalized_impulse * delta_qd).sum(-1)
+        stabilization_work = -(stabilization_bias * normal_impulse).sum(-1)
+
+        return {
+            "gap": g,
+            "gap_rate": gdot,
+            "tangent_velocity": v_t,
+            "gate": gate,
+            "J_n": J_n,
+            "J_t": J_t,
+            "mu": mu,
+            "e": e,
+            "beta": beta,
+            "normal_impulse": normal_impulse,
+            "tangent_impulse": tangent_impulse,
+            "normal_force": normal_impulse / dt,
+            "tangent_force": tangent_impulse / dt,
+            "generalized_impulse": generalized_impulse,
+            "generalized_force": generalized_impulse / dt,
+            "contact_acceleration": delta_qd / dt,
+            "free_acceleration": qdd_free,
+            "v_free": qd_free,
+            "v_post": qd_post,
+            "contact_velocity_free": contact_v_free,
+            "contact_velocity_post": contact_v_post,
+            "free_contact_velocity": contact_v_free,
+            "post_contact_velocity": contact_v_post,
+            "cone_violation": cone_violation,
+            "solver_residual": solver_residual,
+            "regularization": qd.new_tensor(self.contact_regularization),
+            "discrete_work": discrete_work,
+            "stabilization_work": stabilization_work,
+        }
 
     def _contact_parts(self, pos: th.Tensor, qd: th.Tensor):
         """Contact-port quantities for a batch. For each learned contact point i:
@@ -841,15 +1107,7 @@ class PortHamiltonianModel(nn.Module):
                       friction, power f_t v_t <= 0 by construction.
 
         Returns (g, gdot, v_t, lam, f_t, J_n, J_t) with shapes (B,K)x5, (B,K,nv)x2."""
-        B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
-        g = self.gap_net(pos)                             # (B, K)
-        dg = vmap(jacfwd(self._gaps))(pos)                # (B, K, npos)
-        dh = vmap(jacfwd(self._tangents))(pos)            # (B, K, npos)
-        zeros = pos.new_zeros(B, K, nv)
-        J_n = zeros.index_copy(2, self._pos_to_cfg, dg)
-        J_t = zeros.index_copy(2, self._pos_to_cfg, dh) + self._tangent_onehot
-        gdot = th.einsum("nkv,nv->nk", J_n, qd)
-        v_t = th.einsum("nkv,nv->nk", J_t, qd)
+        g, gdot, v_t, J_n, J_t = self._contact_geometry(pos, qd)
         k, c, mu = th.nn.functional.softplus(self._contact_raw)  # each (K,)
         w = self._contact_gap_width
         phi = th.nn.functional.softplus(-g / w) * w       # smooth max(0, -g)
@@ -862,14 +1120,144 @@ class PortHamiltonianModel(nn.Module):
         _, _, _, lam, f_t, J_n, J_t = self._contact_parts(pos, qd)
         return th.einsum("nkv,nk->nv", J_n, lam) + th.einsum("nkv,nk->nv", J_t, f_t)
 
+    def _structured_free_acceleration(
+        self, x: th.Tensor, a: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """Return ``(pos, qd, M, qdd_free)`` before ground contact.
+
+        This mirrors the contact-free portion of :meth:`_structured_drift` and
+        is intentionally public only inside the model: recovery diagnostics need
+        the same action-conditioned free motion that feeds the constraint solve.
+        Joint-limit forces remain part of the free mechanism; only the learned
+        ground-contact port is omitted.
+        """
+        layout = self.layout
+        nv, B = layout.nv, x.shape[0]
+        pos = x[:, layout.pos_slice[0]:layout.pos_slice[1]]
+        qd = x[:, layout.vel_slice[0]:layout.vel_slice[1]]
+        M = vmap(self._mass)(pos)
+        dM_pos = vmap(jacfwd(self._mass))(pos)
+        gV_pos = vmap(grad(self._potential))(pos)
+        dM = th.zeros(B, nv, nv, nv, dtype=x.dtype, device=x.device).index_copy(
+            3, self._pos_to_cfg, dM_pos
+        )
+        gV = th.zeros(B, nv, dtype=x.dtype, device=x.device).index_copy(
+            1, self._pos_to_cfg, gV_pos
+        )
+        dHdq = gV - 0.5 * th.einsum("nabk,na,nb->nk", dM, qd, qd)
+        D_qd = th.bmm(self._damping(pos), qd.unsqueeze(-1)).squeeze(-1)
+        if layout.act_to_cfg is None:
+            Ga = self.G_a(a)
+        else:
+            Ga = th.zeros(B, nv, dtype=x.dtype, device=x.device).index_add(
+                1, self._act_to_cfg, self.G_a(a)
+            )
+        pdot = -dHdq - D_qd + Ga + self._joint_limit_damping_force(pos, qd)
+        Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
+        qdd_free = th.linalg.solve(
+            M, (pdot - Mdot_qd).unsqueeze(-1)
+        ).squeeze(-1)
+        return pos, qd, M, qdd_free
+
+    def contact_diagnostics(self, obs, action) -> dict[str, th.Tensor]:
+        """Return action-conditioned contact quantities for recovery/auditing.
+
+        Forces are average forces over ``contact_dt`` for the constraint model;
+        impulses are their time integral. Returned tensors stay on the model
+        device and retain gradients unless the caller enters ``torch.no_grad``.
+        """
+        if self.mode != "structured" or self.contact_force <= 0:
+            raise ValueError(
+                "contact_diagnostics requires a structured model with contact_force > 0"
+            )
+        x = th.as_tensor(obs, dtype=th.float32, device=self.device)
+        a = th.as_tensor(action, dtype=th.float32, device=self.device)
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        if a.ndim == 1:
+            a = a.unsqueeze(0)
+        if x.ndim != 2 or x.shape[1] != self.obs_dim:
+            raise ValueError(
+                f"obs must have shape (batch, {self.obs_dim}), got {tuple(x.shape)}"
+            )
+        if a.ndim != 2 or a.shape != (x.shape[0], self.action_dim):
+            raise ValueError(
+                "action must have shape (batch, action_dim) with the same batch as obs"
+            )
+        pos, qd, M, qdd_free = self._structured_free_acceleration(x, a)
+        if self.contact_solver == "constraint":
+            return self._constraint_contact_solve(pos, qd, M, qdd_free)
+
+        g, gdot, v_t, lam, f_t, J_n, J_t = self._contact_parts(pos, qd)
+        _, _, mu = th.nn.functional.softplus(self._contact_raw)
+        dt = qd.new_tensor(self.contact_dt)
+        normal_impulse = lam * dt
+        tangent_impulse = f_t * dt
+        generalized_force = (
+            th.einsum("nkv,nk->nv", J_n, lam)
+            + th.einsum("nkv,nk->nv", J_t, f_t)
+        )
+        generalized_impulse = generalized_force * dt
+        qd_free = qd + dt * qdd_free
+        delta_qd = th.linalg.solve(
+            M, generalized_impulse.unsqueeze(-1)
+        ).squeeze(-1)
+        qd_post = qd_free + delta_qd
+        J = th.stack((J_n, J_t), dim=2).reshape(
+            x.shape[0], 2 * self.contact_force, self.layout.nv
+        )
+        contact_v_free = th.einsum("ncv,nv->nc", J, qd_free).reshape(
+            x.shape[0], self.contact_force, 2
+        )
+        contact_v_post = th.einsum("ncv,nv->nc", J, qd_post).reshape(
+            x.shape[0], self.contact_force, 2
+        )
+        cone_violation = th.relu(tangent_impulse.abs() - mu * normal_impulse).amax(
+            dim=-1
+        )
+        discrete_work = (
+            qd_free * generalized_impulse
+        ).sum(-1) + 0.5 * (generalized_impulse * delta_qd).sum(-1)
+        zeros = th.zeros_like(mu)
+        return {
+            "gap": g,
+            "gap_rate": gdot,
+            "tangent_velocity": v_t,
+            "gate": th.sigmoid(-g / self._contact_gap_width),
+            "J_n": J_n,
+            "J_t": J_t,
+            "mu": mu,
+            "e": zeros,
+            "beta": zeros,
+            "normal_impulse": normal_impulse,
+            "tangent_impulse": tangent_impulse,
+            "normal_force": lam,
+            "tangent_force": f_t,
+            "generalized_impulse": generalized_impulse,
+            "generalized_force": generalized_force,
+            "contact_acceleration": delta_qd / dt,
+            "free_acceleration": qdd_free,
+            "v_free": qd_free,
+            "v_post": qd_post,
+            "contact_velocity_free": contact_v_free,
+            "contact_velocity_post": contact_v_post,
+            "free_contact_velocity": contact_v_free,
+            "post_contact_velocity": contact_v_post,
+            "cone_violation": cone_violation,
+            "solver_residual": th.zeros(x.shape[0], dtype=x.dtype, device=x.device),
+            "regularization": x.new_tensor(self.contact_regularization),
+            "discrete_work": discrete_work,
+            "stabilization_work": th.zeros_like(discrete_work),
+        }
+
     def _structured_drift(self, x: th.Tensor, a: th.Tensor) -> th.Tensor:
         """Port-Hamiltonian drift with the canonicalizer p = M(q) qd:
           dH/dq = grad V - 1/2 qd^T (dM/dq) qd,   qd = M^-1 p (= observed velocity)
           pdot  = -dH/dq - D qd + G_a a [+ F_contact(q, qd)]
           qddot = M^-1 (pdot - Mdot qd)           (obs-space acceleration)
         The Coriolis terms come from dM/dq (autodiff), not a learned head; the
-        optional contact port (contact_force > 0) adds unilateral normal forces
-        and Coulomb friction through learned gap functions (_contact_parts).
+        optional contact port adds either the action-aware constraint reaction
+        or the historical compliant force through learned contact geometry.
         Returns the observation-space drift [d/dt positions ; qddot]."""
         layout = self.layout
         nv = layout.nv
@@ -904,14 +1292,64 @@ class PortHamiltonianModel(nn.Module):
         # The conservative rail spring is already in gV through _potential;
         # this separate port contributes only non-positive damping power.
         pdot = pdot + self._joint_limit_damping_force(pos, qd)
-        if self.contact_force > 0:
-            pdot = pdot + self._contact_force_gen(pos, qd)
         Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
-        qddot = th.linalg.solve(M, (pdot - Mdot_qd).unsqueeze(-1)).squeeze(-1)  # (B, nv)
+        free_rhs = pdot - Mdot_qd
+        if self.contact_force > 0 and self.contact_solver == "compliant":
+            # Historical state-only Hunt--Crossley/Coulomb port.
+            free_rhs = free_rhs + self._contact_force_gen(pos, qd)
+            qddot = th.linalg.solve(M, free_rhs.unsqueeze(-1)).squeeze(-1)
+        else:
+            qdd_free = th.linalg.solve(M, free_rhs.unsqueeze(-1)).squeeze(-1)
+            if self.contact_force > 0:
+                # The constraint port reads qdd_free, hence candidate action,
+                # before solving the coupled stance reaction.
+                contact = self._constraint_contact_solve(pos, qd, M, qdd_free)
+                qddot = qdd_free + contact["contact_acceleration"]
+            else:
+                qddot = qdd_free
         b_pos = qd[:, self._pos_to_cfg]                 # d/dt of each observed position
         return th.cat([b_pos, qddot], dim=-1)           # (B, obs_dim)
 
     # ------------------------ public API ------------------------
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Load dynamics weights while preserving contact-law compatibility.
+
+        Contact sidecars written before the constraint solver have no formulation
+        marker. Such a sidecar is unambiguously the historical compliant model:
+        inject a version-zero marker so strict loading still succeeds, and switch
+        this instance to that law before it is used. New sidecars carry the marker
+        and therefore restore their own formulation even when the constructor's
+        default changes.
+        """
+        incoming = state_dict
+        if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
+            marker_name = "_contact_solver_version"
+            if marker_name not in state_dict:
+                incoming = state_dict.copy()
+                if hasattr(state_dict, "_metadata"):
+                    incoming._metadata = state_dict._metadata
+                incoming[marker_name] = self._contact_solver_version.new_zeros(())
+                version = 0
+            else:
+                marker = th.as_tensor(state_dict[marker_name])
+                if marker.numel() != 1:
+                    raise RuntimeError(
+                        "contact solver version marker must contain one scalar"
+                    )
+                version = int(marker.detach().cpu().item())
+            if version not in (0, 1):
+                raise RuntimeError(f"unsupported contact solver version {version}")
+            self.contact_solver = "constraint" if version == 1 else "compliant"
+        try:
+            result = super().load_state_dict(incoming, strict=strict, assign=assign)
+        except TypeError:  # PyTorch releases before the ``assign`` keyword.
+            result = super().load_state_dict(incoming, strict=strict)
+        if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
+            self._contact_solver_version.fill_(
+                1 if self.contact_solver == "constraint" else 0
+            )
+        return result
 
     def to(self, *args, **kwargs):
         """Move module state and keep the explicit dynamics device in sync.

@@ -209,9 +209,17 @@ def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
     return layout_cls.raw_state(nv=int(obs_dim) // 2)
 
 
-def _pop_structured_model_kwargs(algo_kwargs: dict) -> dict:
-    """Move dynamics-model regularizers out of the CTSAC kwargs namespace."""
-    return {
+def _pop_structured_model_kwargs(
+    algo_kwargs: dict, *, contact_dt_default: float | None = None
+) -> dict:
+    """Move structured-model controls out of the CTSAC kwargs namespace.
+
+    Blank CSV cells are omitted by ``load_ct_hyperparams_from_table``.  When a
+    contact solver is selected without an explicit step, use the environment's
+    physics step so the differentiable solve runs at the same resolution as
+    the simulator rather than at the irregular control duration.
+    """
+    model_kwargs = {
         "mass_logdet_reg": float(
             str(algo_kwargs.pop("dynamics_mass_logdet_reg", "") or "0").strip()
         ),
@@ -224,6 +232,28 @@ def _pop_structured_model_kwargs(algo_kwargs: dict) -> dict:
             ).strip()
         ),
     }
+
+    contact_solver = str(
+        algo_kwargs.pop("dynamics_contact_solver", "") or ""
+    ).strip()
+    contact_dt = algo_kwargs.pop("dynamics_contact_dt", None)
+    contact_iterations = algo_kwargs.pop("dynamics_contact_iterations", None)
+    contact_regularization = algo_kwargs.pop(
+        "dynamics_contact_regularization", None
+    )
+
+    if contact_solver:
+        model_kwargs["contact_solver"] = contact_solver
+        if contact_dt is None:
+            contact_dt = contact_dt_default
+    if contact_dt is not None:
+        model_kwargs["contact_dt"] = float(contact_dt)
+    if contact_iterations is not None:
+        model_kwargs["contact_iterations"] = int(contact_iterations)
+    if contact_regularization is not None:
+        model_kwargs["contact_regularization"] = float(contact_regularization)
+
+    return model_kwargs
 
 
 def run_algorithm(
@@ -456,10 +486,13 @@ def run_algorithm(
         contact_force = int(
             str(algo_kwargs.pop("dynamics_contact_force", "") or "").strip() or 0
         )
-        # Structured-model-only regularizers live in the benchmark's algo_*
-        # namespace for configuration, but are consumed by the dynamics model
-        # constructor rather than CTSAC itself.
-        structured_model_kwargs = _pop_structured_model_kwargs(algo_kwargs)
+        # Structured-model-only regularizers and contact-solver controls live
+        # in the benchmark's algo_* namespace, but are consumed by the
+        # dynamics-model constructor rather than CTSAC itself.
+        structured_model_kwargs = _pop_structured_model_kwargs(
+            algo_kwargs,
+            contact_dt_default=env_kwargs.get("physics_dt"),
+        )
         obs_dim = int(np.prod(train_env.observation_space.shape))
         act_dim = int(np.prod(train_env.action_space.shape))
         # Raw cartpole gets its known invariances and sparse actuation. Other
@@ -496,11 +529,12 @@ def run_algorithm(
         elif source == "structured":
             # Structured port-Hamiltonian (DeLaN core): learned SPD mass M(q) and
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
-            # constant diagonal damping on momentum; optional explicit contact
-            # port (dynamics_contact_force = number of learned contact points,
-            # which also makes M translation-invariant). Raw cartpole uses its
-            # mechanics-aware layout; other raw-state envs use the generic
-            # layout, and the non-raw default remains cheetah's.
+            # constant diagonal damping on momentum; optional learned contact
+            # geometry (dynamics_contact_force = number of contact points) with
+            # either the historical compliant law or the action-responsive
+            # constraint solve selected by dynamics_contact_solver. Raw
+            # cartpole uses its mechanics-aware layout; other raw-state envs
+            # use the generic layout, and the non-raw default remains cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(
                 obs_dim,
                 act_dim,
