@@ -407,10 +407,27 @@ class SB3SustainedCaptureTests(unittest.TestCase):
         model.get_vec_normalize_env.return_value = None
         model.logger = MagicMock()
         stages: list[int] = []
+        selected = {"stage": 0}
+
+        def set_stage(stage: int) -> None:
+            selected["stage"] = stage
+            stages.append(stage)
+
+        def metrics():
+            stage = selected["stage"]
+            return {
+                "start_tip_height": (3.8, 3.5, 3.0)[stage],
+                "start_tip_speed": 1.0 if stage == 0 else 0.0,
+                "start_potential_energy_norm": (0.95, 0.875, 0.75)[
+                    stage
+                ],
+            }
+
         mastery = MasteryCurriculumCallback(
-            set_stage=stages.append,
+            set_stage=set_stage,
             num_stages=3,
             success_threshold=0.5,
+            get_curriculum_metrics=metrics,
         )
         callback = SustainedCaptureEvalCallback(
             eval_env,
@@ -437,14 +454,28 @@ class SB3SustainedCaptureTests(unittest.TestCase):
             self.assertTrue(callback.on_step())
 
         self.assertEqual(stages, [1])
+        probe_stage_record = call.record("curriculum/probe_stage", 0)
         stage_record = call.record("curriculum/stage", 1)
-        dump_call = call.dump(1)
-        self.assertIn(stage_record, model.logger.mock_calls)
-        self.assertIn(dump_call, model.logger.mock_calls)
-        self.assertLess(
-            model.logger.mock_calls.index(stage_record),
-            model.logger.mock_calls.index(dump_call),
+        advanced_record = call.record("curriculum/advanced", 1.0)
+        energy_record = call.record(
+            "curriculum/start_potential_energy_norm", 0.875
         )
+        dump_call = call.dump(1)
+        self.assertIn(probe_stage_record, model.logger.mock_calls)
+        self.assertIn(stage_record, model.logger.mock_calls)
+        self.assertIn(advanced_record, model.logger.mock_calls)
+        self.assertIn(energy_record, model.logger.mock_calls)
+        self.assertIn(dump_call, model.logger.mock_calls)
+        for record_call in (
+            probe_stage_record,
+            stage_record,
+            advanced_record,
+            energy_record,
+        ):
+            self.assertLess(
+                model.logger.mock_calls.index(record_call),
+                model.logger.mock_calls.index(dump_call),
+            )
 
 
 class _RecordingVecEnv:
@@ -488,12 +519,15 @@ class TestCurriculumFractionCallback(unittest.TestCase):
         self.assertIn(0.5, pushed)
         self.assertEqual(pushed[-1], 1.0)
         self.assertLessEqual(max(pushed), 1.0)
+        model.logger.record.assert_any_call("curriculum/fraction", 1.0)
+        model.logger.record.assert_any_call("curriculum/complete", 1.0)
 
     def test_resume_uses_restored_timesteps(self):
         cb, model, env = self._make(200)
         model.num_timesteps = 150
         cb.on_training_start({}, {})
         self.assertAlmostEqual(self._pushed(env)[-1], 0.75)
+        model.logger.record.assert_any_call("curriculum/fraction", 0.75)
 
     def test_dedupes_repeated_fraction(self):
         cb, model, env = self._make(1000)

@@ -615,11 +615,17 @@ def run_algorithm(
             for curriculum_env in _envs:
                 curriculum_env.set_curriculum_stage(stage)
 
+        def _get_mastery_curriculum_metrics(
+            _env=train_curriculum_envs[0],
+        ) -> dict[str, float]:
+            return _env.curriculum_log_metrics()
+
         mastery_curriculum_callback = MasteryCurriculumCallback(
             set_stage=_set_mastery_curriculum_stage,
             num_stages=num_curriculum_stages,
             success_threshold=curriculum_success_threshold,
             consecutive_evals=curriculum_consecutive_evals,
+            get_curriculum_metrics=_get_mastery_curriculum_metrics,
             verbose=1,
         )
         curriculum_probe_callback = EvalCallback(
@@ -791,12 +797,21 @@ def run_algorithm(
             for e in _envs:
                 e.set_curriculum_fraction(frac)
 
-        callbacks.append(
+        def _get_fraction_curriculum_metrics(
+            _env=curriculum_envs[0],
+        ) -> dict[str, float]:
+            return _env.curriculum_log_metrics()
+
+        # Run before any evaluation callback that may flush the logger at the
+        # same timestep, so every emitted row describes the current fraction.
+        callbacks.insert(
+            0,
             CurriculumFractionCallback(
                 set_fraction=_set_curriculum_fraction,
                 total_steps=curr_total,
+                get_curriculum_metrics=_get_fraction_curriculum_metrics,
                 verbose=1,
-            )
+            ),
         )
         print(
             f"[curriculum] reset band widens to full over {curr_total} steps "

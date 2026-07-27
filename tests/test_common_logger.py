@@ -64,6 +64,46 @@ class TestLogger(unittest.TestCase):
             row2 = next(reader)
             self.assertEqual(row2, ["3", "4"])
 
+    def test_csv_adds_late_curriculum_columns_without_losing_rows(self):
+        configure(folder=self.log_folder, output_formats=["csv"])
+        record("train/loss", 1.5)
+        dump(step=1)
+        record("train/loss", 1.0)
+        record("curriculum/stage", 1)
+        record("curriculum/start_potential_energy_norm", 0.875)
+        dump(step=2)
+
+        csv_path = os.path.join(self.log_folder, "progress.csv")
+        with open(csv_path, "r", newline="") as f:
+            rows = list(csv.DictReader(f))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["train/loss"], "1.5")
+        self.assertEqual(rows[0]["curriculum/stage"], "")
+        self.assertEqual(rows[1]["curriculum/stage"], "1")
+        self.assertEqual(
+            rows[1]["curriculum/start_potential_energy_norm"], "0.875"
+        )
+
+    def test_appended_csv_can_add_new_columns(self):
+        configure(folder=self.log_folder, output_formats=["csv"])
+        record("train/loss", 1.5)
+        dump(step=1)
+        close()
+
+        configure(folder=self.log_folder, output_formats=["csv"], append=True)
+        record("train/loss", 1.0)
+        record("curriculum/fraction", 0.5)
+        dump(step=2)
+
+        csv_path = os.path.join(self.log_folder, "progress.csv")
+        with open(csv_path, "r", newline="") as f:
+            rows = list(csv.DictReader(f))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["curriculum/fraction"], "")
+        self.assertEqual(rows[1]["curriculum/fraction"], "0.5")
+
     def test_record_mean(self):
         configure(folder=self.log_folder, output_formats=[])  # No output needed
         record_mean("mean_val", 10.0)

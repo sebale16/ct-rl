@@ -17,19 +17,18 @@ Those historical IDs remain unchanged.
 ## Reset ladder
 
 Every new reset is specified by only two physical quantities: world-frame tip
-height and incoming Cartesian tip speed. Mirror-symmetric left/right
-approaches are sampled with equal probability.
+height and Cartesian tip speed. Mirror-symmetric left/right poses are sampled
+where the selected height is not a vertical extreme.
 
-1. The braking level starts near the upright with nonzero tip velocity directed
-   toward the stabilization point.
-2. All remaining levels have exactly zero starting velocity and monotonically
-   lower the tip.
+1. The first level is the exact upright vertical configuration at rest.
+2. Every level has exactly zero starting velocity; subsequent levels
+   monotonically lower the tip.
 3. The last level is the exact hanging configuration at zero velocity and
    remains the training distribution after it is reached.
 
 Default Acrobot levels are `(height, speed)` =
-`(3.8, 1.0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
-The serial two-pole CartPole uses `(2.8, 1.0), (2.5, 0), (2.0, 0),
+`(4.0, 0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
+The serial two-pole CartPole uses `(3.0, 0), (2.5, 0), (2.0, 0),
 (1.0, 0), (0.0, 0), (-1.0, 0)`. Heights and speeds are in metres and
 metres/second.
 
@@ -53,6 +52,39 @@ The changing probe is not used for checkpoint selection. The primary
 evaluation environment is fixed at the final hanging-at-rest task, so
 best-model scores remain comparable throughout training. Performance
 curriculum state is also included in resumable CT checkpoints.
+
+The exact noiseless upright state is an equilibrium in MuJoCo. Consequently,
+a zero-action policy can pass the first level without correction; the later
+lower-height levels are where recovery and swing-up behavior enter.
+
+## Curriculum telemetry
+
+Both the continuous-time and SB3 runners write the selected curriculum state
+under `curriculum/` in TensorBoard, JSON, and CSV logs. Important curves are:
+
+- `stage`, `num_stages`, `progress`, `complete`, and `advanced`;
+- `probe_stage`, `probe_success_rate`, `probe_passed`, and
+  `consecutive_passes`;
+- `start_tip_height`, `start_tip_height_norm`,
+  `start_potential_energy_norm`, and `start_tip_speed`.
+
+On an advancement event, `probe_stage` is the level that was just mastered,
+while `stage` and the physical reset descriptors identify the newly selected
+level. Normalized potential and tip speed remain separate fields so the log
+schema describes the physical reset directly. The historical angle-band
+curricula instead report `fraction`, `progress`, and `angle_spread_rad`; a
+sampled reset distribution does not have one deterministic energy value.
+
+Render all six reset stages for Acrobot v4.3/v6.1 and the serial double-linked
+CartPole v2 with:
+
+```bash
+MUJOCO_GL=egl python -m benchmarks.render_tip_curriculum_stages
+```
+
+This writes `videos/tip_curriculum_stages.mp4`. Each stage pauses on its exact
+reset pose and then runs a labeled zero-action release; no trained policy is
+used in the preview.
 
 The gate can be tuned without changing task definitions:
 

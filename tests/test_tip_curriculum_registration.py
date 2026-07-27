@@ -54,7 +54,17 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                 self.assertEqual(
                     info[f"{domain}_curriculum_num_stages"], 6.0
                 )
+                metrics = env.curriculum_log_metrics()
+                self.assertEqual(metrics["stage"], 0.0)
+                self.assertEqual(metrics["num_stages"], 6.0)
+                self.assertEqual(metrics["progress"], 0.0)
+                self.assertEqual(metrics["start_tip_height_norm"], 1.0)
+                self.assertEqual(
+                    metrics["start_potential_energy_norm"], 1.0
+                )
+                self.assertEqual(metrics["start_tip_speed"], 0.0)
                 self.assertIn(f"{domain}_strict_capture", info)
+                self.assertEqual(info[f"{domain}_strict_capture"], 1.0)
 
     def test_wrapper_stage_forwarding_reaches_exact_hanging_final_reset(self):
         for domain, task in (
@@ -108,6 +118,24 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                 "cartpole-two_poles-v2",
             },
         )
+
+    def test_fraction_curriculum_logs_schedule_and_reset_band(self):
+        for domain, task in (
+            ("acrobot", "swingup-v4.2"),
+            ("acrobot", "swingup-v6"),
+            ("cartpole", "two_poles-curriculum"),
+        ):
+            with self.subTest(domain=domain, task=task):
+                env = self._env(domain, task)
+                env.set_curriculum_fraction(0.5)
+                metrics = env.curriculum_log_metrics()
+                self.assertEqual(metrics["fraction"], 0.5)
+                self.assertEqual(metrics["progress"], 0.5)
+                self.assertEqual(metrics["complete"], 0.0)
+                self.assertAlmostEqual(
+                    metrics["angle_spread_rad"],
+                    0.5 + 0.5 * (np.pi - 0.5),
+                )
 
     def test_capture_registry_uses_each_tasks_tip_signal(self):
         for env_id in (

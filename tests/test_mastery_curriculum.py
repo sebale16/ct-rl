@@ -85,7 +85,11 @@ class MasteryCurriculumTests(unittest.TestCase):
 class MasteryCurriculumCallbackTests(unittest.TestCase):
     @staticmethod
     def _callback(
-        *, set_stage, success_threshold=0.8, consecutive_evals=1
+        *,
+        set_stage,
+        success_threshold=0.8,
+        consecutive_evals=1,
+        get_curriculum_metrics=None,
     ):
         algorithm = MagicMock()
         algorithm.num_timesteps = 0
@@ -95,6 +99,7 @@ class MasteryCurriculumCallbackTests(unittest.TestCase):
             num_stages=3,
             success_threshold=success_threshold,
             consecutive_evals=consecutive_evals,
+            get_curriculum_metrics=get_curriculum_metrics,
         )
         callback.init_callback(algorithm)
         return callback, algorithm
@@ -110,15 +115,72 @@ class MasteryCurriculumCallbackTests(unittest.TestCase):
         self.assertEqual(stages, [])
         self.assertTrue(callback.on_step())
         self.assertEqual(stages, [1])
+        algorithm.logger.record.assert_any_call("curriculum/probe_stage", 0)
         algorithm.logger.record.assert_any_call("curriculum/stage", 1)
+        algorithm.logger.record.assert_any_call("curriculum/advanced", 1.0)
         algorithm.logger.record.assert_any_call(
             "curriculum/probe_success_rate", 0.9
+        )
+
+    def test_logs_new_selected_level_separately_from_mastered_probe_stage(self):
+        selected = {"stage": 0}
+        stages: list[int] = []
+        heights = (3.8, 3.5, 3.0)
+        potential_levels = (0.95, 0.875, 0.75)
+
+        def set_stage(stage: int) -> None:
+            selected["stage"] = stage
+            stages.append(stage)
+
+        def metrics():
+            stage = selected["stage"]
+            return {
+                "start_tip_height": heights[stage],
+                "start_tip_speed": 1.0 if stage == 0 else 0.0,
+                "start_potential_energy_norm": potential_levels[stage],
+            }
+
+        callback, algorithm = self._callback(
+            set_stage=set_stage,
+            consecutive_evals=2,
+            get_curriculum_metrics=metrics,
+        )
+        algorithm.logger.record.assert_any_call(
+            "curriculum/start_tip_height", 3.8
+        )
+        callback.parent = SimpleNamespace(last_capture_success_rate=0.9)
+
+        algorithm.logger.reset_mock()
+        self.assertTrue(callback.on_step())
+        self.assertEqual(stages, [])
+        algorithm.logger.record.assert_any_call("curriculum/probe_stage", 0)
+        algorithm.logger.record.assert_any_call("curriculum/stage", 0)
+        algorithm.logger.record.assert_any_call("curriculum/advanced", 0.0)
+        algorithm.logger.record.assert_any_call(
+            "curriculum/start_potential_energy_norm", 0.95
+        )
+
+        algorithm.logger.reset_mock()
+        self.assertTrue(callback.on_step())
+        self.assertEqual(stages, [1])
+        algorithm.logger.record.assert_any_call("curriculum/probe_stage", 0)
+        algorithm.logger.record.assert_any_call("curriculum/stage", 1)
+        algorithm.logger.record.assert_any_call("curriculum/advanced", 1.0)
+        algorithm.logger.record.assert_any_call(
+            "curriculum/start_tip_height", 3.5
+        )
+        algorithm.logger.record.assert_any_call(
+            "curriculum/start_tip_speed", 0.0
+        )
+        algorithm.logger.record.assert_any_call(
+            "curriculum/start_potential_energy_norm", 0.875
         )
 
     def test_missing_capture_result_is_inert(self):
         stages: list[int] = []
         callback, algorithm = self._callback(set_stage=stages.append)
         callback.parent = SimpleNamespace(last_capture_success_rate=None)
+        algorithm.logger.record.reset_mock()
 
         self.assertTrue(callback.on_step())
         self.assertEqual(callback.stage, 0)

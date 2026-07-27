@@ -1,9 +1,9 @@
 """Shared tip-height/velocity curriculum state for swing-up tasks.
 
-The curriculum is deliberately discrete.  Its first level is a near-upright
-state whose tip is moving toward the stabilization point, so the first skill
-is braking.  Every later level starts at rest and lowers the tip until the
-last level is the exact hanging configuration.
+The curriculum is deliberately discrete.  Its first level is the exact
+upright configuration at rest, so the first skill is maintaining balance.
+Every later level also starts at rest and lowers the tip until the last level
+is the exact hanging configuration.
 
 This module owns only the level specification and synchronization protocol.
 Each mechanism maps ``(tip_height, incoming_tip_speed, side)`` to its own
@@ -59,8 +59,6 @@ class TipHeightVelocityCurriculum:
         *,
         curriculum: bool,
         tip_height_bounds: tuple[float, float],
-        brake_tip_height: float,
-        brake_tip_speed: float,
         descent_tip_heights: Iterable[float],
     ) -> None:
         self.curriculum = bool(curriculum)
@@ -83,19 +81,6 @@ class TipHeightVelocityCurriculum:
                 "to upright"
             )
 
-        brake_height = float(brake_tip_height)
-        brake_speed = float(brake_tip_speed)
-        if (
-            not np.isfinite(brake_height)
-            or not hanging_height < brake_height < upright_height
-        ):
-            raise ValueError(
-                "brake_tip_height must be finite and strictly between the "
-                "hanging and upright heights"
-            )
-        if not np.isfinite(brake_speed) or brake_speed <= 0.0:
-            raise ValueError("brake_tip_speed must be finite and positive")
-
         try:
             descent = tuple(float(height) for height in descent_tip_heights)
         except (TypeError, ValueError) as exc:
@@ -105,12 +90,12 @@ class TipHeightVelocityCurriculum:
         if not np.all(np.isfinite(descent)):
             raise ValueError("descent_tip_heights must be finite")
         if any(
-            height < hanging_height or height >= brake_height
+            height < hanging_height or height >= upright_height
             for height in descent
         ):
             raise ValueError(
                 "descent_tip_heights must lie from hanging (inclusive) to "
-                "brake_tip_height (exclusive)"
+                "upright (exclusive)"
             )
         if any(
             next_height >= height
@@ -124,7 +109,7 @@ class TipHeightVelocityCurriculum:
 
         self._tip_height_bounds = (hanging_height, upright_height)
         self._tip_curriculum_levels = (
-            TipCurriculumLevel(brake_height, brake_speed),
+            TipCurriculumLevel(upright_height, 0.0),
             *(TipCurriculumLevel(height, 0.0) for height in descent),
         )
         self._curriculum_stage = (
@@ -178,10 +163,26 @@ class TipHeightVelocityCurriculum:
 
     def curriculum_diagnostics(self) -> dict[str, float]:
         level = self.curriculum_level
+        hanging_height, upright_height = self._tip_height_bounds
+        height_norm = (level.tip_height - hanging_height) / (
+            upright_height - hanging_height
+        )
+        stage_progress = (
+            self.curriculum_stage / (self.num_curriculum_stages - 1)
+            if self.num_curriculum_stages > 1
+            else 1.0
+        )
         return {
             "curriculum_stage": float(self.curriculum_stage),
             "curriculum_num_stages": float(self.num_curriculum_stages),
+            "curriculum_progress": float(stage_progress),
             "curriculum_start_tip_height": float(level.tip_height),
+            "curriculum_start_tip_height_norm": float(height_norm),
+            # All current hosts reset a fully extended chain, so normalized
+            # gravitational potential is exactly normalized distal-tip height.
+            # Starting speed remains explicit rather than being folded into a
+            # misleading one-dimensional "energy level".
+            "curriculum_start_potential_energy_norm": float(height_norm),
             "curriculum_start_tip_speed": float(level.incoming_tip_speed),
             "curriculum_complete": float(self.curriculum_complete),
         }

@@ -375,11 +375,16 @@ def run_sb3_benchmark(
             train_env.env_method("set_curriculum_stage", stage)
             curriculum_probe_env.env_method("set_curriculum_stage", stage)
 
+        def _get_mastery_curriculum_metrics() -> dict[str, float]:
+            metrics = train_env.env_method("curriculum_log_metrics")
+            return dict(metrics[0])
+
         mastery_callback = MasteryCurriculumCallback(
             set_stage=_set_mastery_curriculum_stage,
             num_stages=int(next(iter(stage_counts))),
             success_threshold=curriculum_success_threshold,
             consecutive_evals=curriculum_consecutive_evals,
+            get_curriculum_metrics=_get_mastery_curriculum_metrics,
             verbose=1,
         )
         curriculum_probe_callback = SustainedCaptureEvalCallback(
@@ -425,22 +430,32 @@ def run_sb3_benchmark(
         )
         callbacks.append(hanging_eval_callback)
 
-    # Timestep-based logging callback
-    log_callback = LogEveryNTimesteps(n_steps=max(step_log_interval // n_envs, 1))
-    # progress_bar_callback = ProgressBarCallback()
-
-    # Combine callbacks
-    callbacks.append(log_callback)
-
     # Drive the reset curriculum from global training progress (eval envs were
-    # built with the curriculum off and are left untouched).
+    # built with the curriculum off and are left untouched). Keep this before
+    # every dump-capable callback so the row at timestep t contains fraction(t).
     if is_fraction_curriculum:
-        callbacks.append(CurriculumFractionCallback(total_steps=curr_total))
+        def _get_fraction_curriculum_metrics() -> dict[str, float]:
+            metrics = train_env.env_method("curriculum_log_metrics")
+            return dict(metrics[0])
+
+        callbacks.insert(
+            0,
+            CurriculumFractionCallback(
+                total_steps=curr_total,
+                get_curriculum_metrics=_get_fraction_curriculum_metrics,
+            ),
+        )
         print(
             f"[curriculum] reset band widens to full over {curr_total} steps "
             f"({n_envs} train env(s)); eval starts fixed.",
             flush=True,
         )
+
+    # Timestep-based logging callback. Curriculum telemetry is placed before it
+    # so scheduled dumps cannot lag one step behind the selected reset level.
+    log_callback = LogEveryNTimesteps(n_steps=max(step_log_interval // n_envs, 1))
+    # progress_bar_callback = ProgressBarCallback()
+    callbacks.append(log_callback)
 
     callback = CallbackList(callbacks)
 

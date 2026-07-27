@@ -292,10 +292,19 @@ class TestCallbacks(unittest.TestCase):
         algo.num_timesteps = 0
         cb.on_training_start({}, {})
         self.assertEqual(seen[-1], 0.0)
+        algo.logger.record.assert_any_call("curriculum/fraction", 0.0)
+        algo.logger.record.assert_any_call("curriculum/progress", 0.0)
         for t, expected in [(25, 0.25), (50, 0.5), (100, 1.0), (150, 1.0)]:
+            algo.logger.record.reset_mock()
             algo.num_timesteps = t
             cb.on_step()
             self.assertAlmostEqual(seen[-1], expected)
+            algo.logger.record.assert_any_call(
+                "curriculum/fraction", expected
+            )
+            algo.logger.record.assert_any_call(
+                "curriculum/complete", float(expected >= 1.0)
+            )
 
     def test_curriculum_fraction_callback_resumes_from_restored_timesteps(self):
         # On resume num_timesteps is already advanced before the first rollout;
@@ -309,6 +318,7 @@ class TestCallbacks(unittest.TestCase):
         algo.num_timesteps = 150
         cb.on_training_start({}, {})
         self.assertAlmostEqual(seen[-1], 0.75)
+        algo.logger.record.assert_any_call("curriculum/fraction", 0.75)
 
     def test_curriculum_fraction_callback_inert_when_total_nonpositive(self):
         algo = MockAlgorithm()
@@ -318,6 +328,33 @@ class TestCallbacks(unittest.TestCase):
         algo.num_timesteps = 50
         cb.on_step()
         self.assertEqual(seen[-1], 1.0)
+        algo.logger.record.assert_any_call("curriculum/complete", 1.0)
+
+    def test_curriculum_fraction_callback_logs_environment_descriptor(self):
+        algo = MockAlgorithm()
+        selected = {"fraction": 0.0}
+
+        def set_fraction(fraction):
+            selected["fraction"] = fraction
+
+        def metrics():
+            fraction = selected["fraction"]
+            return {
+                "angle_spread_rad": 0.5 + fraction * (np.pi - 0.5),
+            }
+
+        cb = CurriculumFractionCallback(
+            set_fraction=set_fraction,
+            total_steps=100,
+            get_curriculum_metrics=metrics,
+        )
+        cb.init_callback(algo)
+        algo.num_timesteps = 50
+        cb.on_step()
+        algo.logger.record.assert_any_call(
+            "curriculum/angle_spread_rad",
+            0.5 + 0.5 * (np.pi - 0.5),
+        )
 
     def test_stop_on_reward_threshold(self):
         # This callback needs a parent EvalCallback

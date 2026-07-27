@@ -5,8 +5,8 @@ Both local tasks keep dm_control's stock ``two_poles`` smooth reward unchanged:
 * ``cartpole-two_poles-curriculum`` is the historical fraction-scheduled
   angle-band curriculum.
 * ``cartpole-two_poles-v2`` is the performance-gated tip-height/velocity
-  curriculum.  It begins with a braking task near upright, then lowers the
-  distal tip through zero-velocity starts until reaching exact hanging.
+  curriculum.  It begins exactly upright at rest, then lowers the distal tip
+  through zero-velocity starts until reaching exact hanging.
 """
 
 from __future__ import annotations
@@ -29,8 +29,6 @@ _CART_LIMIT = 1.8
 # extended, the distal tip therefore spans [-1, 3].
 TIP_HEIGHT_BOUNDS = (-1.0, 3.0)
 STABILIZATION_POINT = (0.0, 3.0)
-DEFAULT_BRAKE_TIP_HEIGHT = 2.8
-DEFAULT_BRAKE_TIP_SPEED = 1.0
 DEFAULT_DESCENT_TIP_HEIGHTS = (2.5, 2.0, 1.0, 0.0, -1.0)
 STRICT_CAPTURE_DISTANCE = 0.2
 STRICT_CAPTURE_SPEED = 0.2
@@ -153,8 +151,7 @@ class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
     ``q1 = side * arccos((h - 1) / 2)``, ``q2 = 0``,
     ``q1_dot = -side * v / 2``, and ``q2_dot = 0``.
 
-    Thus the distal-tip height and speed are exactly ``h`` and ``v``, and the
-    nonzero braking velocity follows the short arc toward the upright target.
+    Thus the distal-tip height and speed are exactly ``h`` and ``v``.
     ``get_reward`` is deliberately inherited unchanged from
     :class:`dm_control.suite.cartpole.Balance`.
     """
@@ -164,16 +161,12 @@ class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
         *,
         random=None,
         curriculum: bool = True,
-        brake_tip_height: float = DEFAULT_BRAKE_TIP_HEIGHT,
-        brake_tip_speed: float = DEFAULT_BRAKE_TIP_SPEED,
         descent_tip_heights: Iterable[float] = DEFAULT_DESCENT_TIP_HEIGHTS,
     ) -> None:
         super().__init__(swing_up=True, sparse=False, random=random)
         self._configure_tip_curriculum(
             curriculum=curriculum,
             tip_height_bounds=TIP_HEIGHT_BOUNDS,
-            brake_tip_height=brake_tip_height,
-            brake_tip_speed=brake_tip_speed,
             descent_tip_heights=descent_tip_heights,
         )
         if not self.curriculum:
@@ -205,15 +198,19 @@ class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
     def initialize_episode(self, physics) -> None:
         if self.curriculum:
             level = self.curriculum_level
-            # Make the terminal distribution one exact generalized state, not
-            # the equivalent +/-pi representations.
+            # Make both vertical extremes one exact generalized state.  This
+            # avoids consuming the mirror RNG when side has no physical effect
+            # and canonicalizes hanging to +pi rather than the equivalent -pi.
             side = (
                 1.0
-                if np.isclose(
-                    level.tip_height,
-                    TIP_HEIGHT_BOUNDS[0],
-                    rtol=0.0,
-                    atol=1e-12,
+                if any(
+                    np.isclose(
+                        level.tip_height,
+                        bound,
+                        rtol=0.0,
+                        atol=1e-12,
+                    )
+                    for bound in TIP_HEIGHT_BOUNDS
                 )
                 else self._curriculum_side()
             )
@@ -318,8 +315,6 @@ def two_poles_v2(
     random=None,
     environment_kwargs: Optional[Dict[str, Any]] = None,
     curriculum: bool = True,
-    brake_tip_height: float = DEFAULT_BRAKE_TIP_HEIGHT,
-    brake_tip_speed: float = DEFAULT_BRAKE_TIP_SPEED,
     descent_tip_heights: Iterable[float] = DEFAULT_DESCENT_TIP_HEIGHTS,
 ):
     """Construct ``cartpole-two_poles-v2`` with the stock smooth reward."""
@@ -330,8 +325,6 @@ def two_poles_v2(
     task = CartpoleTwoPolesV2(
         random=random,
         curriculum=curriculum,
-        brake_tip_height=brake_tip_height,
-        brake_tip_speed=brake_tip_speed,
         descent_tip_heights=descent_tip_heights,
     )
     return control.Environment(

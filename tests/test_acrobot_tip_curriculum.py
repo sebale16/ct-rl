@@ -7,9 +7,8 @@ try:
     from dm_control.suite import acrobot as dmc_acrobot
 
     from environment.acrobot_v2 import (
-        ACROBOT_BRAKE_TIP_HEIGHT,
-        ACROBOT_BRAKE_TIP_SPEED,
         ACROBOT_DESCENT_TIP_HEIGHTS,
+        ACROBOT_TIP_HEIGHT_BOUNDS,
         BalanceV4,
         BalanceV6,
         BalanceV43,
@@ -49,55 +48,80 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
         task.initialize_episode(self.physics)
         self.physics.forward()
 
-    def test_default_ladder_is_brake_then_resting_descent(self):
+    def test_default_ladder_is_upright_then_resting_descent(self):
         task = BalanceV43(random=0)
         levels = task.curriculum_levels
 
         self.assertEqual(len(levels), 1 + len(ACROBOT_DESCENT_TIP_HEIGHTS))
-        self.assertEqual(levels[0].tip_height, ACROBOT_BRAKE_TIP_HEIGHT)
         self.assertEqual(
-            levels[0].incoming_tip_speed, ACROBOT_BRAKE_TIP_SPEED
+            levels[0].tip_height, ACROBOT_TIP_HEIGHT_BOUNDS[1]
         )
+        self.assertEqual(levels[0].incoming_tip_speed, 0.0)
         self.assertEqual(
             tuple(level.tip_height for level in levels[1:]),
             ACROBOT_DESCENT_TIP_HEIGHTS,
         )
-        self.assertTrue(
-            all(level.incoming_tip_speed == 0.0 for level in levels[1:])
-        )
+        self.assertTrue(all(level.incoming_tip_speed == 0.0 for level in levels))
 
-    def test_brake_reset_has_exact_height_speed_and_target_direction(self):
+    def test_diagnostics_track_selected_height_velocity_and_potential_level(self):
         task = BalanceV43(random=0)
-        self._reset_stage(task, 0)
 
-        tip = np.asarray(
-            self.physics.named.data.site_xpos["tip"], dtype=np.float64
-        )
-        target = np.asarray(
-            self.physics.named.data.site_xpos["target"], dtype=np.float64
-        )
-        tip_velocity = task._tip_cartesian_velocity(self.physics)
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                task.set_curriculum_stage(stage)
+                diagnostics = task.curriculum_diagnostics()
+                height_norm = level.tip_height / 4.0
+                self.assertEqual(diagnostics["curriculum_stage"], float(stage))
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_progress"],
+                    stage / (task.num_curriculum_stages - 1),
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_height"],
+                    level.tip_height,
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_speed"],
+                    level.incoming_tip_speed,
+                )
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_start_tip_height_norm"],
+                    height_norm,
+                )
+                self.assertAlmostEqual(
+                    diagnostics[
+                        "curriculum_start_potential_energy_norm"
+                    ],
+                    height_norm,
+                )
 
-        self.assertAlmostEqual(tip[2], ACROBOT_BRAKE_TIP_HEIGHT, places=12)
-        self.assertAlmostEqual(
-            np.linalg.norm(tip_velocity), ACROBOT_BRAKE_TIP_SPEED, places=12
-        )
-        self.assertGreater(float(tip_velocity @ (target - tip)), 0.0)
-        self.assertAlmostEqual(float(self.physics.data.qpos[1]), 0.0, places=12)
-        self.assertAlmostEqual(float(self.physics.data.qvel[1]), 0.0, places=12)
+    def test_first_reset_is_exact_upright_at_rest(self):
+        for task_type in (BalanceV43, BalanceV61):
+            with self.subTest(task_type=task_type.__name__):
+                task = task_type(random=0)
+                self._reset_stage(task, 0)
 
-        side = float(np.sign(self.physics.data.qpos[0]))
-        expected_angle = np.arccos(
-            (ACROBOT_BRAKE_TIP_HEIGHT - 2.0) / 2.0
-        )
-        self.assertAlmostEqual(
-            float(self.physics.data.qpos[0]), side * expected_angle, places=12
-        )
-        self.assertAlmostEqual(
-            float(self.physics.data.qvel[0]),
-            -side * ACROBOT_BRAKE_TIP_SPEED / 2.0,
-            places=12,
-        )
+                tip = np.asarray(
+                    self.physics.named.data.site_xpos["tip"], dtype=np.float64
+                )
+                target = np.asarray(
+                    self.physics.named.data.site_xpos["target"],
+                    dtype=np.float64,
+                )
+                np.testing.assert_array_equal(
+                    np.asarray(self.physics.data.qpos), np.zeros(2)
+                )
+                np.testing.assert_array_equal(
+                    np.asarray(self.physics.data.qvel), np.zeros(2)
+                )
+                np.testing.assert_allclose(tip, target, rtol=0.0, atol=1e-12)
+                self.assertAlmostEqual(
+                    tip[2], ACROBOT_TIP_HEIGHT_BOUNDS[1], places=12
+                )
+                terms = task.reward_terms(self.physics)
+                self.assertEqual(terms["tip_distance"], 0.0)
+                self.assertEqual(terms["tip_speed"], 0.0)
+                self.assertEqual(terms["strict_capture"], 1.0)
 
     def test_descent_resets_have_exact_height_and_zero_velocity(self):
         task = BalanceV43(random=7)
@@ -142,6 +166,7 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
 
     def test_reseed_reproduces_mirrored_reset_sequence(self):
         task = BalanceV43(random=999)
+        task.set_curriculum_stage(1)
 
         def draw_sequence():
             sequence = []

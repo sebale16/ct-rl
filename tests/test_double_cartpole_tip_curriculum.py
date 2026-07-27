@@ -7,12 +7,11 @@ try:
 
     from environment.double_cartpole_v2 import (
         CartpoleTwoPolesV2,
-        DEFAULT_BRAKE_TIP_HEIGHT,
-        DEFAULT_BRAKE_TIP_SPEED,
         DEFAULT_DESCENT_TIP_HEIGHTS,
         STABILIZATION_POINT,
         STRICT_CAPTURE_DISTANCE,
         STRICT_CAPTURE_SPEED,
+        TIP_HEIGHT_BOUNDS,
         two_poles_v2,
     )
 
@@ -42,43 +41,70 @@ class TestDoubleCartpoleTipCurriculum(unittest.TestCase):
         )
         self.assertEqual(np.asarray(env.physics.pole_angle_cosine()).shape, (2,))
 
-    def test_default_ladder_is_braking_then_rest_descent(self):
+    def test_default_ladder_is_upright_then_rest_descent(self):
         task = CartpoleTwoPolesV2(random=0)
         levels = task.curriculum_levels
         self.assertEqual(len(levels), 1 + len(DEFAULT_DESCENT_TIP_HEIGHTS))
         self.assertEqual(
             (levels[0].tip_height, levels[0].incoming_tip_speed),
-            (DEFAULT_BRAKE_TIP_HEIGHT, DEFAULT_BRAKE_TIP_SPEED),
+            (TIP_HEIGHT_BOUNDS[1], 0.0),
         )
         self.assertEqual(
             tuple(level.tip_height for level in levels[1:]),
             DEFAULT_DESCENT_TIP_HEIGHTS,
         )
-        self.assertTrue(
-            all(level.incoming_tip_speed == 0.0 for level in levels[1:])
-        )
+        self.assertTrue(all(level.incoming_tip_speed == 0.0 for level in levels))
 
-    def test_braking_reset_has_exact_tip_state_and_incoming_direction(self):
+    def test_diagnostics_track_selected_height_velocity_and_potential_level(self):
+        task = CartpoleTwoPolesV2(random=0)
+
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                task.set_curriculum_stage(stage)
+                diagnostics = task.curriculum_diagnostics()
+                height_norm = (level.tip_height + 1.0) / 4.0
+                self.assertEqual(diagnostics["curriculum_stage"], float(stage))
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_progress"],
+                    stage / (task.num_curriculum_stages - 1),
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_height"],
+                    level.tip_height,
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_speed"],
+                    level.incoming_tip_speed,
+                )
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_start_tip_height_norm"],
+                    height_norm,
+                )
+                self.assertAlmostEqual(
+                    diagnostics[
+                        "curriculum_start_potential_energy_norm"
+                    ],
+                    height_norm,
+                )
+
+    def test_first_reset_is_exact_upright_at_rest(self):
         env = self._env()
         env.reset()
         physics, task = env.physics, env.task
         terms = task.curriculum_terms(physics)
-        tip_x, tip_z, tip_vx, tip_vz = task._tip_kinematics(physics)
-
-        self.assertAlmostEqual(
-            terms["tip_height"], DEFAULT_BRAKE_TIP_HEIGHT, places=12
+        np.testing.assert_array_equal(physics.data.qpos, np.zeros(3))
+        np.testing.assert_array_equal(physics.data.qvel, np.zeros(3))
+        np.testing.assert_allclose(
+            task._tip_kinematics(physics),
+            (*STABILIZATION_POINT, 0.0, 0.0),
+            rtol=0.0,
+            atol=1e-12,
         )
-        self.assertAlmostEqual(
-            terms["tip_speed"], DEFAULT_BRAKE_TIP_SPEED, places=12
-        )
-        target = np.asarray(STABILIZATION_POINT)
-        tip = np.asarray([tip_x, tip_z])
-        velocity = np.asarray([tip_vx, tip_vz])
-        self.assertGreater(float(velocity @ (target - tip)), 0.0)
-        self.assertEqual(float(physics.data.qpos[0]), 0.0)
-        self.assertEqual(float(physics.data.qpos[2]), 0.0)
-        self.assertEqual(float(physics.data.qvel[0]), 0.0)
-        self.assertEqual(float(physics.data.qvel[2]), 0.0)
+        self.assertEqual(terms["tip_height"], TIP_HEIGHT_BOUNDS[1])
+        self.assertEqual(terms["tip_distance"], 0.0)
+        self.assertEqual(terms["tip_speed"], 0.0)
+        self.assertEqual(terms["strict_capture"], 1.0)
+        self.assertEqual(terms["success"], 1.0)
 
     def test_rest_descent_ends_at_exact_hanging_state(self):
         env = self._env()
@@ -149,6 +175,7 @@ class TestDoubleCartpoleTipCurriculum(unittest.TestCase):
 
     def test_reseed_reproduces_both_mirror_sides(self):
         env = self._env()
+        env.task.set_curriculum_stage(1)
         env.task.reseed(123)
         first = []
         for _ in range(12):
