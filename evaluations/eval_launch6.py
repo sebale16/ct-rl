@@ -86,6 +86,12 @@ def _eval_starts(env_id):
     Older uniform-start / fraction-curriculum tasks keep both starts.
     """
     if env_id in PERFORMANCE_CURRICULUM_ENV_IDS:
+        # ``curriculum=True`` pins the reset ladder at level 0 -- the near-upright
+        # braking start ("balance from near the top", the first mastery stage) --
+        # since nothing advances the stage during eval. Gated so the committed
+        # default (fixed hanging start for checkpoint selection) is unchanged.
+        if os.environ.get("EVAL_NEAR_TOP", "") == "1":
+            return [("near_top", {"curriculum": True})]
         return [("hanging", {"curriculum": False})]
     return [("uniform", {"uniform_start": True, "curriculum": False}),
             ("hanging", {"uniform_start": False, "curriculum": False})]
