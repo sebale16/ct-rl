@@ -45,6 +45,7 @@ from evaluations.sustained_capture import (
     SustainedCaptureTracker,
     capture_selection_rank,
 )
+from environment.tip_curriculum import PERFORMANCE_CURRICULUM_ENV_IDS
 from models import ActorQCriticModel
 from stable_baselines3 import SAC, PPO
 
@@ -74,7 +75,20 @@ CT_ARMS = _arms(
      ("ct_td3", "final_mf")],
 )
 SB3_ARMS = _arms("LAUNCH_SB3_ARMS", [("ppo", "final_mf"), ("sac", "final_mf")])
-STARTS = [("uniform", True), ("hanging", False)]  # (label, uniform_start)
+
+
+def _eval_starts(env_id):
+    """Per-env eval start distributions as task_kwargs overrides.
+
+    Mastery-gated tip tasks (v4.3/v6.1/cartpole-two_poles-v2) take only a
+    ``curriculum`` flag; ``curriculum=False`` is the fixed hanging-at-rest task
+    used for checkpoint selection, and there is no ``uniform_start`` for them.
+    Older uniform-start / fraction-curriculum tasks keep both starts.
+    """
+    if env_id in PERFORMANCE_CURRICULUM_ENV_IDS:
+        return [("hanging", {"curriculum": False})]
+    return [("uniform", {"uniform_start": True, "curriculum": False}),
+            ("hanging", {"uniform_start": False, "curriculum": False})]
 
 
 def env_kwargs_for(framework, algo, env_id, mode):
@@ -116,12 +130,11 @@ def act(pol, obs):
     return a
 
 
-def _with_start(env_kwargs, uniform_start):
-    """Copy env_kwargs with a fixed eval start: curriculum OFF, uniform_start set."""
+def _with_start(env_kwargs, overrides):
+    """Copy env_kwargs applying a start's task_kwargs overrides."""
     ek = dict(env_kwargs)
     tk = dict(ek.get("task_kwargs", {}))
-    tk["uniform_start"] = uniform_start
-    tk["curriculum"] = False
+    tk.update(overrides)
     ek["task_kwargs"] = tk
     return ek
 
@@ -189,14 +202,14 @@ def main():
         i, n = (int(x) for x in shard.split("/"))
         specs = [s for k, s in enumerate(specs) if k % n == i]
         out = f"{OUT[:-4] if OUT.endswith('.csv') else OUT}_shard{i}.csv"
-    print(f"[{shard or 'all'}] {len(specs)} specs x {len(STARTS)} starts", flush=True)
+    print(f"[{shard or 'all'}] {len(specs)} specs", flush=True)
     rows = []
     for s in specs:
         ek, mk = env_kwargs_for(s["framework"], s["algo"], s["env_id"], s["mode"])
         is_acro = s["env_id"].startswith("acrobot")
         capture_spec = SustainedCaptureSpec() if is_acro else None
-        for start_label, uniform_start in STARTS:
-            ek_s = _with_start(ek, uniform_start)
+        for start_label, overrides in _eval_starts(s["env_id"]):
+            ek_s = _with_start(ek, overrides)
             rets, Ts, rates, tavg, rps, tips, hocc, holdocc = [], [], [], [], [], [], [], []
             csucc, cdur = [], []
             for j in range(N_EVAL):
