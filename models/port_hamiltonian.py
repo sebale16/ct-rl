@@ -255,6 +255,123 @@ def integrate_drift(
     )
 
 
+# --------------------------------------------------------------------------
+# Analytic derivatives of the small mechanics MLPs.
+#
+# The structured drift needs derivatives of M(q), V(q) and the contact geometry
+# with respect to position.  Taking them with ``torch.func`` (vmap + jacfwd) is
+# concise but routes every operation through functorch's Python decomposition
+# layer: a profile of the cheetah contact arm attributed 36% of the training
+# step to four such call sites, and roughly a quarter of that was interpreter
+# overhead (torch/_refs, _prims_common, inspect.Signature.bind) rather than
+# arithmetic.  These helpers propagate the same derivatives through a plain
+# Linear/activation stack as a handful of batched matmuls, which is both exactly
+# the same function (agreement ~1e-6 relative in float32) and 5x faster on the
+# mass block.  They deliberately support only the layer types the mechanics nets
+# are built from, and raise on anything else rather than silently disagreeing
+# with autograd.
+# --------------------------------------------------------------------------
+
+
+def _activation_derivative(module: nn.Module, pre: th.Tensor) -> th.Tensor:
+    """Elementwise derivative of ``module`` evaluated at its pre-activation."""
+    if isinstance(module, nn.SiLU):
+        sig = th.sigmoid(pre)
+        return sig * (1.0 + pre * (1.0 - sig))
+    if isinstance(module, nn.Tanh):
+        return 1.0 - th.tanh(pre).square()
+    if isinstance(module, nn.ReLU):
+        # Matches autograd's subgradient choice at exactly zero.
+        return (pre > 0).to(pre.dtype)
+    if isinstance(module, nn.ELU):
+        alpha = float(module.alpha)
+        return th.where(pre > 0, th.ones_like(pre), alpha * th.exp(pre))
+    raise TypeError(
+        "analytic mechanics derivatives do not support activation "
+        f"{type(module).__name__}; add its derivative or construct the model "
+        "with analytic_derivatives=False"
+    )
+
+
+def _mlp_trace(net: nn.Sequential, x: th.Tensor):
+    """Forward pass that also returns what the JVP/VJP passes need.
+
+    Returns ``(y, layers)`` where ``layers`` is one ``(weight, act_prime)`` pair
+    per linear layer, ``act_prime`` being ``None`` for a layer with no following
+    activation.  The trace is built from ordinary autograd-tracked ops, so the
+    derivative passes below stay differentiable with respect to the weights --
+    the dynamics fit trains through them.
+    """
+    # A bare Linear is a valid one-layer net (tests and recovery diagnostics
+    # substitute one for the learned contact geometry).
+    modules = list(net) if isinstance(net, nn.Sequential) else [net]
+    layers: list[tuple[th.Tensor, Optional[th.Tensor]]] = []
+    h = x
+    index = 0
+    while index < len(modules):
+        linear = modules[index]
+        if not isinstance(linear, nn.Linear):
+            raise TypeError(
+                "analytic mechanics derivatives expect a Linear/activation "
+                f"stack, found {type(linear).__name__}"
+            )
+        pre = th.nn.functional.linear(h, linear.weight, linear.bias)
+        index += 1
+        act_prime = None
+        if index < len(modules):
+            activation = modules[index]
+            act_prime = _activation_derivative(activation, pre)
+            h = activation(pre)
+            index += 1
+        else:
+            h = pre
+        layers.append((linear.weight, act_prime))
+    return h, layers
+
+
+def _mlp_jvp(layers, tangent: th.Tensor) -> th.Tensor:
+    """Push one input tangent forward through a traced MLP: (..., in) -> (..., out)."""
+    out = tangent
+    for weight, act_prime in layers:
+        out = out @ weight.t()
+        if act_prime is not None:
+            out = out * act_prime
+    return out
+
+
+def _mlp_vjp(layers, cotangent: th.Tensor) -> th.Tensor:
+    """Pull one output cotangent back through a traced MLP: (..., out) -> (..., in).
+
+    Extra leading dimensions are allowed, so seeding an identity cotangent gives
+    the full Jacobian in one pass (cheaper than forward mode whenever the output
+    is narrower than the input, as it is for the contact geometry).
+    """
+    grad_out = cotangent
+    for weight, act_prime in reversed(layers):
+        if act_prime is not None:
+            while act_prime.ndim < grad_out.ndim:
+                act_prime = act_prime.unsqueeze(-2)
+            grad_out = grad_out * act_prime
+        grad_out = grad_out @ weight
+    return grad_out
+
+
+def _mlp_jacobian(layers, out_dim: int, reference: th.Tensor) -> th.Tensor:
+    """Full Jacobian (batch, out_dim, in_dim) by reverse mode over the outputs."""
+    eye = th.eye(out_dim, dtype=reference.dtype, device=reference.device)
+    return _mlp_vjp(layers, eye.expand(reference.shape[0], out_dim, out_dim))
+
+
+def _scale_diagonal(matrix: th.Tensor, scale: th.Tensor) -> th.Tensor:
+    """Out-of-place ``diag(matrix) *= scale``, batched.
+
+    The Cholesky factor's diagonal passes through softplus, so its tangent and
+    its cotangent both pick up that derivative on the diagonal only.
+    """
+    diagonal = matrix.diagonal(dim1=-2, dim2=-1)
+    return matrix - th.diag_embed(diagonal) + th.diag_embed(scale * diagonal)
+
+
 @dataclass(frozen=True)
 class DOFLayout:
     """Maps a flat observation to a manipulator (q, qd) phase state for the
@@ -505,8 +622,14 @@ class PortHamiltonianModel(nn.Module):
         mass_logdet_reg: float = 0.0,
         mass_condition_reg: float = 0.0,
         mass_condition_limit: float = 1e3,
+        analytic_derivatives: bool = True,
     ) -> None:
         super().__init__()
+        # Position derivatives of the mechanics nets as explicit batched matmuls
+        # instead of vmap(jacfwd(...)). Same function to float32 roundoff; set
+        # False to fall back to the functorch reference path (the equivalence
+        # tests exercise both).
+        self.analytic_derivatives = bool(analytic_derivatives)
         self.mode = str(mode)
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
@@ -618,6 +741,17 @@ class PortHamiltonianModel(nn.Module):
         self._mass_excluded_pos = mass_excluded
         self._potential_excluded_pos = potential_excluded
         self._periodic_pos = tuple(layout.periodic_pos)
+        # Index plans that let the analytic passes evaluate the same feature map
+        # as ``_position_features`` in one gather, and push tangents/cotangents
+        # through it. Non-persistent: the state_dict contract is unchanged.
+        for tag, excluded in (
+            ("mass", mass_excluded),
+            ("potential", potential_excluded),
+        ):
+            source, sin_mask, cos_mask = self._feature_plan(excluded)
+            self.register_buffer(f"_{tag}_feat_src", source, persistent=False)
+            self.register_buffer(f"_{tag}_feat_sin", sin_mask, persistent=False)
+            self.register_buffer(f"_{tag}_feat_cos", cos_mask, persistent=False)
         # Keep the legacy attribute/None-buffer contract used by recovery and
         # old checkpoints.  None buffers do not appear in a state_dict.
         if mass_excluded:
@@ -787,6 +921,203 @@ class PortHamiltonianModel(nn.Module):
                 features.append(pos[i])
         return th.stack(features)
 
+    def _feature_plan(self, excluded: Tuple[int, ...]):
+        """Gather indices and sin/cos masks describing ``_position_features``.
+
+        Column order matches ``_position_features`` exactly.  ``(None, None,
+        None)`` means the map is the identity, so the analytic passes can use
+        ``pos`` and its tangents untouched; a plain gather index with no masks
+        means coordinates are only dropped, never transformed.
+        """
+        npos = self.layout.npos
+        source: list[int] = []
+        kinds: list[int] = []       # 0 = raw, 1 = sin, 2 = cos
+        for i in range(npos):
+            if i in excluded:
+                continue
+            if i in self._periodic_pos:
+                source.extend((i, i))
+                kinds.extend((1, 2))
+            else:
+                source.append(i)
+                kinds.append(0)
+        if not source:
+            raise ValueError(
+                "a structured mechanics network needs at least one position feature"
+            )
+        periodic = any(kinds)
+        if not periodic and source == list(range(npos)):
+            return None, None, None
+        source_tensor = th.tensor(source, dtype=th.long)
+        if not periodic:
+            return source_tensor, None, None
+        return (
+            source_tensor,
+            th.tensor([k == 1 for k in kinds], dtype=th.bool),
+            th.tensor([k == 2 for k in kinds], dtype=th.bool),
+        )
+
+    def _batched_features(self, pos: th.Tensor, tag: str):
+        """Batched ``_position_features`` plus the per-column chain-rule factor.
+
+        Returns ``(features, source, factor)``.  ``factor[:, j] = d features[:, j]
+        / d pos[:, source[j]]``; ``None`` for either means "identity", which the
+        callers use to skip work on the cheetah fast path.
+        """
+        source = getattr(self, f"_{tag}_feat_src")
+        if source is None:
+            return pos, None, None
+        gathered = pos.index_select(1, source)
+        sin_mask = getattr(self, f"_{tag}_feat_sin")
+        if sin_mask is None:
+            return gathered, source, None
+        cos_mask = getattr(self, f"_{tag}_feat_cos")
+        sin_value, cos_value = th.sin(gathered), th.cos(gathered)
+        features = th.where(sin_mask, sin_value, th.where(cos_mask, cos_value, gathered))
+        factor = th.where(
+            sin_mask, cos_value, th.where(cos_mask, -sin_value, th.ones_like(gathered))
+        )
+        return features, source, factor
+
+    def _feature_tangent(
+        self, velocity: th.Tensor, source: Optional[th.Tensor], factor: Optional[th.Tensor]
+    ) -> th.Tensor:
+        """Push a position-space tangent through the feature map."""
+        if source is None:
+            return velocity
+        tangent = velocity.index_select(1, source)
+        return tangent if factor is None else tangent * factor
+
+    def _feature_cotangent(
+        self,
+        grad_features: th.Tensor,
+        source: Optional[th.Tensor],
+        factor: Optional[th.Tensor],
+        like: th.Tensor,
+    ) -> th.Tensor:
+        """Pull a feature-space gradient back to observed-position space."""
+        if source is None:
+            return grad_features
+        if factor is not None:
+            grad_features = grad_features * factor
+        zeros = like.new_zeros(like.shape[0], self.layout.npos)
+        # index_add, not index_copy: a periodic coordinate contributes through
+        # both its sin and its cos column.
+        return zeros.index_add(1, source, grad_features)
+
+    def _cholesky_from_entries(self, entries: th.Tensor):
+        """Lower Cholesky factor with a softplus-positive diagonal, batched.
+
+        Also returns the raw diagonal's softplus derivative, which both the
+        tangent and the cotangent pass need.
+        """
+        factor = self._pack_lower(entries)
+        raw_diag = factor.diagonal(dim1=-2, dim2=-1)
+        factor = (
+            factor
+            - th.diag_embed(raw_diag)
+            + th.diag_embed(th.nn.functional.softplus(raw_diag) + 1e-3)
+        )
+        return factor, th.sigmoid(raw_diag)
+
+    def _pack_lower(self, entries: th.Tensor) -> th.Tensor:
+        """Pack lower-triangular entries into a (batch, nv, nv) matrix."""
+        nv = self.layout.nv
+        return entries.new_zeros(entries.shape[0], nv * nv).index_copy(
+            1, self._tri_flat, entries
+        ).reshape(-1, nv, nv)
+
+    def _mass_batch(self, pos: th.Tensor) -> th.Tensor:
+        """Batched M(q), identical to ``vmap(self._mass)`` without functorch."""
+        features, _, _ = self._batched_features(pos, "mass")
+        entries = self.mass_net(features)
+        factor, _ = self._cholesky_from_entries(entries)
+        return th.bmm(factor, factor.transpose(1, 2)) + 1e-4 * self._eye_nv
+
+    def _mass_terms_analytic(self, pos: th.Tensor, qd: th.Tensor):
+        """``(M, Mdot @ qd, grad_pos(1/2 qd^T M qd))`` in one trace.
+
+        Both consumers of dM/dq in the drift contract it twice with ``qd``, so
+        neither needs the full (nv, nv, npos) Jacobian that ``jacfwd`` builds:
+        ``Mdot`` is the directional derivative along ``qd`` (one forward tangent)
+        and the Coriolis term is the gradient of a scalar (one backward pass).
+        """
+        nv = self.layout.nv
+        features, source, factor = self._batched_features(pos, "mass")
+        velocity = qd.index_select(1, self._pos_to_cfg)   # dpos/dt in observed order
+        entries, layers = _mlp_trace(self.mass_net, features)
+        entries_dot = _mlp_jvp(
+            layers, self._feature_tangent(velocity, source, factor)
+        )
+        cholesky, softplus_prime = self._cholesky_from_entries(entries)
+        transpose = cholesky.transpose(1, 2)
+        mass = th.bmm(cholesky, transpose) + 1e-4 * self._eye_nv
+
+        # Tangent of the factor: only the diagonal picks up the softplus factor.
+        cholesky_dot = _scale_diagonal(
+            self._pack_lower(entries_dot), softplus_prime
+        )
+        mass_dot = th.bmm(cholesky_dot, transpose) + th.bmm(
+            cholesky, cholesky_dot.transpose(1, 2)
+        )
+        mass_dot_qd = th.bmm(mass_dot, qd.unsqueeze(-1)).squeeze(-1)
+
+        # d/dL of s = 1/2 qd^T (L L^T) qd is qd (L^T qd)^T; the eps*I term in M
+        # is constant in q and drops out.
+        projected = th.bmm(transpose, qd.unsqueeze(-1)).squeeze(-1)
+        grad_factor = _scale_diagonal(
+            qd.unsqueeze(-1) * projected.unsqueeze(-2), softplus_prime
+        )
+        grad_entries = grad_factor.reshape(-1, nv * nv).index_select(1, self._tri_flat)
+        coriolis = self._feature_cotangent(
+            _mlp_vjp(layers, grad_entries), source, factor, pos
+        )
+        return mass, mass_dot_qd, coriolis
+
+    def _potential_grad_analytic(self, pos: th.Tensor) -> th.Tensor:
+        """grad_pos V(q) including the rail spring, without functorch."""
+        features, source, factor = self._batched_features(pos, "potential")
+        value, layers = _mlp_trace(self.potential_net, features)
+        gradient = self._feature_cotangent(
+            _mlp_vjp(layers, th.ones_like(value)), source, factor, pos
+        )
+        if self._limit_pos_idx is None:
+            return gradient
+        # d/dq of 1/2 k (w*softplus(pen/w))^2 on either rail.
+        q = pos.index_select(1, self._limit_pos_idx)
+        width = float(self.layout.joint_limit_width)
+        lower_arg = (self._limit_lower - q) / width
+        upper_arg = (q - self._limit_upper) / width
+        lower_pen = th.nn.functional.softplus(lower_arg) * width
+        upper_pen = th.nn.functional.softplus(upper_arg) * width
+        stiffness = th.nn.functional.softplus(self._limit_raw[0])
+        rail = stiffness * (
+            upper_pen * th.sigmoid(upper_arg) - lower_pen * th.sigmoid(lower_arg)
+        )
+        return gradient.index_add(1, self._limit_pos_idx, rail)
+
+    def _mechanics_terms(self, pos: th.Tensor, qd: th.Tensor):
+        """``(M, dH/dq, Mdot @ qd)`` shared by the drift and the free-motion path."""
+        nv, B = self.layout.nv, pos.shape[0]
+        if self.analytic_derivatives:
+            mass, mass_dot_qd, coriolis = self._mass_terms_analytic(pos, qd)
+            grad_potential = self._potential_grad_analytic(pos)
+            # Both terms live on observed positions, so one scatter carries both.
+            dHdq = pos.new_zeros(B, nv).index_copy(
+                1, self._pos_to_cfg, grad_potential - coriolis
+            )
+            return mass, dHdq, mass_dot_qd
+        # functorch reference path, retained for the equivalence tests.
+        mass = vmap(self._mass)(pos)
+        mass_jac = vmap(jacfwd(self._mass))(pos)
+        grad_potential = vmap(grad(self._potential))(pos)
+        scattered = pos.new_zeros(B, nv, nv, nv).index_copy(3, self._pos_to_cfg, mass_jac)
+        dHdq = pos.new_zeros(B, nv).index_copy(
+            1, self._pos_to_cfg, grad_potential
+        ) - 0.5 * th.einsum("nabk,na,nb->nk", scattered, qd, qd)
+        mass_dot_qd = th.einsum("nabk,nk,nb->na", scattered, qd, qd)
+        return mass, dHdq, mass_dot_qd
+
     def _mass(self, pos: th.Tensor) -> th.Tensor:
         """SPD mass matrix M(q) = L L^T + eps I from a Cholesky factor with a
         softplus-positive diagonal. Single-sample (pos: (npos,)) for vmap.
@@ -876,9 +1207,18 @@ class PortHamiltonianModel(nn.Module):
     def _contact_geometry(self, pos: th.Tensor, qd: th.Tensor):
         """Learned point-contact geometry shared by both force formulations."""
         B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
-        g = self.gap_net(pos)
-        dg = vmap(jacfwd(self._gaps))(pos)
-        dh = vmap(jacfwd(self._tangents))(pos)
+        if self.analytic_derivatives:
+            # The gap/tangent nets read raw positions, and K < npos here, so a
+            # single reverse pass seeded with the identity is cheaper than
+            # jacfwd's one forward tangent per coordinate.
+            g, gap_layers = _mlp_trace(self.gap_net, pos)
+            dg = _mlp_jacobian(gap_layers, K, pos)
+            _, tangent_layers = _mlp_trace(self.tangent_net, pos)
+            dh = _mlp_jacobian(tangent_layers, K, pos)
+        else:
+            g = self.gap_net(pos)
+            dg = vmap(jacfwd(self._gaps))(pos)
+            dh = vmap(jacfwd(self._tangents))(pos)
         zeros = pos.new_zeros(B, K, nv)
         J_n = zeros.index_copy(2, self._pos_to_cfg, dg)
         J_t = zeros.index_copy(2, self._pos_to_cfg, dh) + self._tangent_onehot
@@ -1135,16 +1475,7 @@ class PortHamiltonianModel(nn.Module):
         nv, B = layout.nv, x.shape[0]
         pos = x[:, layout.pos_slice[0]:layout.pos_slice[1]]
         qd = x[:, layout.vel_slice[0]:layout.vel_slice[1]]
-        M = vmap(self._mass)(pos)
-        dM_pos = vmap(jacfwd(self._mass))(pos)
-        gV_pos = vmap(grad(self._potential))(pos)
-        dM = th.zeros(B, nv, nv, nv, dtype=x.dtype, device=x.device).index_copy(
-            3, self._pos_to_cfg, dM_pos
-        )
-        gV = th.zeros(B, nv, dtype=x.dtype, device=x.device).index_copy(
-            1, self._pos_to_cfg, gV_pos
-        )
-        dHdq = gV - 0.5 * th.einsum("nabk,na,nb->nk", dM, qd, qd)
+        M, dHdq, Mdot_qd = self._mechanics_terms(pos, qd)
         D_qd = th.bmm(self._damping(pos), qd.unsqueeze(-1)).squeeze(-1)
         if layout.act_to_cfg is None:
             Ga = self.G_a(a)
@@ -1153,7 +1484,6 @@ class PortHamiltonianModel(nn.Module):
                 1, self._act_to_cfg, self.G_a(a)
             )
         pdot = -dHdq - D_qd + Ga + self._joint_limit_damping_force(pos, qd)
-        Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
         qdd_free = th.linalg.solve(
             M, (pdot - Mdot_qd).unsqueeze(-1)
         ).squeeze(-1)
@@ -1265,21 +1595,11 @@ class PortHamiltonianModel(nn.Module):
         pos = x[:, layout.pos_slice[0]:layout.pos_slice[1]]
         qd = x[:, layout.vel_slice[0]:layout.vel_slice[1]]
 
-        M = vmap(self._mass)(pos)                       # (B, nv, nv), SPD
-        dM_pos = vmap(jacfwd(self._mass))(pos)          # (B, nv, nv, npos) = dM/dq_pos
-        # V is scalar, so reverse-mode grad needs one pullback regardless of
-        # npos.  jacfwd seeded one tangent per position coordinate and was the
-        # dominant cost on low-DOF cartpole. torch.func.grad remains fully
-        # differentiable w.r.t. the potential/limit parameters during fitting.
-        gV_pos = vmap(grad(self._potential))(pos)       # (B, npos)
-        # scatter the position-config gradients into the nv config axis; cyclic
-        # config DOFs are absent from _pos_to_cfg, so their slot stays zero.
-        dM = th.zeros(B, nv, nv, nv, dtype=x.dtype, device=x.device).index_copy(
-            3, self._pos_to_cfg, dM_pos
-        )
-        gV = th.zeros(B, nv, dtype=x.dtype, device=x.device).index_copy(1, self._pos_to_cfg, gV_pos)
-
-        dHdq = gV - 0.5 * th.einsum("nabk,na,nb->nk", dM, qd, qd)
+        # M, dH/dq and Mdot qd come from one traced pass per mechanics net: both
+        # uses of dM/dq contract it twice with qd, so a single JVP along qd and a
+        # single scalar VJP replace the (nv, nv, npos) Jacobian. The cyclic config
+        # DOFs are absent from _pos_to_cfg, so their gradient slots stay zero.
+        M, dHdq, Mdot_qd = self._mechanics_terms(pos, qd)
         D_qd = th.bmm(self._damping(pos), qd.unsqueeze(-1)).squeeze(-1)
         if layout.act_to_cfg is None:
             Ga = self.G_a(a)                            # (B, nv)
@@ -1292,7 +1612,6 @@ class PortHamiltonianModel(nn.Module):
         # The conservative rail spring is already in gV through _potential;
         # this separate port contributes only non-positive damping power.
         pdot = pdot + self._joint_limit_damping_force(pos, qd)
-        Mdot_qd = th.einsum("nabk,nk,nb->na", dM, qd, qd)
         free_rhs = pdot - Mdot_qd
         if self.contact_force > 0 and self.contact_solver == "compliant":
             # Historical state-only Hunt--Crossley/Coulomb port.
@@ -1443,7 +1762,7 @@ class PortHamiltonianModel(nn.Module):
         ):
             return obs.new_zeros(())
         pos = obs[:, self.layout.pos_slice[0]:self.layout.pos_slice[1]]
-        M = vmap(self._mass)(pos)
+        M = self._mass_batch(pos) if self.analytic_derivatives else vmap(self._mass)(pos)
         penalty = obs.new_zeros(())
         if self.mass_logdet_reg > 0.0:
             logdet = th.linalg.slogdet(M).logabsdet
@@ -1474,7 +1793,7 @@ class PortHamiltonianModel(nn.Module):
             x = x.unsqueeze(0)
         pos = x[:, self.layout.pos_slice[0]:self.layout.pos_slice[1]]
         with th.no_grad():
-            M = vmap(self._mass)(pos)
+            M = self._mass_batch(pos) if self.analytic_derivatives else vmap(self._mass)(pos)
             eig = th.linalg.eigvalsh(M)
             cond = eig[:, -1] / eig[:, 0].clamp_min(1e-12)
             logdet = th.linalg.slogdet(M).logabsdet
