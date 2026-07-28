@@ -20,7 +20,10 @@ try:
         swingup_v43,
         swingup_v61,
     )
-    from environment.tip_curriculum import INITIAL_TIP_HEIGHT_NORM
+    from environment.tip_curriculum import (
+        INITIAL_TIP_ANGLE_OFFSET_RAD,
+        INITIAL_TIP_HEIGHT_NORM,
+    )
 
     HAVE_DMC = True
 except Exception:  # pragma: no cover - exercised only without dm_control
@@ -129,16 +132,30 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     self.assertAlmostEqual(tip[2], expected_height, places=12)
                     terms = task.reward_terms(self.physics)
                     expected_distance = float(np.linalg.norm(target - tip))
-                    # Folding shortens the arm toward the goal, so the level's
-                    # narrow fold is what keeps every draw a recovery.
-                    self.assertGreaterEqual(
+                    self.assertAlmostEqual(
+                        abs(float(self.physics.data.qpos[0])),
+                        INITIAL_TIP_ANGLE_OFFSET_RAD,
+                        places=12,
+                    )
+                    self.assertEqual(float(self.physics.data.qpos[1]), 0.0)
+                    self.assertGreater(expected_distance, 0.0)
+                    self.assertLess(
                         expected_distance, STRICT_CAPTURE_DISTANCE
                     )
                     self.assertAlmostEqual(
                         terms["tip_distance"], expected_distance, places=12
                     )
                     self.assertEqual(terms["tip_speed"], 0.0)
-                    self.assertEqual(terms["strict_capture"], 0.0)
+                    self.assertEqual(terms["strict_capture"], 1.0)
+                    self.physics.data.ctrl[:] = 0.0
+                    self.physics.forward()
+                    acceleration = np.asarray(
+                        self.physics.data.qacc, dtype=np.float64
+                    )
+                    self.assertTrue(np.all(np.isfinite(acceleration)))
+                    self.assertGreater(
+                        float(np.linalg.norm(acceleration)), 1e-6
+                    )
 
     def test_resets_fold_the_elbow_within_the_level_spread(self):
         task = BalanceV43(random=3)
@@ -151,6 +168,10 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     elbows.append(float(self.physics.data.qpos[1]))
                 elbows = np.asarray(elbows)
 
+                if stage == 0:
+                    self.assertEqual(level.elbow_spread, 0.0)
+                    np.testing.assert_array_equal(elbows, np.zeros(64))
+                    continue
                 self.assertGreater(level.elbow_spread, 0.0)
                 self.assertLessEqual(np.abs(elbows).max(), level.elbow_spread)
                 self.assertGreater(np.abs(elbows).max(), 0.5 * level.elbow_spread)
