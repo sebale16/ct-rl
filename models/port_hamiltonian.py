@@ -43,6 +43,12 @@ class FlowIntegrationError(RuntimeError):
     The type deliberately excludes arbitrary exceptions raised by ``drift_fn``.
     Callers may recover from a detected non-finite flow without accidentally
     swallowing OOMs, tensor-shape bugs, or other programming errors.
+
+    One drift-side failure is explicitly in scope and raised as this type: a
+    contact Delassus matrix that is no longer positive-definite. That is a
+    diverged learned mass matrix rather than a programming error, and it is
+    exactly what the post-fit flow-quality check exists to reject, so it must
+    reach that handler instead of terminating the run.
     """
 
 
@@ -1354,7 +1360,23 @@ class PortHamiltonianModel(nn.Module):
         # tiny triangular solves and exact cone projections. Fixed iteration
         # count avoids data-dependent control flow/synchronization in BPTT.
         rho = H.diagonal(dim1=-2, dim2=-1).mean(-1).detach().clamp_min(1e-6)
-        factor = th.linalg.cholesky(H + rho[:, None, None] * eye)
+        # H is PSD plus a positive diagonal by construction, so the factorization
+        # can only fail once the learned mass matrix is ill-conditioned enough
+        # that M^-1 J^T is numerically indefinite (or has gone non-finite) --
+        # i.e. the dynamics fit has diverged. ``cholesky_ex`` reports that in
+        # ``info`` instead of raising, so it is reported as the recoverable flow
+        # failure it is: the post-fit quality check then rejects the fit and
+        # rolls the live model back, rather than the run dying on a bare
+        # LinAlgError. The healthy path is the same LAPACK call as before.
+        factor, info = th.linalg.cholesky_ex(H + rho[:, None, None] * eye)
+        if bool(info.any()):
+            failed = int((info != 0).sum())
+            raise FlowIntegrationError(
+                f"contact Delassus matrix is not positive-definite for {failed}"
+                f" of {B} samples; the learned mass matrix has diverged "
+                f"(max |M| = {float(M.abs().amax()):.3e}, "
+                f"finite = {bool(th.all(th.isfinite(M)))})"
+            )
         primal = th.zeros_like(bias)
         auxiliary = th.zeros_like(bias)
         dual = th.zeros_like(bias)
