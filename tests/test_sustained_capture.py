@@ -4,6 +4,7 @@ from evaluations.sustained_capture import (
     SustainedCaptureSpec,
     SustainedCaptureTracker,
     capture_selection_rank,
+    curriculum_mastery_capture_spec_for,
     strict_capture_spec_for,
 )
 
@@ -78,6 +79,70 @@ class TestSustainedCaptureTracker(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertFalse(result.success)
 
+    def test_terminal_hold_rejects_capture_followed_by_a_fall(self):
+        default = SustainedCaptureTracker(
+            1,
+            SustainedCaptureSpec(duration_seconds=2.0),
+            [{"acrobot_strict_capture": 1.0}],
+        )
+        default.update_slot(0, _capture_info(True, 2.0), done=False)
+        default_result = default.update_slot(
+            0, _capture_info(False, 0.1), done=True
+        )
+        self.assertIsNotNone(default_result)
+        self.assertTrue(default_result.success)
+        self.assertEqual(default_result.max_duration_seconds, 2.0)
+
+        terminal = SustainedCaptureTracker(
+            1,
+            SustainedCaptureSpec(
+                duration_seconds=2.0,
+                require_terminal_hold=True,
+            ),
+            [{"acrobot_strict_capture": 1.0}],
+        )
+        terminal.update_slot(0, _capture_info(True, 2.0), done=False)
+        terminal_result = terminal.update_slot(
+            0, _capture_info(False, 0.1), done=True
+        )
+        self.assertIsNotNone(terminal_result)
+        self.assertFalse(terminal_result.success)
+        self.assertEqual(terminal_result.max_duration_seconds, 2.0)
+
+    def test_terminal_hold_must_be_long_enough_at_episode_end(self):
+        successful = SustainedCaptureTracker(
+            1,
+            SustainedCaptureSpec(
+                duration_seconds=2.0,
+                require_terminal_hold=True,
+            ),
+            [{"acrobot_strict_capture": 0.0}],
+        )
+        successful.update_slot(0, _capture_info(True, 0.1), done=False)
+        result = successful.update_slot(
+            0, _capture_info(True, 2.0), done=True
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+
+        too_late = SustainedCaptureTracker(
+            1,
+            SustainedCaptureSpec(
+                duration_seconds=2.0,
+                require_terminal_hold=True,
+            ),
+            [{"acrobot_strict_capture": 1.0}],
+        )
+        too_late.update_slot(0, _capture_info(True, 2.5), done=False)
+        too_late.update_slot(0, _capture_info(False, 0.1), done=False)
+        too_late.update_slot(0, _capture_info(True, 0.1), done=False)
+        result = too_late.update_slot(
+            0, _capture_info(True, 1.0), done=True
+        )
+        self.assertIsNotNone(result)
+        self.assertFalse(result.success)
+        self.assertEqual(result.max_duration_seconds, 2.5)
+
     def test_selection_rank_prioritizes_rate_then_mean_residence(self):
         no_success_long_residence = capture_selection_rank(
             [False, False], [20.0, 20.0]
@@ -115,6 +180,37 @@ class TestSustainedCaptureTracker(unittest.TestCase):
                         algorithm=algorithm, env_id=env_id
                     )
                 )
+
+    def test_curriculum_mastery_requires_terminal_five_second_hold(self):
+        for env_id in (
+            "acrobot-swingup-v4.3",
+            "acrobot-swingup-v6.1",
+            "cartpole-two_poles-v2",
+        ):
+            with self.subTest(env_id=env_id):
+                checkpoint = strict_capture_spec_for(
+                    algorithm="ct_sac",
+                    env_id=env_id,
+                )
+                mastery = curriculum_mastery_capture_spec_for(
+                    algorithm="ct_sac",
+                    env_id=env_id,
+                )
+                self.assertEqual(checkpoint.duration_seconds, 1.0)
+                self.assertFalse(checkpoint.require_terminal_hold)
+                self.assertEqual(mastery.duration_seconds, 5.0)
+                self.assertTrue(mastery.require_terminal_hold)
+                self.assertEqual(mastery.info_key, checkpoint.info_key)
+
+    def test_non_curriculum_tasks_keep_the_checkpoint_capture_rule(self):
+        for env_id in ("acrobot-swingup-v4.1", "acrobot-swingup-v6"):
+            with self.subTest(env_id=env_id):
+                mastery = curriculum_mastery_capture_spec_for(
+                    algorithm="ct_sac",
+                    env_id=env_id,
+                )
+                self.assertEqual(mastery.duration_seconds, 1.0)
+                self.assertFalse(mastery.require_terminal_hold)
 
 
 if __name__ == "__main__":

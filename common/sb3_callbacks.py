@@ -309,7 +309,11 @@ class SustainedCaptureEvalCallback(EvalCallback):
 
 
 class MasteryCurriculumCallback(BaseCallback):
-    """SB3 adapter advancing a curriculum after strict-capture evaluation."""
+    """Advance and log a curriculum after strict-capture evaluation.
+
+    ``curriculum/probe_stage`` is the evaluated level; ``curriculum/stage`` and
+    optional physical descriptors are the selected level after any transition.
+    """
 
     def __init__(
         self,
@@ -318,11 +322,20 @@ class MasteryCurriculumCallback(BaseCallback):
         success_threshold: float = 0.8,
         consecutive_evals: int = 1,
         verbose: int = 0,
+        get_curriculum_metrics: Optional[
+            Callable[[], Mapping[str, float]]
+        ] = None,
     ) -> None:
         super().__init__(verbose)
         if not callable(set_stage):
             raise TypeError("set_stage must be callable")
+        if (
+            get_curriculum_metrics is not None
+            and not callable(get_curriculum_metrics)
+        ):
+            raise TypeError("get_curriculum_metrics must be callable")
         self.set_stage = set_stage
+        self.get_curriculum_metrics = get_curriculum_metrics
         self.curriculum = MasteryCurriculum(
             num_stages=num_stages,
             success_threshold=success_threshold,
@@ -344,6 +357,61 @@ class MasteryCurriculumCallback(BaseCallback):
         self.curriculum.load_state_dict(state)
         self.set_stage(self.stage)
 
+    def _init_callback(self) -> None:
+        self._record_progress(
+            probe_stage=self.stage,
+            success_rate=None,
+            advanced=False,
+        )
+
+    def _record_progress(
+        self,
+        *,
+        probe_stage: int,
+        success_rate: Optional[float],
+        advanced: bool,
+    ) -> None:
+        if self.get_curriculum_metrics is not None:
+            for name, value in self.get_curriculum_metrics().items():
+                self.logger.record(f"curriculum/{name}", float(value))
+
+        progress = (
+            self.stage / (self.num_stages - 1)
+            if self.num_stages > 1
+            else 1.0
+        )
+        self.logger.record("curriculum/probe_stage", int(probe_stage))
+        self.logger.record("curriculum/stage", self.stage)
+        self.logger.record("curriculum/num_stages", self.num_stages)
+        self.logger.record("curriculum/progress", float(progress))
+        self.logger.record(
+            "curriculum/complete",
+            float(self.curriculum.at_final_stage),
+        )
+        self.logger.record("curriculum/advanced", float(advanced))
+        self.logger.record(
+            "curriculum/probe_success_rate",
+            np.nan if success_rate is None else float(success_rate),
+        )
+        self.logger.record(
+            "curriculum/probe_passed",
+            np.nan
+            if success_rate is None
+            else float(success_rate >= self.curriculum.success_threshold),
+        )
+        self.logger.record(
+            "curriculum/consecutive_passes",
+            self.curriculum.consecutive_passes,
+        )
+        self.logger.record(
+            "curriculum/required_consecutive_evals",
+            self.curriculum.consecutive_evals,
+        )
+        self.logger.record(
+            "curriculum/success_threshold",
+            self.curriculum.success_threshold,
+        )
+
     def _on_step(self) -> bool:
         parent = getattr(self, "parent", None)
         success_rate = getattr(parent, "last_capture_success_rate", None)
@@ -351,6 +419,7 @@ class MasteryCurriculumCallback(BaseCallback):
             return True
 
         rate = float(success_rate)
+        probe_stage = self.stage
         advanced = self.curriculum.observe(rate)
         if advanced:
             self.set_stage(self.stage)
@@ -362,8 +431,11 @@ class MasteryCurriculumCallback(BaseCallback):
                     flush=True,
                 )
 
-        self.logger.record("curriculum/stage", self.stage)
-        self.logger.record("curriculum/probe_success_rate", rate)
+        self._record_progress(
+            probe_stage=probe_stage,
+            success_rate=rate,
+            advanced=advanced,
+        )
         return True
 
 
@@ -376,12 +448,26 @@ class CurriculumFractionCallback(BaseCallback):
     the schedule continuous across training chunks.  ``total_steps <= 0`` pins
     the fraction at 1 (curriculum complete).  Pushes are de-duplicated at
     millesimal resolution so the vectorized method call fires only when the
-    schedule actually advances.
+    schedule actually advances. Applied progress and optional reset-band
+    descriptors are logged under ``curriculum/`` on every callback step.
     """
 
-    def __init__(self, total_steps: int, verbose: int = 0) -> None:
+    def __init__(
+        self,
+        total_steps: int,
+        verbose: int = 0,
+        get_curriculum_metrics: Optional[
+            Callable[[], Mapping[str, float]]
+        ] = None,
+    ) -> None:
         super().__init__(verbose)
         self.total_steps = int(total_steps)
+        if (
+            get_curriculum_metrics is not None
+            and not callable(get_curriculum_metrics)
+        ):
+            raise TypeError("get_curriculum_metrics must be callable")
+        self.get_curriculum_metrics = get_curriculum_metrics
         self._last_pushed: Optional[float] = None
 
     def _fraction(self) -> float:
@@ -394,6 +480,12 @@ class CurriculumFractionCallback(BaseCallback):
         if frac != self._last_pushed:
             self._last_pushed = frac
             self.training_env.env_method("set_curriculum_fraction", frac)
+        if self.get_curriculum_metrics is not None:
+            for name, value in self.get_curriculum_metrics().items():
+                self.logger.record(f"curriculum/{name}", float(value))
+        self.logger.record("curriculum/fraction", frac)
+        self.logger.record("curriculum/progress", frac)
+        self.logger.record("curriculum/complete", float(frac >= 1.0))
 
     def _on_training_start(self) -> None:
         self._apply()

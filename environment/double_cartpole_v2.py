@@ -5,8 +5,8 @@ Both local tasks keep dm_control's stock ``two_poles`` smooth reward unchanged:
 * ``cartpole-two_poles-curriculum`` is the historical fraction-scheduled
   angle-band curriculum.
 * ``cartpole-two_poles-v2`` is the performance-gated tip-height/velocity
-  curriculum.  It begins with a braking task near upright, then lowers the
-  distal tip through zero-velocity starts until reaching exact hanging.
+  curriculum.  It begins near upright at rest, then lowers the distal tip
+  through zero-velocity starts until reaching exact hanging.
 """
 
 from __future__ import annotations
@@ -19,7 +19,11 @@ from dm_control.rl import control
 from dm_control.suite import base as suite_base
 from dm_control.suite import cartpole
 
-from .tip_curriculum import TipHeightVelocityCurriculum
+from .tip_curriculum import (
+    DEFAULT_ELBOW_SPREAD,
+    CurriculumPose,
+    TipHeightVelocityCurriculum,
+)
 
 
 # Slider travel limit of the cart-pole model (``range="-1.8 1.8"``).
@@ -29,8 +33,6 @@ _CART_LIMIT = 1.8
 # extended, the distal tip therefore spans [-1, 3].
 TIP_HEIGHT_BOUNDS = (-1.0, 3.0)
 STABILIZATION_POINT = (0.0, 3.0)
-DEFAULT_BRAKE_TIP_HEIGHT = 2.8
-DEFAULT_BRAKE_TIP_SPEED = 1.0
 DEFAULT_DESCENT_TIP_HEIGHTS = (2.5, 2.0, 1.0, 0.0, -1.0)
 STRICT_CAPTURE_DISTANCE = 0.2
 STRICT_CAPTURE_SPEED = 0.2
@@ -146,15 +148,9 @@ class CartpoleTwoPolesCurriculum(cartpole.Balance):
 class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
     """Stock two-pole reward with a distal-tip mastery curriculum.
 
-    The reset keeps the two links fully extended (relative second hinge zero),
-    leaving only one mirrored chain angle.  For requested distal-tip height
-    ``h`` and incoming Cartesian speed ``v``:
-
-    ``q1 = side * arccos((h - 1) / 2)``, ``q2 = 0``,
-    ``q1_dot = -side * v / 2``, and ``q2_dot = 0``.
-
-    Thus the distal-tip height and speed are exactly ``h`` and ``v``, and the
-    nonzero braking velocity follows the short arc toward the upright target.
+    The reset centers the cart and draws a mirrored, folded chain that carries
+    the distal tip to the current level's height at its requested incoming
+    speed; see :meth:`TipHeightVelocityCurriculum.sample_curriculum_pose`.
     ``get_reward`` is deliberately inherited unchanged from
     :class:`dm_control.suite.cartpole.Balance`.
     """
@@ -164,17 +160,16 @@ class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
         *,
         random=None,
         curriculum: bool = True,
-        brake_tip_height: float = DEFAULT_BRAKE_TIP_HEIGHT,
-        brake_tip_speed: float = DEFAULT_BRAKE_TIP_SPEED,
         descent_tip_heights: Iterable[float] = DEFAULT_DESCENT_TIP_HEIGHTS,
+        elbow_spread: float = DEFAULT_ELBOW_SPREAD,
     ) -> None:
         super().__init__(swing_up=True, sparse=False, random=random)
         self._configure_tip_curriculum(
             curriculum=curriculum,
             tip_height_bounds=TIP_HEIGHT_BOUNDS,
-            brake_tip_height=brake_tip_height,
-            brake_tip_speed=brake_tip_speed,
             descent_tip_heights=descent_tip_heights,
+            elbow_spread=elbow_spread,
+            min_start_distance=STRICT_CAPTURE_DISTANCE,
         )
         if not self.curriculum:
             self.set_curriculum_stage(self.num_curriculum_stages - 1)
@@ -185,48 +180,33 @@ class CartpoleTwoPolesV2(TipHeightVelocityCurriculum, cartpole.Balance):
         self._random = np.random.RandomState(int(seed) % (2**32))
 
     @staticmethod
-    def _set_state_from_tip_level(
-        physics, *, tip_height: float, incoming_tip_speed: float, side: float
-    ) -> None:
-        """Map one distal-tip level to the extended chain coordinates."""
+    def _set_state_from_pose(physics, pose: CurriculumPose) -> None:
+        """Write one sampled pose onto the centered cart and both hinges.
 
-        cosine = float(np.clip((float(tip_height) - 1.0) / 2.0, -1.0, 1.0))
-        theta = float(side) * float(np.arccos(cosine))
-        theta_dot = -float(side) * float(incoming_tip_speed) / 2.0
+        Both poles are one length unit and the cart pivot sits at ``z = 1``, so
+        ``tip_z = 1 + cos(hinge_1) + cos(hinge_1 + hinge_2)`` and the mixin's
+        pose maps directly onto the two hinges.
+        """
 
         physics.named.data.qpos["slider"] = 0.0
-        physics.named.data.qpos[["hinge_1", "hinge_2"]] = (theta, 0.0)
+        physics.named.data.qpos[["hinge_1", "hinge_2"]] = (
+            pose.first_link_angle,
+            pose.elbow_angle,
+        )
         physics.named.data.qvel["slider"] = 0.0
         physics.named.data.qvel[["hinge_1", "hinge_2"]] = (
-            theta_dot,
-            0.0,
+            pose.first_link_rate,
+            pose.elbow_rate,
         )
 
     def initialize_episode(self, physics) -> None:
         if self.curriculum:
-            level = self.curriculum_level
-            # Make the terminal distribution one exact generalized state, not
-            # the equivalent +/-pi representations.
-            side = (
-                1.0
-                if np.isclose(
-                    level.tip_height,
-                    TIP_HEIGHT_BOUNDS[0],
-                    rtol=0.0,
-                    atol=1e-12,
-                )
-                else self._curriculum_side()
-            )
-            self._set_state_from_tip_level(
-                physics,
-                tip_height=level.tip_height,
-                incoming_tip_speed=level.incoming_tip_speed,
-                side=side,
-            )
+            pose = self.sample_curriculum_pose()
         else:
-            physics.named.data.qpos["slider"] = 0.0
-            physics.named.data.qpos[["hinge_1", "hinge_2"]] = (np.pi, 0.0)
-            physics.named.data.qvel[:] = 0.0
+            # The fixed evaluation reset is the exact hanging state, unaffected
+            # by the fold the training resets draw.
+            pose = CurriculumPose(np.pi, 0.0, 0.0, 0.0)
+        self._set_state_from_pose(physics, pose)
         suite_base.Task.initialize_episode(self, physics)
 
     @staticmethod
@@ -318,9 +298,8 @@ def two_poles_v2(
     random=None,
     environment_kwargs: Optional[Dict[str, Any]] = None,
     curriculum: bool = True,
-    brake_tip_height: float = DEFAULT_BRAKE_TIP_HEIGHT,
-    brake_tip_speed: float = DEFAULT_BRAKE_TIP_SPEED,
     descent_tip_heights: Iterable[float] = DEFAULT_DESCENT_TIP_HEIGHTS,
+    elbow_spread: float = DEFAULT_ELBOW_SPREAD,
 ):
     """Construct ``cartpole-two_poles-v2`` with the stock smooth reward."""
 
@@ -330,9 +309,8 @@ def two_poles_v2(
     task = CartpoleTwoPolesV2(
         random=random,
         curriculum=curriculum,
-        brake_tip_height=brake_tip_height,
-        brake_tip_speed=brake_tip_speed,
         descent_tip_heights=descent_tip_heights,
+        elbow_spread=elbow_spread,
     )
     return control.Environment(
         physics,

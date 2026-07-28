@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional, List, Union, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Optional, List, Union, TYPE_CHECKING
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -251,6 +251,8 @@ class CurriculumFractionCallback(BaseCallback):
     continuous across checkpointed training chunks, where a per-environment
     step count would restart from zero.  ``total_steps <= 0`` pins the fraction
     at 1 (curriculum complete), so a completed or disabled schedule is inert.
+    The applied fraction, normalized progress, completion flag, and optional
+    reset-distribution descriptors are logged under ``curriculum/``.
     """
 
     def __init__(
@@ -258,23 +260,44 @@ class CurriculumFractionCallback(BaseCallback):
         set_fraction: Callable[[float], None],
         total_steps: int,
         verbose: int = 0,
+        get_curriculum_metrics: Optional[
+            Callable[[], Mapping[str, float]]
+        ] = None,
     ) -> None:
         super().__init__(verbose=verbose)
         self.set_fraction = set_fraction
         self.total_steps = int(total_steps)
+        if (
+            get_curriculum_metrics is not None
+            and not callable(get_curriculum_metrics)
+        ):
+            raise TypeError("get_curriculum_metrics must be callable")
+        self.get_curriculum_metrics = get_curriculum_metrics
 
     def _fraction(self) -> float:
         if self.total_steps <= 0:
             return 1.0
         return float(min(1.0, max(0.0, self.num_timesteps / self.total_steps)))
 
+    def _apply_and_record(self) -> None:
+        fraction = self._fraction()
+        self.set_fraction(fraction)
+        if self.get_curriculum_metrics is not None:
+            for name, value in self.get_curriculum_metrics().items():
+                self.logger.record(f"curriculum/{name}", float(value))
+        # These controller-owned values take precedence over any optional
+        # environment descriptor with the same name.
+        self.logger.record("curriculum/fraction", fraction)
+        self.logger.record("curriculum/progress", fraction)
+        self.logger.record("curriculum/complete", float(fraction >= 1.0))
+
     def _on_training_start(self) -> None:
         # Apply before the first rollout so the earliest resets already reflect
         # progress (nonzero after a resume).
-        self.set_fraction(self._fraction())
+        self._apply_and_record()
 
     def _on_step(self) -> bool:
-        self.set_fraction(self._fraction())
+        self._apply_and_record()
         return True
 
 
@@ -284,6 +307,9 @@ class MasteryCurriculumCallback(BaseCallback):
     Attach this as :class:`EvalCallback`'s ``callback_after_eval``.  Each event
     consumes the parent's latest strict-capture success rate; a mastered probe
     advances one stage and synchronizes that stage through ``set_stage``.
+    ``probe_stage`` identifies the level that produced the evidence, while
+    ``stage`` and the optional physical descriptors identify the newly selected
+    level after any transition.
     """
 
     def __init__(
@@ -293,11 +319,20 @@ class MasteryCurriculumCallback(BaseCallback):
         success_threshold: float = 0.8,
         consecutive_evals: int = 1,
         verbose: int = 0,
+        get_curriculum_metrics: Optional[
+            Callable[[], Mapping[str, float]]
+        ] = None,
     ) -> None:
         super().__init__(verbose=verbose)
         if not callable(set_stage):
             raise TypeError("set_stage must be callable")
+        if (
+            get_curriculum_metrics is not None
+            and not callable(get_curriculum_metrics)
+        ):
+            raise TypeError("get_curriculum_metrics must be callable")
         self.set_stage = set_stage
+        self.get_curriculum_metrics = get_curriculum_metrics
         self.curriculum = MasteryCurriculum(
             num_stages=num_stages,
             success_threshold=success_threshold,
@@ -319,6 +354,64 @@ class MasteryCurriculumCallback(BaseCallback):
         self.curriculum.load_state_dict(state)
         self.set_stage(self.stage)
 
+    def _init_callback(self) -> None:
+        # Seed every telemetry column before the first regular training dump.
+        # This also provides an initial point in TensorBoard and describes a
+        # restored stage before the next mastery probe runs.
+        self._record_progress(
+            probe_stage=self.stage,
+            success_rate=None,
+            advanced=False,
+        )
+
+    def _record_progress(
+        self,
+        *,
+        probe_stage: int,
+        success_rate: Optional[float],
+        advanced: bool,
+    ) -> None:
+        if self.get_curriculum_metrics is not None:
+            for name, value in self.get_curriculum_metrics().items():
+                self.logger.record(f"curriculum/{name}", float(value))
+
+        progress = (
+            self.stage / (self.num_stages - 1)
+            if self.num_stages > 1
+            else 1.0
+        )
+        self.logger.record("curriculum/probe_stage", int(probe_stage))
+        self.logger.record("curriculum/stage", self.stage)
+        self.logger.record("curriculum/num_stages", self.num_stages)
+        self.logger.record("curriculum/progress", float(progress))
+        self.logger.record(
+            "curriculum/complete",
+            float(self.curriculum.at_final_stage),
+        )
+        self.logger.record("curriculum/advanced", float(advanced))
+        self.logger.record(
+            "curriculum/probe_success_rate",
+            np.nan if success_rate is None else float(success_rate),
+        )
+        self.logger.record(
+            "curriculum/probe_passed",
+            np.nan
+            if success_rate is None
+            else float(success_rate >= self.curriculum.success_threshold),
+        )
+        self.logger.record(
+            "curriculum/consecutive_passes",
+            self.curriculum.consecutive_passes,
+        )
+        self.logger.record(
+            "curriculum/required_consecutive_evals",
+            self.curriculum.consecutive_evals,
+        )
+        self.logger.record(
+            "curriculum/success_threshold",
+            self.curriculum.success_threshold,
+        )
+
     def _on_step(self) -> bool:
         parent = getattr(self, "parent", None)
         success_rate = getattr(parent, "last_capture_success_rate", None)
@@ -327,6 +420,7 @@ class MasteryCurriculumCallback(BaseCallback):
             return True
 
         rate = float(success_rate)
+        probe_stage = self.stage
         advanced = self.curriculum.observe(rate)
         if advanced:
             self.set_stage(self.stage)
@@ -338,8 +432,11 @@ class MasteryCurriculumCallback(BaseCallback):
                     flush=True,
                 )
 
-        self.logger.record("curriculum/stage", self.stage)
-        self.logger.record("curriculum/probe_success_rate", rate)
+        self._record_progress(
+            probe_stage=probe_stage,
+            success_rate=rate,
+            advanced=advanced,
+        )
         return True
 
 

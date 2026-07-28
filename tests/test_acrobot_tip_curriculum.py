@@ -7,19 +7,20 @@ try:
     from dm_control.suite import acrobot as dmc_acrobot
 
     from environment.acrobot_v2 import (
-        ACROBOT_BRAKE_TIP_HEIGHT,
-        ACROBOT_BRAKE_TIP_SPEED,
         ACROBOT_DESCENT_TIP_HEIGHTS,
+        ACROBOT_TIP_HEIGHT_BOUNDS,
         BalanceV4,
         BalanceV6,
         BalanceV43,
         BalanceV61,
+        STRICT_CAPTURE_DISTANCE,
         V41_ENERGY_OVERSHOOT_MARGIN,
         V41_SPEED_BOUNDS,
         V41_SPEED_MARGIN,
         swingup_v43,
         swingup_v61,
     )
+    from environment.tip_curriculum import INITIAL_TIP_HEIGHT_NORM
 
     HAVE_DMC = True
 except Exception:  # pragma: no cover - exercised only without dm_control
@@ -49,55 +50,126 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
         task.initialize_episode(self.physics)
         self.physics.forward()
 
-    def test_default_ladder_is_brake_then_resting_descent(self):
+    def test_default_ladder_is_near_upright_then_resting_descent(self):
         task = BalanceV43(random=0)
         levels = task.curriculum_levels
+        expected_initial_height = (
+            ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            + INITIAL_TIP_HEIGHT_NORM
+            * (
+                ACROBOT_TIP_HEIGHT_BOUNDS[1]
+                - ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            )
+        )
 
         self.assertEqual(len(levels), 1 + len(ACROBOT_DESCENT_TIP_HEIGHTS))
-        self.assertEqual(levels[0].tip_height, ACROBOT_BRAKE_TIP_HEIGHT)
-        self.assertEqual(
-            levels[0].incoming_tip_speed, ACROBOT_BRAKE_TIP_SPEED
-        )
+        self.assertEqual(levels[0].tip_height, expected_initial_height)
+        self.assertEqual(levels[0].incoming_tip_speed, 0.0)
         self.assertEqual(
             tuple(level.tip_height for level in levels[1:]),
             ACROBOT_DESCENT_TIP_HEIGHTS,
         )
-        self.assertTrue(
-            all(level.incoming_tip_speed == 0.0 for level in levels[1:])
-        )
+        self.assertTrue(all(level.incoming_tip_speed == 0.0 for level in levels))
 
-    def test_brake_reset_has_exact_height_speed_and_target_direction(self):
+    def test_diagnostics_track_selected_height_velocity_and_potential_level(self):
         task = BalanceV43(random=0)
-        self._reset_stage(task, 0)
 
-        tip = np.asarray(
-            self.physics.named.data.site_xpos["tip"], dtype=np.float64
-        )
-        target = np.asarray(
-            self.physics.named.data.site_xpos["target"], dtype=np.float64
-        )
-        tip_velocity = task._tip_cartesian_velocity(self.physics)
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                task.set_curriculum_stage(stage)
+                diagnostics = task.curriculum_diagnostics()
+                height_norm = level.tip_height / 4.0
+                self.assertEqual(diagnostics["curriculum_stage"], float(stage))
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_progress"],
+                    stage / (task.num_curriculum_stages - 1),
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_height"],
+                    level.tip_height,
+                )
+                self.assertEqual(
+                    diagnostics["curriculum_start_tip_speed"],
+                    level.incoming_tip_speed,
+                )
+                self.assertAlmostEqual(
+                    diagnostics["curriculum_start_tip_height_norm"],
+                    height_norm,
+                )
+                self.assertAlmostEqual(
+                    diagnostics[
+                        "curriculum_start_potential_energy_norm"
+                    ],
+                    height_norm,
+                )
 
-        self.assertAlmostEqual(tip[2], ACROBOT_BRAKE_TIP_HEIGHT, places=12)
-        self.assertAlmostEqual(
-            np.linalg.norm(tip_velocity), ACROBOT_BRAKE_TIP_SPEED, places=12
+    def test_first_reset_is_near_upright_at_rest(self):
+        expected_height = (
+            ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            + INITIAL_TIP_HEIGHT_NORM
+            * (ACROBOT_TIP_HEIGHT_BOUNDS[1] - ACROBOT_TIP_HEIGHT_BOUNDS[0])
         )
-        self.assertGreater(float(tip_velocity @ (target - tip)), 0.0)
-        self.assertAlmostEqual(float(self.physics.data.qpos[1]), 0.0, places=12)
-        self.assertAlmostEqual(float(self.physics.data.qvel[1]), 0.0, places=12)
+        for task_type in (BalanceV43, BalanceV61):
+            with self.subTest(task_type=task_type.__name__):
+                task = task_type(random=0)
+                for _ in range(64):
+                    self._reset_stage(task, 0)
 
-        side = float(np.sign(self.physics.data.qpos[0]))
-        expected_angle = np.arccos(
-            (ACROBOT_BRAKE_TIP_HEIGHT - 2.0) / 2.0
-        )
-        self.assertAlmostEqual(
-            float(self.physics.data.qpos[0]), side * expected_angle, places=12
-        )
-        self.assertAlmostEqual(
-            float(self.physics.data.qvel[0]),
-            -side * ACROBOT_BRAKE_TIP_SPEED / 2.0,
-            places=12,
-        )
+                    tip = np.asarray(
+                        self.physics.named.data.site_xpos["tip"],
+                        dtype=np.float64,
+                    )
+                    target = np.asarray(
+                        self.physics.named.data.site_xpos["target"],
+                        dtype=np.float64,
+                    )
+                    np.testing.assert_array_equal(
+                        np.asarray(self.physics.data.qvel), np.zeros(2)
+                    )
+                    self.assertAlmostEqual(tip[2], expected_height, places=12)
+                    terms = task.reward_terms(self.physics)
+                    expected_distance = float(np.linalg.norm(target - tip))
+                    # Folding shortens the arm toward the goal, so the level's
+                    # narrow fold is what keeps every draw a recovery.
+                    self.assertGreaterEqual(
+                        expected_distance, STRICT_CAPTURE_DISTANCE
+                    )
+                    self.assertAlmostEqual(
+                        terms["tip_distance"], expected_distance, places=12
+                    )
+                    self.assertEqual(terms["tip_speed"], 0.0)
+                    self.assertEqual(terms["strict_capture"], 0.0)
+
+    def test_resets_fold_the_elbow_within_the_level_spread(self):
+        task = BalanceV43(random=3)
+
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                elbows = []
+                for _ in range(64):
+                    self._reset_stage(task, stage)
+                    elbows.append(float(self.physics.data.qpos[1]))
+                elbows = np.asarray(elbows)
+
+                self.assertGreater(level.elbow_spread, 0.0)
+                self.assertLessEqual(np.abs(elbows).max(), level.elbow_spread)
+                self.assertGreater(np.abs(elbows).max(), 0.5 * level.elbow_spread)
+                self.assertTrue((elbows > 0.0).any() and (elbows < 0.0).any())
+
+    def test_unfolded_curriculum_keeps_the_extended_chain(self):
+        task = BalanceV43(random=3, elbow_spread=0.0)
+
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                self.assertEqual(level.elbow_spread, 0.0)
+                for _ in range(8):
+                    self._reset_stage(task, stage)
+                    self.assertEqual(float(self.physics.data.qpos[1]), 0.0)
+                    self.assertAlmostEqual(
+                        abs(float(self.physics.data.qpos[0])),
+                        float(np.arccos((level.tip_height - 2.0) / 2.0)),
+                        places=12,
+                    )
 
     def test_descent_resets_have_exact_height_and_zero_velocity(self):
         task = BalanceV43(random=7)
@@ -110,7 +182,14 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                 actual_height = float(
                     self.physics.named.data.site_xpos["tip", "z"]
                 )
-                self.assertAlmostEqual(actual_height, height, places=12)
+                hanging = np.isclose(height, ACROBOT_TIP_HEIGHT_BOUNDS[0])
+                if hanging:
+                    # A folded chain cannot reach the lowest tip: the closest
+                    # pose in that fold splays symmetrically about vertical.
+                    self.assertGreaterEqual(actual_height, height)
+                    self.assertLess(actual_height - height, 0.07)
+                else:
+                    self.assertAlmostEqual(actual_height, height, places=12)
                 np.testing.assert_array_equal(
                     np.asarray(self.physics.data.qvel), np.zeros(2)
                 )
@@ -118,13 +197,18 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     task._tip_cartesian_speed(self.physics), 0.0, places=12
                 )
 
+        self.assertTrue(task.curriculum_complete)
+
+    def test_unfolded_final_stage_is_the_exact_hanging_state(self):
+        task = BalanceV43(random=7, elbow_spread=0.0)
+        self._reset_stage(task, task.num_curriculum_stages - 1)
+
         np.testing.assert_allclose(
             np.asarray(self.physics.data.qpos),
             [np.pi, 0.0],
             rtol=0.0,
             atol=1e-12,
         )
-        self.assertTrue(task.curriculum_complete)
 
     def test_stage_setter_clips_and_rejects_non_integer_values(self):
         task = BalanceV43(random=0)

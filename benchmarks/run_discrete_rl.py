@@ -41,7 +41,10 @@ from common.sb3_callbacks import (
     SustainedCaptureEvalCallback,
 )
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
-from evaluations.sustained_capture import strict_capture_spec_for
+from evaluations.sustained_capture import (
+    curriculum_mastery_capture_spec_for,
+    strict_capture_spec_for,
+)
 from environment.tip_curriculum import (
     FRACTION_CURRICULUM_ENV_IDS,
     PERFORMANCE_CURRICULUM_ENV_IDS,
@@ -187,6 +190,14 @@ def run_sb3_benchmark(
     is_fraction_curriculum = env_id in FRACTION_CURRICULUM_ENV_IDS
     is_performance_curriculum = env_id in PERFORMANCE_CURRICULUM_ENV_IDS
     is_curriculum_env = is_fraction_curriculum or is_performance_curriculum
+    curriculum_capture_spec = (
+        curriculum_mastery_capture_spec_for(
+            algorithm=algo,
+            env_id=env_id,
+        )
+        if is_performance_curriculum
+        else None
+    )
     curriculum_probe_meta = None
     if is_curriculum_env:
         if is_performance_curriculum:
@@ -356,7 +367,7 @@ def run_sb3_benchmark(
 
     callbacks = [checkpoint_callback, eval_callback]
     if curriculum_probe_env is not None:
-        if capture_spec is None:
+        if curriculum_capture_spec is None:
             raise ValueError(
                 f"{env_id} requires a sustained-capture spec for curriculum "
                 "mastery"
@@ -375,16 +386,21 @@ def run_sb3_benchmark(
             train_env.env_method("set_curriculum_stage", stage)
             curriculum_probe_env.env_method("set_curriculum_stage", stage)
 
+        def _get_mastery_curriculum_metrics() -> dict[str, float]:
+            metrics = train_env.env_method("curriculum_log_metrics")
+            return dict(metrics[0])
+
         mastery_callback = MasteryCurriculumCallback(
             set_stage=_set_mastery_curriculum_stage,
             num_stages=int(next(iter(stage_counts))),
             success_threshold=curriculum_success_threshold,
             consecutive_evals=curriculum_consecutive_evals,
+            get_curriculum_metrics=_get_mastery_curriculum_metrics,
             verbose=1,
         )
         curriculum_probe_callback = SustainedCaptureEvalCallback(
             curriculum_probe_env,
-            capture_spec=capture_spec,
+            capture_spec=curriculum_capture_spec,
             reset_seed=seed + 3000,
             n_eval_episodes=n_eval_episodes,
             best_model_save_path=None,
@@ -396,10 +412,17 @@ def run_sb3_benchmark(
             callback_after_eval=mastery_callback,
         )
         callbacks.append(curriculum_probe_callback)
+        terminal_requirement = (
+            " through episode end"
+            if curriculum_capture_spec.require_terminal_hold
+            else ""
+        )
         print(
             "[curriculum] tip-height ladder advances only after "
             f"{n_eval_episodes} deterministic probe episode(s) reach "
-            f"{curriculum_success_threshold:.0%} sustained stabilization "
+            f"{curriculum_success_threshold:.0%} stabilization held for "
+            f">={curriculum_capture_spec.duration_seconds:g} physical "
+            f"seconds{terminal_requirement} "
             f"for {curriculum_consecutive_evals} consecutive evaluation(s); "
             "checkpoint selection stays on the fixed hanging task.",
             flush=True,
@@ -425,22 +448,32 @@ def run_sb3_benchmark(
         )
         callbacks.append(hanging_eval_callback)
 
-    # Timestep-based logging callback
-    log_callback = LogEveryNTimesteps(n_steps=max(step_log_interval // n_envs, 1))
-    # progress_bar_callback = ProgressBarCallback()
-
-    # Combine callbacks
-    callbacks.append(log_callback)
-
     # Drive the reset curriculum from global training progress (eval envs were
-    # built with the curriculum off and are left untouched).
+    # built with the curriculum off and are left untouched). Keep this before
+    # every dump-capable callback so the row at timestep t contains fraction(t).
     if is_fraction_curriculum:
-        callbacks.append(CurriculumFractionCallback(total_steps=curr_total))
+        def _get_fraction_curriculum_metrics() -> dict[str, float]:
+            metrics = train_env.env_method("curriculum_log_metrics")
+            return dict(metrics[0])
+
+        callbacks.insert(
+            0,
+            CurriculumFractionCallback(
+                total_steps=curr_total,
+                get_curriculum_metrics=_get_fraction_curriculum_metrics,
+            ),
+        )
         print(
             f"[curriculum] reset band widens to full over {curr_total} steps "
             f"({n_envs} train env(s)); eval starts fixed.",
             flush=True,
         )
+
+    # Timestep-based logging callback. Curriculum telemetry is placed before it
+    # so scheduled dumps cannot lag one step behind the selected reset level.
+    log_callback = LogEveryNTimesteps(n_steps=max(step_log_interval // n_envs, 1))
+    # progress_bar_callback = ProgressBarCallback()
+    callbacks.append(log_callback)
 
     callback = CallbackList(callbacks)
 

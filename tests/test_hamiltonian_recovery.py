@@ -74,6 +74,46 @@ class TestGroundTruthExtraction(unittest.TestCase):
         t0 = ground_truth(env, obs0)
         self.assertLess(np.abs(t0["coriolis"]).max(), 1e-9)
 
+    def test_constraint_force_is_action_matched_and_order_independent(self):
+        th.manual_seed(4); np.random.seed(4)
+        env = _cheetah(seed=4)
+        O, A, *_ = collect(env, 100, seed=4)
+        sampled = ground_truth(env, O, A)
+        i = int(np.linalg.norm(sampled["qfrc_contact"], axis=1).argmax())
+        obs = np.repeat(O[i:i + 1], 3, axis=0)
+        actions = np.stack(
+            [np.zeros(6), np.ones(6), -np.ones(6)]
+        ).astype(np.float32)
+
+        truth = ground_truth(env, obs, actions)
+        np.testing.assert_allclose(
+            truth["contact_action_response"],
+            truth["qfrc_contact"] - truth["qfrc_contact_zero_action"],
+            rtol=0.0,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            truth["qfrc_contact"][0],
+            truth["qfrc_contact_zero_action"][0],
+            rtol=1e-8,
+            atol=1e-8,
+        )
+        self.assertGreater(
+            np.linalg.norm(truth["contact_action_response"][1:]), 1e-3
+        )
+
+        order = np.array([2, 0, 1])
+        reordered = ground_truth(env, obs[order], actions[order])
+        np.testing.assert_allclose(
+            reordered["qfrc_contact"], truth["qfrc_contact"][order],
+            rtol=1e-8, atol=1e-8,
+        )
+        np.testing.assert_allclose(
+            reordered["qfrc_contact_zero_action"],
+            truth["qfrc_contact_zero_action"][order],
+            rtol=1e-8, atol=1e-8,
+        )
+
 
 class TestConventionValidation(unittest.TestCase):
     """The model-side Coriolis/gradient formulas and the qfrc-based extraction
@@ -280,22 +320,24 @@ class TestRecoveryEndToEnd(unittest.TestCase):
 
     def test_contact_port_combined_potential(self):
         """With the port active the report gains the combined-conservative-force
-        metrics; on a fresh model the gaps are positive (+0.5 init), so the port
-        is silent, the combined gradient equals grad V, and both correlations
-        coincide."""
+        metrics. This explicitly selects the historical compliant formulation;
+        a quiet positive-gap initialization keeps its spring contribution small
+        until fitting brings a contact into range."""
         th.manual_seed(0); np.random.seed(0)
         env = _cheetah()
         O, A, NO, DT, DN = collect(env, 300, seed=0)
         m = fit_model(env, O, A, NO, DT, DN, steps=5, horizon=1,
-                      contact_force=2, hidden=(32, 32), log_every=0)
+                      contact_force=2, contact_solver="compliant",
+                      hidden=(32, 32), log_every=0)
         obs = O[-50:]
-        learned = learned_terms(m, obs)
+        act = A[-50:]
+        learned = learned_terms(m, obs, act)
         for key in ("g_pot_combined", "contact_gap", "contact_in_frac",
                     "contact_in_frac_per", "contact_spring_ratio",
                     "contact_kcm", "contact_F", "contact_power"):
             self.assertIn(key, learned)
-        rep = recovery_report(ground_truth(env, obs), learned,
-                              actions=A[-50:], dt=DT[-50:], dones=DN[-50:])
+        rep = recovery_report(ground_truth(env, obs, act), learned,
+                              actions=act, dt=DT[-50:], dones=DN[-50:])
         self.assertIn("gradV_combined_corr", rep)
         # port parameters: k/c at gauge scale, mu raw; all positive (softplus),
         # one entry per contact point; per-contact activity + gap stats present
@@ -306,7 +348,7 @@ class TestRecoveryEndToEnd(unittest.TestCase):
             self.assertTrue(all(v > 0 for v in rep[key]), key)
         self.assertTrue(np.isfinite(rep["contact_gap_mean"]))
         self.assertGreaterEqual(rep["contact_gap_min"], -1e6)
-        # 5 fit steps leave the +0.5 gap-bias intact: silent port, tiny ratio,
+        # If fitting leaves every gap comfortably positive, the port is silent
         # and the combined field is just grad V.
         if float(learned["contact_gap"].min()) > 0.1:
             self.assertLess(rep["contact_spring_ratio"], 1e-3)
@@ -316,6 +358,82 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         m0 = fit_model(env, O, A, NO, DT, DN, steps=1, horizon=1,
                        hidden=(32, 32), log_every=0)
         self.assertNotIn("g_pot_combined", learned_terms(m0, obs))
+
+    def test_constraint_contact_report_and_discrete_energy_ledger(self):
+        th.manual_seed(2); np.random.seed(2)
+        env = _cheetah(seed=2)
+        O, A, NO, DT, DN = collect(env, 100, seed=2)
+        obs, act = O[-24:], A[-24:]
+        m = PortHamiltonianModel(
+            17, 6, mode="structured", structured_hidden=(32, 32),
+            contact_force=2, contact_solver="constraint", contact_dt=0.002,
+            contact_iterations=12, contact_regularization=0.01,
+        )
+
+        learned = learned_terms(m, obs, act)
+        self.assertEqual(learned["contact_solver"], "constraint")
+        self.assertNotIn("g_pot_combined", learned)
+        for key in (
+            "contact_F", "contact_impulse_F", "contact_action_response",
+            "contact_solver_residual", "contact_cone_violation",
+            "contact_discrete_work", "contact_stabilization_work",
+        ):
+            self.assertIn(key, learned)
+        zero_action = learned_terms(m, obs, np.zeros_like(act))
+        np.testing.assert_allclose(
+            learned["contact_action_response"],
+            learned["contact_F"] - zero_action["contact_F"],
+            rtol=1e-5,
+            atol=1e-7,
+        )
+        self.assertGreater(
+            np.linalg.norm(learned["contact_action_response"]), 1e-9
+        )
+        qd = learned["qd"]
+        np.testing.assert_allclose(
+            learned["contact_power"],
+            (qd * learned["contact_F"]).sum(-1),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        truth = ground_truth(env, obs, act)
+        rep = recovery_report(
+            truth, learned, actions=act, dt=DT[-24:], dones=DN[-24:]
+        )
+        _assert_finite(self, rep)
+        self.assertEqual(rep["contact_formulation"], "constraint")
+        for key in (
+            "contact_force_nrmse", "contact_solver_impulse_nrmse",
+            "contact_action_response_nrmse", "contact_solver_residual_p95",
+            "contact_cone_violation_max", "contact_force_assembly_nrmse",
+            "contact_discrete_work_mean", "contact_stabilization_work_mean",
+        ):
+            self.assertIn(key, rep)
+        self.assertLess(rep["contact_force_assembly_nrmse"], 1e-5)
+
+        energy = energy_balance_report(m, obs, act)
+        _assert_finite(self, energy)
+        self.assertEqual(energy["energy_balance_mode"], "constraint_discrete")
+        self.assertFalse(energy["passivity_assessed"])
+        self.assertIsNone(energy["passivity_violation_frac"])
+        self.assertIn("contact_discrete_work_mean", energy)
+        self.assertIn("contact_stabilization_work_mean", energy)
+        self.assertLess(energy["residual_nrmse"], 1e-2)
+
+    def test_fit_model_threads_constraint_solver_controls(self):
+        env = _cheetah(seed=3)
+        O, A, NO, DT, DN = collect(env, 8, seed=3)
+        m = fit_model(
+            env, O, A, NO, DT, DN, steps=0, horizon=1,
+            contact_force=2, contact_solver="constraint", contact_dt=0.003,
+            contact_iterations=5, contact_regularization=0.02,
+            hidden=(16,), log_every=0,
+        )
+        self.assertEqual(m.contact_solver, "constraint")
+        self.assertEqual(m.contact_dt, 0.003)
+        self.assertEqual(m.contact_iterations, 5)
+        self.assertEqual(m.contact_regularization, 0.02)
 
 
 class TestRawStateRecovery(unittest.TestCase):

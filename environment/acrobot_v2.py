@@ -30,8 +30,8 @@ isolates the reset from the reward exactly as v4.1/v4.2 do:
 ``swingup-v6`` keeps the v4.2 reverse-curriculum reset, and
 ``swingup-v6-uniform`` replaces it with the fixed uniform-random draw.
 ``swingup-v4.3`` and ``swingup-v6.1`` are reward-preserving branches with a
-performance-gated tip-height/velocity curriculum: braking first, then
-zero-velocity starts lowered to exact hanging.
+performance-gated tip-height/velocity curriculum: near-upright at rest first,
+then lower rest starts down to exact hanging.
 """
 
 from __future__ import annotations
@@ -46,7 +46,11 @@ from dm_control.suite import acrobot
 from dm_control.suite import base as suite_base
 from dm_control.utils import rewards
 
-from .tip_curriculum import TipHeightVelocityCurriculum
+from .tip_curriculum import (
+    DEFAULT_ELBOW_SPREAD,
+    CurriculumPose,
+    TipHeightVelocityCurriculum,
+)
 
 
 STRICT_CAPTURE_DISTANCE = 0.2
@@ -1145,8 +1149,6 @@ def swingup_v6_uniform(
 # tip speed.  Keeping the reward classes as the second MRO parent makes the
 # reward computation byte-for-byte the established v4.1/v6 implementation.
 ACROBOT_TIP_HEIGHT_BOUNDS = (0.0, 4.0)
-ACROBOT_BRAKE_TIP_HEIGHT = 3.8
-ACROBOT_BRAKE_TIP_SPEED = 1.0
 ACROBOT_DESCENT_TIP_HEIGHTS = (3.5, 3.0, 2.0, 1.0, 0.0)
 
 
@@ -1159,59 +1161,41 @@ class _AcrobotTipHeightVelocityCurriculum(TipHeightVelocityCurriculum):
         self,
         *,
         curriculum: bool,
-        brake_tip_height: float,
-        brake_tip_speed: float,
         descent_tip_heights: tuple[float, ...],
+        elbow_spread: float = DEFAULT_ELBOW_SPREAD,
     ) -> None:
         self._configure_tip_curriculum(
             curriculum=curriculum,
             tip_height_bounds=ACROBOT_TIP_HEIGHT_BOUNDS,
-            brake_tip_height=brake_tip_height,
-            brake_tip_speed=brake_tip_speed,
             descent_tip_heights=descent_tip_heights,
+            elbow_spread=elbow_spread,
+            min_start_distance=STRICT_CAPTURE_DISTANCE,
         )
 
     def _initialize_acrobot_tip_episode(self, physics) -> None:
-        """Reset to the current extended-link height/speed pair.
+        """Reset to one sampled pose at the current height/speed level.
 
-        With the elbow extended, ``tip_z = 2 + 2 cos(q1)``.  Mirroring ``q1``
-        and its velocity preserves the task symmetry.  The shoulder velocity
-        has half the requested Cartesian tip speed because the extended arm is
-        two length units long.
+        Both links are one length unit and the shoulder sits at ``z = 2``, so
+        ``tip_z = 2 + cos(q1) + cos(q1 + q2)`` and the mixin's pose maps
+        directly onto the two hinges.
         """
 
         if self.curriculum:
-            level = self.curriculum_level
-            tip_height = float(level.tip_height)
-            tip_speed = float(level.incoming_tip_speed)
-            side = self._curriculum_side()
+            pose = self.sample_curriculum_pose()
         else:
             # Fixed evaluation is the exact canonical hanging state, regardless
-            # of the angle/velocity noise accepted by the historical bases.
-            tip_height = ACROBOT_TIP_HEIGHT_BOUNDS[0]
-            tip_speed = 0.0
-            side = 1.0
-
-        shoulder = float(
-            np.arccos(np.clip((tip_height - 2.0) / 2.0, -1.0, 1.0))
-        )
-        if np.isclose(
-            tip_height,
-            ACROBOT_TIP_HEIGHT_BOUNDS[0],
-            rtol=0.0,
-            atol=1e-12,
-        ):
-            # +pi is the repository's canonical representation of hanging.
-            side = 1.0
+            # of the angle/velocity noise accepted by the historical bases and
+            # of the fold the training resets draw.
+            pose = CurriculumPose(np.pi, 0.0, 0.0, 0.0)
 
         physics.named.data.qpos[["shoulder", "elbow"]] = [
-            side * shoulder,
-            0.0,
+            pose.first_link_angle,
+            pose.elbow_angle,
         ]
         physics.data.qvel[:] = 0.0
         physics.named.data.qvel[["shoulder", "elbow"]] = [
-            -side * tip_speed / 2.0,
-            0.0,
+            pose.first_link_rate,
+            pose.elbow_rate,
         ]
         suite_base.Task.initialize_episode(self, physics)
 
@@ -1280,11 +1264,10 @@ class BalanceV43(_AcrobotTipHeightVelocityCurriculum, BalanceV4):
         velocity_noise: float = 0.01,
         hold_weight: float = 0.8,
         curriculum: bool = True,
-        brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
-        brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
         descent_tip_heights: tuple[
             float, ...
         ] = ACROBOT_DESCENT_TIP_HEIGHTS,
+        elbow_spread: float = DEFAULT_ELBOW_SPREAD,
     ) -> None:
         super().__init__(
             random=random,
@@ -1299,9 +1282,8 @@ class BalanceV43(_AcrobotTipHeightVelocityCurriculum, BalanceV4):
         )
         self._configure_acrobot_tip_curriculum(
             curriculum=curriculum,
-            brake_tip_height=brake_tip_height,
-            brake_tip_speed=brake_tip_speed,
             descent_tip_heights=descent_tip_heights,
+            elbow_spread=elbow_spread,
         )
 
 
@@ -1314,9 +1296,8 @@ def swingup_v43(
     velocity_noise: float = 0.01,
     hold_weight: float = 0.8,
     curriculum: bool = True,
-    brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
-    brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
     descent_tip_heights: tuple[float, ...] = ACROBOT_DESCENT_TIP_HEIGHTS,
+    elbow_spread: float = DEFAULT_ELBOW_SPREAD,
 ):
     """Construct ``acrobot-swingup-v4.3``."""
 
@@ -1327,9 +1308,8 @@ def swingup_v43(
         velocity_noise=velocity_noise,
         hold_weight=hold_weight,
         curriculum=curriculum,
-        brake_tip_height=brake_tip_height,
-        brake_tip_speed=brake_tip_speed,
         descent_tip_heights=descent_tip_heights,
+        elbow_spread=elbow_spread,
     )
     return control.Environment(
         physics,
@@ -1353,11 +1333,10 @@ class BalanceV61(_AcrobotTipHeightVelocityCurriculum, BalanceV6):
         cost_scale: float = V6_COST_SCALE,
         reward_offset: float = 0.0,
         curriculum: bool = True,
-        brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
-        brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
         descent_tip_heights: tuple[
             float, ...
         ] = ACROBOT_DESCENT_TIP_HEIGHTS,
+        elbow_spread: float = DEFAULT_ELBOW_SPREAD,
     ) -> None:
         super().__init__(
             random=random,
@@ -1372,9 +1351,8 @@ class BalanceV61(_AcrobotTipHeightVelocityCurriculum, BalanceV6):
         )
         self._configure_acrobot_tip_curriculum(
             curriculum=curriculum,
-            brake_tip_height=brake_tip_height,
-            brake_tip_speed=brake_tip_speed,
             descent_tip_heights=descent_tip_heights,
+            elbow_spread=elbow_spread,
         )
 
 
@@ -1390,9 +1368,8 @@ def swingup_v61(
     cost_scale: float = V6_COST_SCALE,
     reward_offset: float = 0.0,
     curriculum: bool = True,
-    brake_tip_height: float = ACROBOT_BRAKE_TIP_HEIGHT,
-    brake_tip_speed: float = ACROBOT_BRAKE_TIP_SPEED,
     descent_tip_heights: tuple[float, ...] = ACROBOT_DESCENT_TIP_HEIGHTS,
+    elbow_spread: float = DEFAULT_ELBOW_SPREAD,
 ):
     """Construct ``acrobot-swingup-v6.1``."""
 
@@ -1406,9 +1383,8 @@ def swingup_v61(
         cost_scale=cost_scale,
         reward_offset=reward_offset,
         curriculum=curriculum,
-        brake_tip_height=brake_tip_height,
-        brake_tip_speed=brake_tip_speed,
         descent_tip_heights=descent_tip_heights,
+        elbow_spread=elbow_spread,
     )
     return control.Environment(
         physics,

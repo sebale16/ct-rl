@@ -15,7 +15,8 @@ $-\cos\theta_1 - \cos(\theta_1{+}\theta_2) > 1$ is tip $z > 3$.
 **Reset.** Episodes start near the fully hanging pose (shoulder $= \pi$, elbow
 $= 0$) with small angle and velocity noise. From v4.1 the training reset moves
 off hanging — uniform random angles, then in v4.2 a curriculum that widens over
-training — while evaluation always fixes the start at either hanging or uniform.
+training, and in v4.3/v6.1 a mastery-gated tip-height ladder — while evaluation
+always fixes the start at either hanging or uniform.
 
 **Geometric primitives**, recomputed each step:
 
@@ -25,8 +26,9 @@ training — while evaluation always fixes the start at either hanging or unifor
 - $\text{extension} = \operatorname{clip}((1 + \cos\theta_\text{elbow})/2,\ 0,\ 1)$, $= 1$ when the elbow is straight.
 - $\operatorname{tol}(x,\ (a,b),\ \text{margin}=m)$ is $1$ inside $[a, b]$, decaying on a Gaussian sigmoid to $0.1$ at distance $m$ outside.
 
-Every version returns a per-step reward in $[0, 1]$; the return is the
-discounted sum. Episodes are 10 s through v4, 20 s for v4.1/v4.2, 30 s for v5.
+Versions through v5 return a per-step reward in $[0, 1]$; the v6 family returns
+a cost in $(-\infty, 0]$. The return is the discounted sum. Episodes are 10 s
+through v4, 20 s for v4.1/v4.2/v4.3 and the v6 family, 30 s for v5.
 
 ---
 
@@ -165,6 +167,37 @@ coincides with v4.1's uniform draw, so the second half of training runs on the
 full task distribution with the catch already in place. Evaluation fixes the
 start as before. Outcome: queued.
 
+## v4.3 — mastery-gated tip reset
+
+The per-step reward is v4.1's exactly. Only the reset changes, and it is
+specified by two physical quantities: world-frame tip height and incoming
+Cartesian tip speed. The first level is a small near-upright displacement at
+rest. Every later level also starts at zero velocity and lowers the tip through
+a discrete ladder,
+$(\text{height}, \text{speed}) = (3.98, 0), (3.5, 0), (3.0, 0), (2.0, 0),
+(1.0, 0), (0.0, 0)$, ending at hanging at rest, which then remains the
+training distribution. Left and right approaches are sampled with equal
+probability, and the elbow is folded by a relative angle drawn uniformly from
+$\pm 30°$ — narrowed to $\pm 11.5°$ at the near-upright level, where a fold
+shortens the arm enough to place the tip inside the capture radius — so each
+height is presented through a family of shapes rather than one extended arm.
+
+Advancement is gated on demonstrated performance and carries no timestep
+schedule. A separate deterministic probe evaluates the current level at the
+normal evaluation frequency; an episode passes when the tip stays within
+$0.2$ m and below $0.2$ m/s continuously for five physical seconds and is
+still captured at episode end. A policy that establishes a hold and later
+falls does not pass. An 80 % pass rate advances exactly one level. Checkpoint
+selection stays on the fixed hanging-at-rest task throughout, so best-model
+scores remain comparable while the probe moves. See
+[`tip_height_curriculum.md`](tip_height_curriculum.md) for the geometry and
+configuration.
+
+This addresses the v4.2 outcome directly. v4.2 widens the band on training
+progress alone, so the start energy can fall faster than the capture value
+propagates outward; here each widening is tied to stabilization already
+demonstrated from the current height. Outcome: queued.
+
 ## v5 — height occupancy (unshaped control arm)
 
 $$\text{reward} = \mathbb{1}[\text{tip } z > 3]$$
@@ -176,17 +209,66 @@ This isolates whether v4's shaping is necessary. Outcome: learnable from uniform
 starts, height occupancy $\le 0.12$ held-out — partial balance, no sustained
 capture, so the shaped velocity-gated hold remains the stronger balance signal.
 
-## v4.3 and v6.1 — mastery-gated tip-state branches
+## v6 — quadratic state-and-command cost
 
-These IDs preserve the v4.1 and v6 rewards respectively and replace only the
-reset curriculum. The first reset starts near the target with Cartesian tip
-velocity directed toward it, explicitly teaching braking. Subsequent starts
-have zero velocity and lower the tip through a discrete height ladder to exact
-hanging at rest. A level changes only after deterministic evaluation shows
-that the tip was stabilized continuously for one physical second from the
-current height; no global-step schedule is involved. See
-[`tip_height_curriculum.md`](tip_height_curriculum.md) for the geometry,
-threshold, and configuration.
+$$s = [\theta_1,\ \theta_2,\ \dot\theta_1,\ \dot\theta_2], \qquad \theta_i \text{ wrapped into } (-\pi, \pi]$$
+$$\text{reward} = -\alpha\,\big[\,s^{\top} Q\,s + R\,a^2\,\big], \qquad Q = \operatorname{diag}(50, 50, 4, 2),\quad R = 1,\quad \alpha = 0.001$$
+
+The reward of Choe et al. (2024), eq. 16, for the underactuated double
+pendulum, with the goal $g = 0$ at the upright rest pose. Two deviations are
+forced by this mechanism: angle errors are wrapped before squaring, since both
+resets sample across the branch cut; and $R$ multiplies the normalized command
+$a \in [-1, 1]$, so it carries the paper's $R\,\tau_\text{max}^2$.
+
+The reward is a cost — $\le 0$, zero only at the upright rest pose with zero
+command, never clipped. Nothing terminates, so the task is the continuing MDP
+that the paper's average-reward criterion assumes. Every configuration is
+separated from the goal by a strictly monotone position cost, which is the
+property v4.1 lacks at hanging: there its ramp sits at the `value_at_margin`
+floor and pays $0.010$/step for doing nothing, and the v4.2 model-free seeds
+converged onto exactly that floor.
+
+Per-step audit on the real model:
+
+| state | reward | angle | velocity | action |
+|---|---|---|---|---|
+| upright rest (goal) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| upright rest, full command | $-0.0010$ | 0.0000 | 0.0000 | 0.0010 |
+| hanging rest | $-0.4935$ | 0.4935 | 0.0000 | 0.0000 |
+| folded above the pivot ($\theta_2 = \pi$) | $-0.4935$ | 0.4935 | 0.0000 | 0.0000 |
+| upright, $\dot q = (5, 10)$ | $-0.3000$ | 0.0000 | 0.3000 | 0.0000 |
+| hard pump mid-swing ($\theta_1 = \pi/2$), $\dot q = (16, 58)$ | $-7.8754$ | 0.1234 | 7.7520 | 0.0000 |
+
+Two env ids share this reward and differ only in the reset:
+`acrobot-swingup-v6` uses the v4.2 reverse curriculum, and
+`acrobot-swingup-v6-uniform` draws start angles uniformly, which puts about one
+start in five above the Gym height. Both run 20 s episodes.
+
+Checkpoint selection uses the strict capture event — tip within $0.2$ and speed
+below $0.2$ held for one continuous second — because on a cost reward the
+highest-return policy is the one that swings least.
+
+Four per-step terms are logged from the behavior policy's own rollouts.
+`energy_norm` $= (E - E_\text{hang})/\text{span}$ and `kinetic_norm` report
+whether the arm moves at all; `velocity_cost_per_joule` and `coordination_loss`
+report whether that motion sits in the cheap generalized mode, the latter
+normalized by the generalized eigenvalues of the velocity cost against $M(q)$ so
+that $0$ is the cheapest coordination available at the current pose and $1$ the
+dearest. Both ratios are NaN at rest.
+
+The cost geometry behind these weights — the mass-matrix modes, the barrier out
+of hanging, and the entropy arms — is in
+[`acrobot_reward_v4.md`](acrobot_reward_v4.md).
+
+Outcome: queued.
+
+## v6.1 — mastery-gated tip reset (v6 reward)
+
+The per-step reward is v6's quadratic cost exactly, with v4.3's reset ladder and
+mastery gate in place of the band schedule. Together with v4.3 this closes a
+$2 \times 2$ over reward (v4.1 ramp-and-hold, v6 quadratic cost) and reset (v4.2
+band schedule, gated tip ladder), so each contribution is readable on its own.
+Outcome: queued.
 
 ---
 
@@ -200,6 +282,7 @@ threshold, and configuration.
 | v4 | $0.2\,\text{ramp} + 0.8\,\text{hold}$ | swing-up found (tip 4.0, 48 % over height), fast swing-through |
 | v4.1 | v4 with overshoot margin $1.0\to0.25$, slow gate $(0,0.1)$; uniform starts, 20 s | from uniform CT-SAC brakes (hold 0.12); from hanging no hold |
 | v4.2 | v4.1 reward, reset energy scheduled $\tilde{E}: 1 \to 0$ | queued |
-| v4.3 | v4.1 reward, mastery-gated tip height/velocity reset | new branch |
+| v4.3 | v4.1 reward, mastery-gated tip height/velocity reset | queued |
 | v5 | $\mathbb{1}[\text{tip } z > 3]$ occupancy | learnable, occupancy $\le 0.12$, partial balance |
-| v6.1 | v6 reward, mastery-gated tip height/velocity reset | new branch |
+| v6 | $-0.001\,[\,s^{\top}\operatorname{diag}(50,50,4,2)\,s + a^2\,]$, curriculum or uniform start | queued |
+| v6.1 | v6 reward, mastery-gated tip height/velocity reset | queued |

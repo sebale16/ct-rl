@@ -58,22 +58,46 @@ class JSONOutputFormat(KVWriter):
 
 class CSVOutputFormat(KVWriter):
     def __init__(self, file_path: str, append: bool = False):
-        # When appending across a resume, reuse the existing header so rows stay
-        # column-aligned and no duplicate header line is written mid-file.
+        # When appending across a resume, reuse the existing header.  Open in
+        # update mode because later writes may introduce new diagnostics and
+        # require expanding that header while preserving the existing rows.
         self._existing_keys = None
-        if append and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        has_existing_file = (
+            append
+            and os.path.exists(file_path)
+            and os.path.getsize(file_path) > 0
+        )
+        if has_existing_file:
             with open(file_path, "r", newline="") as f:
-                header = f.readline().strip()
-            if header:
-                self._existing_keys = header.split(",")
-        self.file = open(file_path, "a" if append else "w", newline="")
+                reader = csv.reader(f)
+                self._existing_keys = next(reader, None)
+        self.file = open(
+            file_path,
+            "r+" if has_existing_file else "w+",
+            newline="",
+        )
+        if has_existing_file:
+            self.file.seek(0, os.SEEK_END)
         self.writer = None
         self.keys = []
+
+    def _expand_columns(self, new_keys: List[str]) -> None:
+        """Add late-appearing metrics without losing earlier CSV rows."""
+
+        self.file.flush()
+        self.file.seek(0)
+        rows = list(csv.DictReader(self.file))
+        self.keys.extend(new_keys)
+        self.file.seek(0)
+        self.file.truncate()
+        self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
+        self.writer.writeheader()
+        self.writer.writerows(rows)
 
     def write(self, key_values: Dict[str, Any], step: int = 0) -> None:
         if self.writer is None:
             if self._existing_keys is not None:
-                self.keys = self._existing_keys
+                self.keys = list(self._existing_keys)
                 self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
                 # header already present in the file we are appending to
             else:
@@ -81,6 +105,9 @@ class CSVOutputFormat(KVWriter):
                 self.writer = csv.DictWriter(self.file, fieldnames=self.keys)
                 self.writer.writeheader()
 
+        new_keys = sorted(set(key_values).difference(self.keys))
+        if new_keys:
+            self._expand_columns(new_keys)
         self.writer.writerow(
             {key: key_values.get(key, "") for key in self.keys}
         )

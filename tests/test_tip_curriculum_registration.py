@@ -10,10 +10,15 @@ from common.utils import (
 try:
     from environment.dmc import DMCContinuousEnv
     from environment.tip_curriculum import (
+        DEFAULT_ELBOW_SPREAD,
         FRACTION_CURRICULUM_ENV_IDS,
+        INITIAL_TIP_HEIGHT_NORM,
         PERFORMANCE_CURRICULUM_ENV_IDS,
     )
-    from evaluations.sustained_capture import strict_capture_spec_for
+    from evaluations.sustained_capture import (
+        curriculum_mastery_capture_spec_for,
+        strict_capture_spec_for,
+    )
 
     HAVE_DMC = True
 except Exception:  # pragma: no cover - dependency-limited installations
@@ -54,9 +59,29 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                 self.assertEqual(
                     info[f"{domain}_curriculum_num_stages"], 6.0
                 )
+                metrics = env.curriculum_log_metrics()
+                self.assertEqual(metrics["stage"], 0.0)
+                self.assertEqual(metrics["num_stages"], 6.0)
+                self.assertEqual(metrics["progress"], 0.0)
+                self.assertEqual(
+                    metrics["start_tip_height_norm"],
+                    INITIAL_TIP_HEIGHT_NORM,
+                )
+                self.assertEqual(
+                    metrics["start_potential_energy_norm"],
+                    INITIAL_TIP_HEIGHT_NORM,
+                )
+                self.assertEqual(metrics["start_tip_speed"], 0.0)
+                # The near-upright level folds, but only as far as the capture
+                # radius allows, so the start still requires a recovery.
+                self.assertGreater(metrics["start_elbow_spread"], 0.0)
+                self.assertLess(
+                    metrics["start_elbow_spread"], DEFAULT_ELBOW_SPREAD
+                )
                 self.assertIn(f"{domain}_strict_capture", info)
+                self.assertEqual(info[f"{domain}_strict_capture"], 0.0)
 
-    def test_wrapper_stage_forwarding_reaches_exact_hanging_final_reset(self):
+    def test_wrapper_stage_forwarding_reaches_the_hanging_final_reset(self):
         for domain, task in (
             ("acrobot", "swingup-v4.3"),
             ("acrobot", "swingup-v6.1"),
@@ -71,9 +96,17 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                     np.zeros(env._env.physics.model.nv),
                 )
                 self.assertEqual(env.curriculum_stage, 5)
-                expected_height = -1.0 if domain == "cartpole" else 0.0
-                self.assertAlmostEqual(
-                    info[f"{domain}_tip_height"], expected_height
+                self.assertEqual(
+                    env.curriculum_log_metrics()["start_elbow_spread"],
+                    DEFAULT_ELBOW_SPREAD,
+                )
+                hanging_height = -1.0 if domain == "cartpole" else 0.0
+                # A folded chain hangs with its tip just above the lowest one.
+                self.assertGreaterEqual(
+                    info[f"{domain}_tip_height"], hanging_height
+                )
+                self.assertLess(
+                    info[f"{domain}_tip_height"] - hanging_height, 0.07
                 )
 
     def test_disabled_primary_eval_is_fixed_final_task(self):
@@ -109,21 +142,47 @@ class TestTipCurriculumRegistration(unittest.TestCase):
             },
         )
 
-    def test_capture_registry_uses_each_tasks_tip_signal(self):
-        for env_id in (
-            "acrobot-swingup-v4.3",
-            "acrobot-swingup-v6.1",
+    def test_fraction_curriculum_logs_schedule_and_reset_band(self):
+        for domain, task in (
+            ("acrobot", "swingup-v4.2"),
+            ("acrobot", "swingup-v6"),
+            ("cartpole", "two_poles-curriculum"),
         ):
-            spec = strict_capture_spec_for(
-                algorithm="ct_sac", env_id=env_id
-            )
-            self.assertEqual(spec.info_key, "acrobot_strict_capture")
-        cartpole_spec = strict_capture_spec_for(
-            algorithm="ct_sac", env_id="cartpole-two_poles-v2"
-        )
+            with self.subTest(domain=domain, task=task):
+                env = self._env(domain, task)
+                env.set_curriculum_fraction(0.5)
+                metrics = env.curriculum_log_metrics()
+                self.assertEqual(metrics["fraction"], 0.5)
+                self.assertEqual(metrics["progress"], 0.5)
+                self.assertEqual(metrics["complete"], 0.0)
+                self.assertAlmostEqual(
+                    metrics["angle_spread_rad"],
+                    0.5 + 0.5 * (np.pi - 0.5),
+                )
+
+    def test_capture_registry_uses_each_tasks_tip_signal(self):
+        expected_info_keys = {
+            "acrobot-swingup-v4.3": "acrobot_strict_capture",
+            "acrobot-swingup-v6.1": "acrobot_strict_capture",
+            "cartpole-two_poles-v2": "cartpole_strict_capture",
+        }
         self.assertEqual(
-            cartpole_spec.info_key, "cartpole_strict_capture"
+            set(expected_info_keys), set(PERFORMANCE_CURRICULUM_ENV_IDS)
         )
+        for env_id, info_key in expected_info_keys.items():
+            with self.subTest(env_id=env_id):
+                checkpoint_spec = strict_capture_spec_for(
+                    algorithm="ct_sac", env_id=env_id
+                )
+                mastery_spec = curriculum_mastery_capture_spec_for(
+                    algorithm="ct_sac", env_id=env_id
+                )
+                self.assertEqual(checkpoint_spec.info_key, info_key)
+                self.assertEqual(checkpoint_spec.duration_seconds, 1.0)
+                self.assertFalse(checkpoint_spec.require_terminal_hold)
+                self.assertEqual(mastery_spec.info_key, info_key)
+                self.assertEqual(mastery_spec.duration_seconds, 5.0)
+                self.assertTrue(mastery_spec.require_terminal_hold)
 
 
 class TestTipCurriculumHyperparameterCoverage(unittest.TestCase):

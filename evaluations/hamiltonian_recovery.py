@@ -40,8 +40,10 @@ Ground truth comes from the same physics the oracle drift uses: mj_fullM for
 M(q); the MuJoCo energy flag for potential/kinetic energy; qfrc_bias /
 qfrc_passive at zero velocity for the gravity+spring torque; qfrc_bias(q,v) -
 qfrc_bias(q,0) for the Coriolis force; dof_damping for the true damping
-diagonal; unit-control qfrc_actuator columns for G_a; and qfrc_constraint for
-the generalized contact force (caveat: joint-limit forces are included too).
+diagonal; unit-control qfrc_actuator columns for G_a; and action-matched
+qfrc_constraint for the generalized contact force (caveat: joint-limit forces
+are included too). For the constraint model, a paired zero-action solve at the
+same state isolates recovery of the contact force's action response.
 
 Evaluation distributions: the audit is not limited to each checkpoint's own
 visited states. ``main`` evaluates on a fixed broad-exploration reference set
@@ -56,6 +58,7 @@ Usage (offline fit, OU exploration data):
 Usage (model trained by an RL run, saved by the CTSAC checkpoint sidecar):
     python -m evaluations.hamiltonian_recovery \
         --dynamics_path saved_models/.../best_model.dynamics.pth --contact_force 4 \
+        --contact_solver constraint \
         [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_cforce_roll] \
         [--best_checkpoint saved_models/.../peak_model.pth]
 
@@ -121,7 +124,11 @@ def _set_state(data, nq, pos_width, obs_row):
     data.qvel[:] = obs_row[pos_width:]
 
 
-def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
+def ground_truth(
+    env: DMCContinuousEnv,
+    obs: np.ndarray,
+    actions: np.ndarray | None = None,
+):
     """Extract the true mechanical terms at each observed state. Two observation
     maps are supported: raw state (obs = [qpos (nq); qvel (nv)], the env's
     ``raw_state_obs`` option) and the cheetah task observation
@@ -133,7 +140,9 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
       M (B,nv,nv), e_pot (B,), e_kin (B,), g_pot (B,nv) gravity+spring torque,
       coriolis (B,nv) = C(q,v)v, dof_damping (nv,), G (nv,nu),
       qfrc_contact (B,nv) generalized constraint force (contacts + joint
-      limits), contact_flag (B,) any active contact, contact_geom_act (B,Gc)
+      limits) under the supplied action, qfrc_contact_zero_action (B,nv) at
+      the same state under zero action, contact_action_response (B,nv) their
+      difference, contact_flag (B,) any active contact, contact_geom_act (B,Gc)
       per-geom contact activity over the geoms seen in contact,
       contact_geom_ids (Gc,).
     """
@@ -147,14 +156,21 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
     pos_width = nq if raw else nq - 1
     obs = np.asarray(obs, dtype=np.float64).reshape(-1, pos_width + nv)
     B = obs.shape[0]
+    if actions is None:
+        actions = np.zeros((B, nu), dtype=np.float64)
+    actions = np.asarray(actions, dtype=np.float64).reshape(B, nu)
 
     model.opt.enableflags |= mujoco.mjtEnableBit.mjENBL_ENERGY
 
-    saved = (data.qpos.copy(), data.qvel.copy(), data.ctrl.copy(), float(data.time))
+    saved = (
+        data.qpos.copy(), data.qvel.copy(), data.ctrl.copy(), float(data.time),
+        data.qacc_warmstart.copy(),
+    )
     M = np.zeros((B, nv, nv))
     e_pot = np.zeros(B); e_kin = np.zeros(B)
     g_pot = np.zeros((B, nv)); coriolis = np.zeros((B, nv))
     qfrc_contact = np.zeros((B, nv))
+    qfrc_contact_zero_action = np.zeros((B, nv))
     contact_flag = np.zeros(B, dtype=bool)
     geom_hits: list[dict] = []
     G = np.zeros((nv, nu))
@@ -171,6 +187,12 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
         for i in range(B):
             # with velocity: energy, mass matrix, full bias force, constraints
             _set_state(data, nq, pos_width, obs[i])
+            data.ctrl[:] = actions[i]
+            physics.forward()
+            # MuJoCo's constraint solve is warm-started.  Re-evaluate each
+            # state/action pair from its own forward solution so results do not
+            # depend on the preceding audit sample.
+            data.qacc_warmstart[:] = data.qacc
             physics.forward()
             mujoco.mj_fullM(model.ptr, M[i], data.qM)
             e_pot[i], e_kin[i] = data.energy[0], data.energy[1]
@@ -184,14 +206,24 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
                 for gid in (int(con.geom1), int(con.geom2)):
                     hits[gid] = True
             geom_hits.append(hits)
+            # Same state and velocity, zero action. Constraint forces depend on
+            # the free acceleration, hence on control; this paired reference
+            # makes that dependence auditable instead of folding it into G_a.
+            data.ctrl[:] = 0.0
+            physics.forward()
+            data.qacc_warmstart[:] = data.qacc
+            physics.forward()
+            qfrc_contact_zero_action[i] = data.qfrc_constraint[:nv]
             # at zero velocity: qfrc_bias = gravity, qfrc_passive = spring
             data.qvel[:] = 0.0
+            data.ctrl[:] = 0.0
             physics.forward()
             g_pot[i] = data.qfrc_bias[:nv] - data.qfrc_passive[:nv]
             coriolis[i] = bias_v - data.qfrc_bias[:nv]
     finally:
         data.qpos[:] = saved[0]; data.qvel[:] = saved[1]
         data.ctrl[:] = saved[2]; data.time = saved[3]
+        data.qacc_warmstart[:] = saved[4]
         physics.forward()
 
     # per-geom activity matrix over the geoms ever seen in contact, most-active
@@ -212,6 +244,8 @@ def ground_truth(env: DMCContinuousEnv, obs: np.ndarray):
         M=M, e_pot=e_pot, e_kin=e_kin, g_pot=g_pot, coriolis=coriolis,
         dof_damping=np.asarray(model.dof_damping[:nv]).copy(), G=G,
         qfrc_contact=qfrc_contact, contact_flag=contact_flag,
+        qfrc_contact_zero_action=qfrc_contact_zero_action,
+        contact_action_response=qfrc_contact - qfrc_contact_zero_action,
         contact_geom_act=geom_act,
         contact_geom_ids=np.asarray(geom_ids, dtype=np.int64),
     )
@@ -262,7 +296,11 @@ def mujoco_transition(env: DMCContinuousEnv, obs: np.ndarray, actions: np.ndarra
 # --------------------------- learned terms ---------------------------
 
 
-def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
+def learned_terms(
+    m: PortHamiltonianModel,
+    obs: np.ndarray,
+    actions: np.ndarray | None = None,
+):
     """Evaluate the structured model's M, V, kinetic/total energy, potential
     gradient g_pot = +grad V (matching ``ground_truth``'s convention), Coriolis
     force C(q,qd)qd (left-hand-side convention, matching qfrc_bias), base
@@ -274,6 +312,11 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
     nv = lay.nv
     x = th.as_tensor(obs, dtype=th.float32, device=m.device)
     B = x.shape[0]
+    if actions is None:
+        actions = np.zeros((B, m.action_dim), dtype=np.float32)
+    action = th.as_tensor(actions, dtype=th.float32, device=m.device).reshape(
+        B, m.action_dim
+    )
     pos = x[:, lay.pos_slice[0]:lay.pos_slice[1]]
     qd = x[:, lay.vel_slice[0]:lay.vel_slice[1]]
 
@@ -332,34 +375,87 @@ def learned_terms(m: PortHamiltonianModel, obs: np.ndarray):
             out["joint_limit_F_damp"] = F_limit_damp.numpy()
             out["joint_limit_F"] = (-gV_limit + F_limit_damp).numpy()
 
-        # Contact port: the gap springs k_i phi(g_i) grad g_i are themselves a
-        # conservative field, and on always-in-contact data they are nearly
-        # degenerate with grad V (gravity migrates into the port). Report the
-        # combined conservative gradient grad V - sum_i k_i phi(g_i) J_n,i (a
-        # force is minus a gradient) so the potential comparison sees the whole
-        # field, plus the full generalized contact force, its power, and
-        # per-contact diagnostics of the split.
+        # Keep the historical compliant audit exactly as before. The constraint
+        # formulation has no contact spring to merge with V; its public
+        # diagnostics instead expose the action-conditioned solve directly.
         if getattr(m, "contact_force", 0) > 0:
-            g, gdot, v_t, lam, f_t, J_n, J_t = m._contact_parts(pos, qd)
-            k_i, c_i, mu_i = th.nn.functional.softplus(m._contact_raw)  # each (K,)
-            w = m._contact_gap_width
-            phi = th.nn.functional.softplus(-g / w) * w
-            F_spring = th.einsum("nkv,nk->nv", J_n, phi * k_i)    # (B, nv)
-            F_n = th.einsum("nkv,nk->nv", J_n, lam)
-            F_t = th.einsum("nkv,nk->nv", J_t, f_t)
-            out["g_pot_combined"] = (gV - F_spring).numpy()
-            out["contact_F"] = (F_n + F_t).numpy()                # (B, nv)
-            out["contact_F_n"] = F_n.numpy()
-            out["contact_F_t"] = F_t.numpy()
-            out["contact_power"] = (lam * gdot + f_t * v_t).sum(1).numpy()
-            out["contact_lam"] = lam.numpy()                      # (B, K)
-            out["contact_gap"] = g.numpy()
-            out["contact_in_frac"] = float((g < 0).float().mean())
-            out["contact_in_frac_per"] = (g < 0).float().mean(0).numpy()
-            out["contact_spring_ratio"] = float(
-                F_spring.norm(dim=1).mean() / (gV.norm(dim=1).mean() + 1e-12)
-            )
-            out["contact_kcm"] = th.stack([k_i, c_i, mu_i]).numpy()  # (3, K)
+            contact_solver = getattr(m, "contact_solver", "compliant")
+            out["contact_solver"] = contact_solver
+            if contact_solver == "compliant":
+                g, gdot, v_t, lam, f_t, J_n, J_t = m._contact_parts(pos, qd)
+                k_i, c_i, mu_i = th.nn.functional.softplus(m._contact_raw)
+                w = m._contact_gap_width
+                phi = th.nn.functional.softplus(-g / w) * w
+                F_spring = th.einsum("nkv,nk->nv", J_n, phi * k_i)
+                F_n = th.einsum("nkv,nk->nv", J_n, lam)
+                F_t = th.einsum("nkv,nk->nv", J_t, f_t)
+                out["g_pot_combined"] = (gV - F_spring).numpy()
+                out["contact_F"] = (F_n + F_t).numpy()
+                out["contact_F_n"] = F_n.numpy()
+                out["contact_F_t"] = F_t.numpy()
+                out["contact_power"] = (
+                    lam * gdot + f_t * v_t
+                ).sum(1).numpy()
+                out["contact_lam"] = lam.numpy()
+                out["contact_gap"] = g.numpy()
+                out["contact_in_frac"] = float((g < 0).float().mean())
+                out["contact_in_frac_per"] = (
+                    (g < 0).float().mean(0).numpy()
+                )
+                out["contact_spring_ratio"] = float(
+                    F_spring.norm(dim=1).mean()
+                    / (gV.norm(dim=1).mean() + 1e-12)
+                )
+                out["contact_kcm"] = th.stack([k_i, c_i, mu_i]).numpy()
+            else:
+                diagnostics = m.contact_diagnostics(x, action)
+                zero_diagnostics = m.contact_diagnostics(
+                    x, th.zeros_like(action)
+                )
+
+                def as_numpy(value):
+                    if isinstance(value, th.Tensor):
+                        return value.detach().cpu().numpy()
+                    return np.asarray(value)
+
+                for key in (
+                    "gap", "gap_rate", "tangent_velocity", "gate", "J_n",
+                    "J_t", "normal_impulse", "tangent_impulse",
+                    "normal_force", "tangent_force", "generalized_impulse",
+                    "generalized_force", "cone_violation", "solver_residual",
+                    "regularization", "free_acceleration",
+                    "free_contact_velocity", "post_contact_velocity", "e",
+                    "beta", "mu", "discrete_work", "stabilization_work",
+                ):
+                    out[f"contact_{key}"] = as_numpy(diagnostics[key])
+
+                J_n = diagnostics["J_n"]
+                J_t = diagnostics["J_t"]
+                F_n = th.einsum(
+                    "nkv,nk->nv", J_n, diagnostics["normal_force"]
+                )
+                F_t = th.einsum(
+                    "nkv,nk->nv", J_t, diagnostics["tangent_force"]
+                )
+                generalized_force = diagnostics["generalized_force"]
+                out["contact_F"] = as_numpy(generalized_force)
+                out["contact_F_n"] = as_numpy(F_n)
+                out["contact_F_t"] = as_numpy(F_t)
+                out["contact_impulse_F"] = as_numpy(
+                    diagnostics["generalized_impulse"]
+                )
+                out["contact_F_zero_action"] = as_numpy(
+                    zero_diagnostics["generalized_force"]
+                )
+                out["contact_action_response"] = as_numpy(
+                    generalized_force - zero_diagnostics["generalized_force"]
+                )
+                out["contact_power"] = as_numpy(
+                    (qd * generalized_force).sum(-1)
+                )
+                out["contact_gap"] = as_numpy(diagnostics["gap"])
+                out["contact_dt"] = float(m.contact_dt)
+                out["contact_iterations"] = int(m.contact_iterations)
 
     return out
 
@@ -679,6 +775,173 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
                 truth["contact_geom_act"],
             )
 
+    # ---- action-conditioned differentiable constraint solve ----
+    if learned.get("contact_solver") == "constraint":
+        rep["contact_formulation"] = "constraint"
+        gap = np.asarray(learned["contact_gap"], np.float64)
+        gate = np.asarray(learned["contact_gate"], np.float64)
+        normal_impulse = c * np.asarray(
+            learned["contact_normal_impulse"], np.float64
+        )
+        tangent_impulse = c * np.asarray(
+            learned["contact_tangent_impulse"], np.float64
+        )
+        impulse_scale = float(np.percentile(np.abs(normal_impulse), 95))
+        active_threshold = max(1e-8, 1e-4 * impulse_scale)
+        active_per = normal_impulse > active_threshold
+        active = active_per.any(axis=1)
+
+        rep["contact_active_threshold"] = active_threshold
+        rep["contact_active_frac"] = float(active_per.mean())
+        rep["contact_active_frac_per"] = [
+            round(float(v), 3) for v in active_per.mean(axis=0)
+        ]
+        rep["contact_gap_mean"] = float(gap.mean())
+        rep["contact_gap_min"] = float(gap.min())
+        rep["contact_gate_mean"] = float(gate.mean())
+        rep["contact_gate_saturated_frac"] = float(
+            ((gate < 1e-4) | (gate > 1.0 - 1e-4)).mean()
+        )
+        rep["contact_dt"] = float(learned["contact_dt"])
+        rep["contact_iterations"] = int(learned["contact_iterations"])
+        for parameter in ("e", "beta", "mu"):
+            values = np.asarray(
+                learned[f"contact_{parameter}"], np.float64
+            ).reshape(-1)
+            rep[f"contact_{parameter}"] = [
+                round(float(v), 4) for v in values
+            ]
+
+        # Average generalized force over contact_dt and its corresponding
+        # one-substep generalized impulse. Both share the global mass gauge.
+        F_hat = c * np.asarray(learned["contact_F"], np.float64)
+        impulse_hat = c * np.asarray(
+            learned["contact_impulse_F"], np.float64
+        )
+        if "qfrc_contact" in truth and np.linalg.norm(truth["qfrc_contact"]) > 0:
+            F_true = np.asarray(truth["qfrc_contact"], np.float64)
+            force_metrics(
+                rep, "contact_force", F_hat, F_true, strata=strata
+            )
+            contact_dt = float(learned["contact_dt"])
+            force_metrics(
+                rep,
+                "contact_solver_impulse",
+                impulse_hat,
+                F_true * contact_dt,
+                strata=strata,
+            )
+            if qd is not None:
+                p_hat = np.asarray(learned["contact_power"], np.float64) * c
+                p_true = (F_true * qd).sum(-1)
+                force_metrics(rep, "contact_power", p_hat, p_true)
+            if dt is not None:
+                w = np.asarray(dt, np.float64)[:, None]
+                rep["contact_impulse_rel_err"] = nrmse(
+                    (F_hat * w).sum(0), (F_true * w).sum(0)
+                )
+
+        # Paired same-state action sweep: supplied action minus zero action.
+        # This isolates whether the constraint reaction changes with the free
+        # acceleration, the capability missing from the compliant force law.
+        if "contact_action_response" in truth:
+            response_hat = c * np.asarray(
+                learned["contact_action_response"], np.float64
+            )
+            response_true = np.asarray(
+                truth["contact_action_response"], np.float64
+            )
+            rep["contact_action_response_learned_rms"] = float(
+                np.sqrt(np.mean(response_hat ** 2))
+            )
+            rep["contact_action_response_true_rms"] = float(
+                np.sqrt(np.mean(response_true ** 2))
+            )
+            if np.linalg.norm(response_true) > 0:
+                force_metrics(
+                    rep,
+                    "contact_action_response",
+                    response_hat,
+                    response_true,
+                    strata=strata,
+                )
+
+        # Solver health is reported in its native normalized units. A fixed
+        # iteration solver has no boolean convergence event, so residual tails
+        # and cone violations are more informative than a fabricated flag.
+        for metric in ("solver_residual", "cone_violation"):
+            values = np.asarray(
+                learned[f"contact_{metric}"], np.float64
+            ).reshape(-1)
+            rep[f"contact_{metric}_mean"] = float(values.mean())
+            rep[f"contact_{metric}_p95"] = float(np.percentile(values, 95))
+            rep[f"contact_{metric}_max"] = float(values.max())
+        rep["contact_regularization"] = float(
+            np.asarray(learned["contact_regularization"], np.float64).mean()
+        )
+        rep["contact_normal_impulse_min"] = float(normal_impulse.min())
+        rep["contact_tangent_impulse_abs_max"] = float(
+            np.abs(tangent_impulse).max()
+        )
+        for quantity in (
+            "normal_force", "tangent_force", "normal_impulse",
+            "tangent_impulse",
+        ):
+            values = c * np.asarray(
+                learned[f"contact_{quantity}"], np.float64
+            ).reshape(-1)
+            rep[f"contact_{quantity}_mean"] = float(values.mean())
+            rep[f"contact_{quantity}_abs_mean"] = float(
+                np.abs(values).mean()
+            )
+            rep[f"contact_{quantity}_abs_p95"] = float(
+                np.percentile(np.abs(values), 95)
+            )
+        force_split = c * (
+            np.asarray(learned["contact_F_n"], np.float64)
+            + np.asarray(learned["contact_F_t"], np.float64)
+        )
+        rep["contact_force_assembly_nrmse"] = nrmse(force_split, F_hat)
+
+        free_v = np.asarray(
+            learned["contact_free_contact_velocity"], np.float64
+        )
+        post_v = np.asarray(
+            learned["contact_post_contact_velocity"], np.float64
+        )
+        rep["contact_velocity_correction_rms"] = float(
+            np.sqrt(np.mean((post_v - free_v) ** 2))
+        )
+        free_acceleration = np.asarray(
+            learned["contact_free_acceleration"], np.float64
+        )
+        rep["contact_free_acceleration_rms"] = float(
+            np.sqrt(np.mean(free_acceleration ** 2))
+        )
+        for work in ("discrete_work", "stabilization_work"):
+            values = c * np.asarray(
+                learned[f"contact_{work}"], np.float64
+            ).reshape(-1)
+            rep[f"contact_{work}_mean"] = float(values.mean())
+            rep[f"contact_{work}_abs_p95"] = float(
+                np.percentile(np.abs(values), 95)
+            )
+            rep[f"contact_{work}_positive_frac"] = float((values > 0).mean())
+
+        if "contact_flag" in truth:
+            true = np.asarray(truth["contact_flag"], bool)
+            tp = float((active & true).sum())
+            rep["contact_precision"] = tp / (float(active.sum()) + 1e-12)
+            rep["contact_recall"] = tp / (float(true.sum()) + 1e-12)
+            off, n_edges, matched = _edge_timing(active, true, dones)
+            rep["contact_edge_offset_steps"] = off
+            rep["contact_edge_count"] = n_edges
+            rep["contact_edge_matched_frac"] = matched
+        if "contact_geom_act" in truth and truth["contact_geom_act"].shape[1] > 0:
+            rep["contact_match_corr"] = _match_activity(
+                active_per.astype(np.float64), truth["contact_geom_act"]
+            )
+
     # ---- damping (PHAST identifiability axis) ----
     # evaluated directly at scale c* — no affine refit: after the shared gauge,
     # the damping diagonal retains no slope or offset freedom.
@@ -867,8 +1130,14 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
     compression and friction dissipation (<= 0). The optional rail-limit
     potential is already part of ``E``; only its localized damping force enters
     the right-hand-side power ledger. ``residual_nrmse`` checks the identity
-    itself; ``passivity_violation_frac`` counts states whose energy rise is NOT
-    explained by actuator work plus spring release."""
+    itself; for the compliant law, ``passivity_violation_frac`` counts states
+    whose energy rise is not explained by actuator work plus spring release.
+
+    The constraint solve is a discrete velocity update with Baumgarte
+    stabilization, not a continuous spring port. Its instantaneous virtual-work
+    identity still uses ``qd @ generalized_force``, while discrete and
+    stabilization work are reported separately. No strict passivity verdict is
+    assigned to that branch."""
     assert m.mode == "structured"
     lay = m.layout
     x = th.as_tensor(np.asarray(obs), dtype=th.float32).requires_grad_(True)
@@ -895,21 +1164,40 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
             p_limit = (qd_d * limit_force).sum(-1)
         p_contact = th.zeros_like(p_act)
         p_spring = th.zeros_like(p_act)
+        discrete_work = th.zeros_like(p_act)
+        stabilization_work = th.zeros_like(p_act)
+        constraint_contact = (
+            getattr(m, "contact_force", 0) > 0
+            and getattr(m, "contact_solver", "compliant") == "constraint"
+        )
         if getattr(m, "contact_force", 0) > 0:
-            g, gdot, v_t, lam, f_t, _, _ = m._contact_parts(pos_d, qd_d)
-            k_i, _, _ = th.nn.functional.softplus(m._contact_raw)
-            w = m._contact_gap_width
-            phi = th.nn.functional.softplus(-g / w) * w
-            p_contact = (lam * gdot + f_t * v_t).sum(-1)
-            p_spring = (k_i * phi * gdot).sum(-1)
+            if constraint_contact:
+                diagnostics = m.contact_diagnostics(x.detach(), a)
+                generalized_force = diagnostics["generalized_force"]
+                p_contact = (qd_d * generalized_force).sum(-1)
+                discrete_work = diagnostics["discrete_work"]
+                stabilization_work = diagnostics["stabilization_work"]
+            else:
+                g, gdot, v_t, lam, f_t, _, _ = m._contact_parts(pos_d, qd_d)
+                k_i, _, _ = th.nn.functional.softplus(m._contact_raw)
+                w = m._contact_gap_width
+                phi = th.nn.functional.softplus(-g / w) * w
+                p_contact = (lam * gdot + f_t * v_t).sum(-1)
+                p_spring = (k_i * phi * gdot).sum(-1)
         rhs = p_act + p_damp + p_limit + p_contact
         resid = (Edot - rhs).numpy()
         scale = float(np.abs(Edot.numpy()).mean() + np.abs(rhs.numpy()).mean()) + 1e-12
-        # unexplained energy rise: dE/dt beyond actuator input + spring release
-        unexplained = (Edot - p_act - p_spring).numpy()
-    return {
+        if constraint_contact:
+            passivity_violation_frac = None
+        else:
+            # unexplained energy rise: dE/dt beyond actuator input + spring release
+            unexplained = (Edot - p_act - p_spring).numpy()
+            passivity_violation_frac = float(
+                (unexplained > 1e-3 * scale).mean()
+            )
+    report = {
         "residual_nrmse": float(np.linalg.norm(resid) / (np.linalg.norm(rhs.numpy()) + 1e-12)),
-        "passivity_violation_frac": float((unexplained > 1e-3 * scale).mean()),
+        "passivity_violation_frac": passivity_violation_frac,
         "power_actuator_mean": float(p_act.mean()),
         "power_damping_mean": float(p_damp.mean()),
         "power_joint_limit_mean": float(p_limit.mean()),
@@ -917,6 +1205,20 @@ def energy_balance_report(m: PortHamiltonianModel, obs, actions) -> dict:
         "power_spring_mean": float(p_spring.mean()),
         "dE_dt_mean": float(Edot.mean()),
     }
+    if constraint_contact:
+        report.update(
+            passivity_assessed=False,
+            energy_balance_mode="constraint_discrete",
+            contact_discrete_work_mean=float(discrete_work.mean()),
+            contact_discrete_work_abs_p95=float(
+                th.quantile(discrete_work.abs(), 0.95)
+            ),
+            contact_stabilization_work_mean=float(stabilization_work.mean()),
+            contact_stabilization_work_abs_p95=float(
+                th.quantile(stabilization_work.abs(), 0.95)
+            ),
+        )
+    return report
 
 
 # --------------------------- sanity checks ---------------------------
@@ -941,14 +1243,22 @@ def sanity_check_truth(truth: dict, obs: np.ndarray, pos_width: int,
 
 
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
-              contact_force=0, hidden=(128, 128), seed=1, log_every=1000,
-              dof_layout=None, integration_step=None, mass_logdet_reg=0.0,
+              contact_force=0, contact_solver="constraint", contact_dt=None,
+              contact_iterations=12, contact_regularization=0.01,
+              hidden=(128, 128), seed=1, log_every=1000, dof_layout=None,
+              integration_step=None, mass_logdet_reg=0.0,
               mass_condition_reg=0.0, mass_condition_limit=1e3):
     th.manual_seed(seed)
     od = int(env.observation_space.shape[0]); ad = int(env.action_space.shape[0])
+    if contact_dt is None:
+        contact_dt = getattr(env, "physics_dt", None) or 0.002
     m = PortHamiltonianModel(od, ad, mode="structured",
                              structured_hidden=hidden,
                              contact_force=contact_force,
+                             contact_solver=contact_solver,
+                             contact_dt=contact_dt,
+                             contact_iterations=contact_iterations,
+                             contact_regularization=contact_regularization,
                              dof_layout=dof_layout,
                              mass_logdet_reg=mass_logdet_reg,
                              mass_condition_reg=mass_condition_reg,
@@ -1021,8 +1331,8 @@ def evaluate_dataset(m, env, data, n_eval, policy=None, max_step=None,
     obs, act = O[-n_eval:], A[-n_eval:]
     nxt, dt, dn = NO[-n_eval:], DT[-n_eval:], DN[-n_eval:]
 
-    truth = ground_truth(env, obs)
-    learned = learned_terms(m, obs)
+    truth = ground_truth(env, obs, act)
+    learned = learned_terms(m, obs, act)
     axes = {
         "physical_recovery": recovery_report(truth, learned, actions=act,
                                              dt=dt, dones=dn),
@@ -1096,6 +1406,31 @@ def _print_primary(axes: dict):
             print(f"  matched contact activity    : {rep['contact_match_corr']}")
         if "contact_impulse_rel_err" in rep:
             print(f"  impulse rel err             : {rep['contact_impulse_rel_err']:.3f}")
+    if rep.get("contact_formulation") == "constraint":
+        print(f"  active contact / gate mean  : {rep['contact_active_frac']:.2f}"
+              f" / {rep['contact_gate_mean']:.2f}")
+        print(f"  constraint e / beta / mu    : {rep['contact_e']}"
+              f" / {rep['contact_beta']} / {rep['contact_mu']}")
+        print(f"  solver residual mean / p95  : "
+              f"{rep['contact_solver_residual_mean']:.3e}"
+              f" / {rep['contact_solver_residual_p95']:.3e}")
+        print(f"  cone violation max / reg    : "
+              f"{rep['contact_cone_violation_max']:.3e}"
+              f" / {rep['contact_regularization']:.3e}")
+        if "contact_action_response_nrmse" in rep:
+            print(f"  action-response corr/nrmse  : "
+                  f"{rep['contact_action_response_corr']:.3f}"
+                  f" / {rep['contact_action_response_nrmse']:.3f}")
+        if "contact_solver_impulse_nrmse" in rep:
+            print(f"  solver impulse corr/nrmse   : "
+                  f"{rep['contact_solver_impulse_corr']:.3f}"
+                  f" / {rep['contact_solver_impulse_nrmse']:.3f}")
+        if "contact_precision" in rep:
+            print(f"  contact precision / recall  : {rep['contact_precision']:.2f}"
+                  f" / {rep['contact_recall']:.2f}")
+        if "contact_impulse_rel_err" in rep:
+            print(f"  transition impulse rel err  : "
+                  f"{rep['contact_impulse_rel_err']:.3f}")
     print(f"damping rel err / locked R^2  : {rep['damping_rel_err']:.3f}"
           f" / {rep['damping_locked_R2']:.3f}")
     print(f"  learned c*.softplus(log_d)  : {rep['damping_learned']}")
@@ -1124,13 +1459,23 @@ def _print_primary(axes: dict):
         print(f"  endpoint state nrmse        : {q['endpoint_state_nrmse']:.3f}")
     if "energy_balance" in axes:
         e = axes["energy_balance"]
-        print(f"\nenergy balance: residual nrmse {e['residual_nrmse']:.4f},"
-              f" unexplained-rise frac {e['passivity_violation_frac']:.3f}")
+        if e.get("passivity_assessed", True):
+            passivity = (
+                f"unexplained-rise frac {e['passivity_violation_frac']:.3f}"
+            )
+        else:
+            passivity = "strict passivity not assessed (discrete stabilization)"
+        print(f"\nenergy balance: residual nrmse {e['residual_nrmse']:.4f}, "
+              f"{passivity}")
         print(f"  mean powers  act {e['power_actuator_mean']:+.3f}"
               f"  damp {e['power_damping_mean']:+.3f}"
               f"  joint-limit {e['power_joint_limit_mean']:+.3f}"
               f"  contact {e['power_contact_mean']:+.3f}"
               f"  spring {e['power_spring_mean']:+.3f}")
+        if e.get("energy_balance_mode") == "constraint_discrete":
+            print(f"  discrete / stabilization work: "
+                  f"{e['contact_discrete_work_mean']:+.3e}"
+                  f" / {e['contact_stabilization_work_mean']:+.3e}")
 
 
 def _select_recovery_dof_layout(
@@ -1141,10 +1486,10 @@ def _select_recovery_dof_layout(
 ):
     """Select the audit model layout, retaining old-sidecar compatibility.
 
-    New raw CartPole and Acrobot runs use mechanics-aware sparse actuator maps.
-    Sidecars produced before those layouts have a dense ``G_a`` with one output
-    row per generalized coordinate; use the historical generic raw layout for
-    those files so their already-recorded recovery reports remain reproducible.
+    New raw CartPole-chain and Acrobot runs use mechanics-aware sparse actuator
+    maps. Sidecars produced before those layouts have a dense ``G_a`` with one
+    output row per generalized coordinate; use the historical generic raw
+    layout for those files so their already-recorded reports remain reproducible.
     """
     if not raw_state_obs:
         return None
@@ -1152,7 +1497,7 @@ def _select_recovery_dof_layout(
         ga = dynamics_state.get("G_a.weight") if dynamics_state is not None else None
         if ga is not None and int(ga.shape[0]) != 1:
             return DOFLayout.raw_state(nv=int(obs_dim) // 2)
-        return DOFLayout.cartpole()
+        return DOFLayout.cartpole(num_poles=int(obs_dim) // 2 - 1)
     if domain == "acrobot":
         ga = dynamics_state.get("G_a.weight") if dynamics_state is not None else None
         if ga is not None and int(ga.shape[0]) != 1:
@@ -1190,6 +1535,24 @@ def main():
     p.add_argument("--contact_force", type=int, default=0,
                    help="number of learned contact points for the explicit "
                         "contact-force port (must match --dynamics_path if given)")
+    p.add_argument(
+        "--contact_solver", choices=("compliant", "constraint"),
+        default="constraint",
+        help="contact formulation (legacy penalty law or differentiable "
+             "action-conditioned constraint solve)",
+    )
+    p.add_argument(
+        "--contact_dt", type=float, default=None,
+        help="constraint-solve step; defaults to the environment physics step",
+    )
+    p.add_argument(
+        "--contact_iterations", type=int, default=12,
+        help="fixed differentiable constraint-solver iteration count",
+    )
+    p.add_argument(
+        "--contact_regularization", type=float, default=0.01,
+        help="positive Delassus/QP regularization",
+    )
     p.add_argument("--checkpoint", default=None,
                    help="RL checkpoint (*.pth): its policy collects the "
                         "on-policy data and its V-head enables the "
@@ -1197,7 +1560,7 @@ def main():
     p.add_argument("--best_checkpoint", default=None,
                    help="frozen best-policy checkpoint: adds a best-policy "
                         "evaluation distribution (forgetting probe)")
-    p.add_argument("--mode", default="mbq_structured_quad_contact_roll",
+    p.add_argument("--mode", default="mbq_structured_quad_constraint_roll",
                    help="CSV mode row used to size the policy nets for --checkpoint")
     p.add_argument("--reference_seed", type=int, default=123,
                    help="fixed seed of the broad-exploration reference set")
@@ -1226,6 +1589,7 @@ def main():
         dynamics_state,
     )
     max_step = getattr(env, "physics_dt", None)
+    contact_dt = args.contact_dt if args.contact_dt is not None else max_step
 
     def _load_policy(path):
         from common.utils import load_ct_hyperparams_from_table
@@ -1264,6 +1628,10 @@ def main():
         m = PortHamiltonianModel(od, ad, mode="structured",
                                  structured_hidden=(128, 128),
                                  contact_force=args.contact_force,
+                                 contact_solver=args.contact_solver,
+                                 contact_dt=contact_dt or 0.002,
+                                 contact_iterations=args.contact_iterations,
+                                 contact_regularization=args.contact_regularization,
                                  dof_layout=layout,
                                  mass_logdet_reg=args.mass_logdet_reg,
                                  mass_condition_reg=args.mass_condition_reg,
@@ -1272,7 +1640,12 @@ def main():
         print(f"loaded dynamics model from {args.dynamics_path}")
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
-                      contact_force=args.contact_force, seed=args.seed + 1,
+                      contact_force=args.contact_force,
+                      contact_solver=args.contact_solver,
+                      contact_dt=contact_dt,
+                      contact_iterations=args.contact_iterations,
+                      contact_regularization=args.contact_regularization,
+                      seed=args.seed + 1,
                       dof_layout=layout,
                       mass_logdet_reg=args.mass_logdet_reg,
                       mass_condition_reg=args.mass_condition_reg,
@@ -1280,7 +1653,8 @@ def main():
 
     # sanity of the truth extraction on the primary tail
     eval_obs = O[-args.n_eval:]
-    truth = ground_truth(env, eval_obs)
+    eval_actions = A[-args.n_eval:]
+    truth = ground_truth(env, eval_obs, eval_actions)
     nq = int(env._env.physics.model.nq)
     sanity_check_truth(truth, eval_obs.astype(np.float64),
                        pos_width=nq if args.raw_state_obs else nq - 1,

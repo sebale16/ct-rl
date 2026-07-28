@@ -38,7 +38,10 @@ from common.callbacks import (
     WallClockCheckpointCallback,
 )
 from common.checkpoint import load_checkpoint
-from evaluations.sustained_capture import strict_capture_spec_for
+from evaluations.sustained_capture import (
+    curriculum_mastery_capture_spec_for,
+    strict_capture_spec_for,
+)
 
 from common.logger import configure
 from common.utils import (
@@ -206,9 +209,17 @@ def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
     return layout_cls.raw_state(nv=int(obs_dim) // 2)
 
 
-def _pop_structured_model_kwargs(algo_kwargs: dict) -> dict:
-    """Move dynamics-model regularizers out of the CTSAC kwargs namespace."""
-    return {
+def _pop_structured_model_kwargs(
+    algo_kwargs: dict, *, contact_dt_default: float | None = None
+) -> dict:
+    """Move structured-model controls out of the CTSAC kwargs namespace.
+
+    Blank CSV cells are omitted by ``load_ct_hyperparams_from_table``.  When a
+    contact solver is selected without an explicit step, use the environment's
+    physics step so the differentiable solve runs at the same resolution as
+    the simulator rather than at the irregular control duration.
+    """
+    model_kwargs = {
         "mass_logdet_reg": float(
             str(algo_kwargs.pop("dynamics_mass_logdet_reg", "") or "0").strip()
         ),
@@ -221,6 +232,28 @@ def _pop_structured_model_kwargs(algo_kwargs: dict) -> dict:
             ).strip()
         ),
     }
+
+    contact_solver = str(
+        algo_kwargs.pop("dynamics_contact_solver", "") or ""
+    ).strip()
+    contact_dt = algo_kwargs.pop("dynamics_contact_dt", None)
+    contact_iterations = algo_kwargs.pop("dynamics_contact_iterations", None)
+    contact_regularization = algo_kwargs.pop(
+        "dynamics_contact_regularization", None
+    )
+
+    if contact_solver:
+        model_kwargs["contact_solver"] = contact_solver
+        if contact_dt is None:
+            contact_dt = contact_dt_default
+    if contact_dt is not None:
+        model_kwargs["contact_dt"] = float(contact_dt)
+    if contact_iterations is not None:
+        model_kwargs["contact_iterations"] = int(contact_iterations)
+    if contact_regularization is not None:
+        model_kwargs["contact_regularization"] = float(contact_regularization)
+
+    return model_kwargs
 
 
 def run_algorithm(
@@ -453,10 +486,13 @@ def run_algorithm(
         contact_force = int(
             str(algo_kwargs.pop("dynamics_contact_force", "") or "").strip() or 0
         )
-        # Structured-model-only regularizers live in the benchmark's algo_*
-        # namespace for configuration, but are consumed by the dynamics model
-        # constructor rather than CTSAC itself.
-        structured_model_kwargs = _pop_structured_model_kwargs(algo_kwargs)
+        # Structured-model-only regularizers and contact-solver controls live
+        # in the benchmark's algo_* namespace, but are consumed by the
+        # dynamics-model constructor rather than CTSAC itself.
+        structured_model_kwargs = _pop_structured_model_kwargs(
+            algo_kwargs,
+            contact_dt_default=env_kwargs.get("physics_dt"),
+        )
         obs_dim = int(np.prod(train_env.observation_space.shape))
         act_dim = int(np.prod(train_env.action_space.shape))
         # Raw cartpole gets its known invariances and sparse actuation. Other
@@ -493,11 +529,12 @@ def run_algorithm(
         elif source == "structured":
             # Structured port-Hamiltonian (DeLaN core): learned SPD mass M(q) and
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
-            # constant diagonal damping on momentum; optional explicit contact
-            # port (dynamics_contact_force = number of learned contact points,
-            # which also makes M translation-invariant). Raw cartpole uses its
-            # mechanics-aware layout; other raw-state envs use the generic
-            # layout, and the non-raw default remains cheetah's.
+            # constant diagonal damping on momentum; optional learned contact
+            # geometry (dynamics_contact_force = number of contact points) with
+            # either the historical compliant law or the action-responsive
+            # constraint solve selected by dynamics_contact_solver. Raw
+            # cartpole uses its mechanics-aware layout; other raw-state envs
+            # use the generic layout, and the non-raw default remains cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(
                 obs_dim,
                 act_dim,
@@ -541,6 +578,14 @@ def run_algorithm(
     eval_freq = log_kwargs.get("eval_freq", 10000)
     log_interval = log_kwargs.get("interval", 1000)
     capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    curriculum_capture_spec = (
+        curriculum_mastery_capture_spec_for(
+            algorithm=algo,
+            env_id=env_id,
+        )
+        if is_performance_curriculum
+        else None
+    )
     if capture_spec is not None:
         print(
             "[selection] best_model uses strict capture: distance<0.2, "
@@ -591,7 +636,7 @@ def run_algorithm(
     mastery_curriculum_callback = None
     curriculum_probe_callback = None
     if curriculum_probe_env is not None:
-        if capture_spec is None:
+        if curriculum_capture_spec is None:
             raise ValueError(
                 f"{env_id} requires a sustained-capture spec for curriculum "
                 "mastery"
@@ -615,11 +660,17 @@ def run_algorithm(
             for curriculum_env in _envs:
                 curriculum_env.set_curriculum_stage(stage)
 
+        def _get_mastery_curriculum_metrics(
+            _env=train_curriculum_envs[0],
+        ) -> dict[str, float]:
+            return _env.curriculum_log_metrics()
+
         mastery_curriculum_callback = MasteryCurriculumCallback(
             set_stage=_set_mastery_curriculum_stage,
             num_stages=num_curriculum_stages,
             success_threshold=curriculum_success_threshold,
             consecutive_evals=curriculum_consecutive_evals,
+            get_curriculum_metrics=_get_mastery_curriculum_metrics,
             verbose=1,
         )
         curriculum_probe_callback = EvalCallback(
@@ -632,7 +683,7 @@ def run_algorithm(
             best_model_save_path=None,
             verbose=1,
             callback_after_eval=mastery_curriculum_callback,
-            capture_spec=capture_spec,
+            capture_spec=curriculum_capture_spec,
             log_prefix="curriculum",
         )
 
@@ -791,12 +842,21 @@ def run_algorithm(
             for e in _envs:
                 e.set_curriculum_fraction(frac)
 
-        callbacks.append(
+        def _get_fraction_curriculum_metrics(
+            _env=curriculum_envs[0],
+        ) -> dict[str, float]:
+            return _env.curriculum_log_metrics()
+
+        # Run before any evaluation callback that may flush the logger at the
+        # same timestep, so every emitted row describes the current fraction.
+        callbacks.insert(
+            0,
             CurriculumFractionCallback(
                 set_fraction=_set_curriculum_fraction,
                 total_steps=curr_total,
+                get_curriculum_metrics=_get_fraction_curriculum_metrics,
                 verbose=1,
-            )
+            ),
         )
         print(
             f"[curriculum] reset band widens to full over {curr_total} steps "
@@ -805,10 +865,18 @@ def run_algorithm(
         )
     elif is_performance_curriculum:
         assert mastery_curriculum_callback is not None
+        assert curriculum_capture_spec is not None
+        terminal_requirement = (
+            " through episode end"
+            if curriculum_capture_spec.require_terminal_hold
+            else ""
+        )
         print(
             "[curriculum] tip-height ladder advances only after "
             f"{n_eval_episodes} deterministic probe episode(s) reach "
-            f"{curriculum_success_threshold:.0%} sustained stabilization "
+            f"{curriculum_success_threshold:.0%} stabilization held for "
+            f">={curriculum_capture_spec.duration_seconds:g} physical "
+            f"seconds{terminal_requirement} "
             f"for {curriculum_consecutive_evals} consecutive evaluation(s); "
             "checkpoint selection stays on the fixed hanging task.",
             flush=True,

@@ -385,6 +385,42 @@ class DMCContinuousEnv(ContinuousEnv):
         if callable(setter):
             setter(stage)
 
+    def curriculum_log_metrics(self) -> Dict[str, float]:
+        """Return the selected reset level without consulting live physics.
+
+        Performance curricula expose descriptors for the *next* reset selected
+        by their stage controller.  This matters immediately after a mastery
+        transition: the probe physics still belongs to the stage that was just
+        evaluated.  Historical fraction curricula instead expose their exact
+        schedule fraction and reset-band half-width; that distribution has no
+        single mechanical-energy value.
+        """
+
+        task = getattr(self._env, "task", None)
+        diagnostics = getattr(task, "curriculum_diagnostics", None)
+        if callable(diagnostics):
+            return {
+                str(name).removeprefix("curriculum_"): float(value)
+                for name, value in diagnostics().items()
+            }
+
+        fraction = getattr(task, "curriculum_fraction", None)
+        if fraction is None:
+            return {}
+        fraction = float(fraction)
+        metrics = {
+            "fraction": fraction,
+            "progress": fraction,
+            "complete": float(fraction >= 1.0),
+        }
+        min_spread = getattr(task, "curriculum_min_spread", None)
+        if min_spread is not None:
+            min_spread = float(min_spread)
+            metrics["angle_spread_rad"] = min_spread + fraction * (
+                float(np.pi) - min_spread
+            )
+        return metrics
+
     def curriculum_state_dict(self) -> Optional[dict[str, Any]]:
         task = getattr(self._env, "task", None)
         getter = getattr(task, "curriculum_state_dict", None)
