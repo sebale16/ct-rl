@@ -3,18 +3,20 @@
 The curriculum is deliberately discrete.  Its first level is a small
 near-upright displacement at rest, so the first skill is recovering into and
 maintaining balance.  Every later level also starts at rest and lowers the tip
-until the last level is the exact hanging configuration.
+until the last level hangs.
 
-This module owns only the level specification and synchronization protocol.
-Each mechanism maps ``(tip_height, incoming_tip_speed, side)`` to its own
-generalized coordinates, and trainer-side deterministic probe evaluations
-decide when a level has been mastered.
+A level fixes the distal tip, not the pose that reaches it: the chain is folded
+by a random relative angle at every reset, so the same tip height is presented
+through a family of shapes rather than one extended arm.  Both hosts are two
+equal links on a pivot, so this module owns that mapping as well as the level
+specification and synchronization protocol.  Trainer-side deterministic probe
+evaluations decide when a level has been mastered.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import numpy as np
 
@@ -34,23 +36,47 @@ PERFORMANCE_CURRICULUM_ENV_IDS = frozenset(
     }
 )
 INITIAL_TIP_HEIGHT_NORM = 0.995
+# Half-width of the uniform relative-angle draw between the two links.  Zero
+# restores the extended chain, one pose per level and side.
+DEFAULT_ELBOW_SPREAD = float(np.pi / 6.0)
 
 
 @dataclass(frozen=True)
 class TipCurriculumLevel:
-    """One reset level expressed only through tip height and tip speed."""
+    """One reset level: a distal-tip height and speed, plus its fold range.
+
+    ``elbow_spread`` is the half-width of the relative-angle draw admitted at
+    this height.  It is the configured ceiling everywhere except within a
+    capture radius of the stabilization point, where folding the chain would
+    otherwise hand the agent a start it has already reached.
+    """
 
     tip_height: float
     incoming_tip_speed: float
+    elbow_spread: float = 0.0
+
+
+@dataclass(frozen=True)
+class CurriculumPose:
+    """One sampled reset in the shared two-link coordinates.
+
+    ``first_link_angle`` is measured from vertical upright and
+    ``elbow_angle`` is the second link relative to the first.
+    """
+
+    first_link_angle: float
+    elbow_angle: float
+    first_link_rate: float
+    elbow_rate: float
 
 
 class TipHeightVelocityCurriculum:
     """Mixin implementing a synchronized, performance-gated reset ladder.
 
-    Hosts call :meth:`_configure_tip_curriculum` from ``__init__`` and use the
-    current :class:`TipCurriculumLevel` from ``initialize_episode``.  The mixin
-    intentionally has no timestep/fraction setter: a trainer advances it only
-    after a deterministic probe demonstrates sustained stabilization.
+    Hosts call :meth:`_configure_tip_curriculum` from ``__init__`` and draw one
+    reset pose with :meth:`sample_curriculum_pose` from ``initialize_episode``.
+    The mixin intentionally has no timestep/fraction setter: a trainer advances
+    it only after a deterministic probe demonstrates sustained stabilization.
     """
 
     curriculum_kind = "performance"
@@ -61,8 +87,25 @@ class TipHeightVelocityCurriculum:
         curriculum: bool,
         tip_height_bounds: tuple[float, float],
         descent_tip_heights: Iterable[float],
+        elbow_spread: float = DEFAULT_ELBOW_SPREAD,
+        min_start_distance: float = 0.0,
     ) -> None:
         self.curriculum = bool(curriculum)
+
+        self._curriculum_elbow_spread = float(elbow_spread)
+        if not np.isfinite(self._curriculum_elbow_spread) or not (
+            0.0 <= self._curriculum_elbow_spread < np.pi
+        ):
+            raise ValueError("elbow_spread must be finite and in [0, pi)")
+
+        self._min_start_distance = float(min_start_distance)
+        if (
+            not np.isfinite(self._min_start_distance)
+            or self._min_start_distance < 0.0
+        ):
+            raise ValueError(
+                "min_start_distance must be finite and non-negative"
+            )
 
         try:
             hanging_height, upright_height = (
@@ -118,12 +161,41 @@ class TipHeightVelocityCurriculum:
             )
 
         self._tip_height_bounds = (hanging_height, upright_height)
-        self._tip_curriculum_levels = (
-            TipCurriculumLevel(initial_height, 0.0),
-            *(TipCurriculumLevel(height, 0.0) for height in descent),
+        self._tip_curriculum_levels = tuple(
+            TipCurriculumLevel(height, 0.0, self._level_elbow_spread(height))
+            for height in (initial_height, *descent)
         )
         self._curriculum_stage = (
             0 if self.curriculum else len(self._tip_curriculum_levels) - 1
+        )
+
+    def _level_elbow_spread(self, tip_height: float) -> float:
+        """Largest fold at ``tip_height`` that still starts away from the goal.
+
+        Folding shortens the arm, so near the stabilization point it moves the
+        tip toward the goal rather than around it: a level a hair below upright
+        would otherwise be handed starts already inside the capture radius.
+        Writing ``c`` for the height above the pivot, the folded tip sits at
+        distance ``sqrt(reach^2 cos^2(e/2) - c^2 + (reach - c)^2)`` from the
+        goal, which gives the fold at which that distance first reaches the
+        required one.  The bound is inactive at every height further from the
+        goal than the capture radius, hanging included.
+        """
+
+        hanging_height, upright_height = self._tip_height_bounds
+        pivot = 0.5 * (hanging_height + upright_height)
+        reach = 0.5 * (upright_height - hanging_height)
+        offset = float(tip_height) - pivot
+        cosine_squared = (
+            offset**2 + self._min_start_distance**2 - (reach - offset) ** 2
+        ) / reach**2
+        if cosine_squared > 1.0:
+            return 0.0
+        if cosine_squared <= 0.0:
+            return self.curriculum_elbow_spread
+        return min(
+            self.curriculum_elbow_spread,
+            2.0 * float(np.arccos(np.sqrt(cosine_squared))),
         )
 
     @property
@@ -137,6 +209,10 @@ class TipHeightVelocityCurriculum:
     @property
     def curriculum_complete(self) -> bool:
         return self.curriculum_stage == self.num_curriculum_stages - 1
+
+    @property
+    def curriculum_elbow_spread(self) -> float:
+        return float(self._curriculum_elbow_spread)
 
     @property
     def curriculum_level(self) -> TipCurriculumLevel:
@@ -171,6 +247,63 @@ class TipHeightVelocityCurriculum:
 
         return -1.0 if int(self.random.randint(2)) == 0 else 1.0
 
+    def _curriculum_elbow(self, level: TipCurriculumLevel) -> float:
+        """Sample the relative angle between the two links at ``level``."""
+
+        spread = float(level.elbow_spread)
+        if spread <= 0.0:
+            return 0.0
+        return float(self.random.uniform(-spread, spread))
+
+    def sample_curriculum_pose(
+        self, level: Optional[TipCurriculumLevel] = None
+    ) -> CurriculumPose:
+        """Draw one reset pose for ``level`` (default: the current level).
+
+        The two links are equal, so folding them by a relative angle ``e``
+        leaves the tip on the bisector at distance ``reach cos(e/2)`` from the
+        pivot: the first link carries the fold's half-angle and the arm no
+        longer spans the full height range.  Requiring the requested tip height
+        gives
+
+            theta = arccos(offset / (reach cos(e/2))) - e/2,
+
+        with ``offset`` the height above the pivot.  Deep folds cannot reach the
+        vertical extremes, and there the clip returns the closest pose in that
+        fold — the chain splayed symmetrically about the vertical, its tip just
+        inside the extreme.  Every other level keeps its tip height exactly.
+
+        Rotating the folded arm rigidly about the pivot gives the requested
+        incoming tip speed at ``reach cos(e/2)`` rather than at full extension.
+        Mirroring negates both angles, which reflects the pose and leaves the
+        tip height fixed.
+        """
+
+        level = self.curriculum_level if level is None else level
+        hanging_height, upright_height = self._tip_height_bounds
+        pivot = 0.5 * (hanging_height + upright_height)
+        reach = 0.5 * (upright_height - hanging_height)
+
+        elbow = self._curriculum_elbow(level)
+        fold = float(np.cos(0.5 * elbow))
+        radius = reach * fold
+        cosine = float(
+            np.clip((float(level.tip_height) - pivot) / radius, -1.0, 1.0)
+        )
+        # An unfolded chain at a vertical extreme is one exact generalized
+        # state, so mirroring it would only consume the RNG and turn the
+        # canonical hanging pose into its equivalent negative.
+        symmetric = elbow == 0.0 and abs(cosine) == 1.0
+        side = 1.0 if symmetric else self._curriculum_side()
+        first_link = float(np.arccos(cosine)) - 0.5 * elbow
+        first_link_rate = -float(level.incoming_tip_speed) / radius
+        return CurriculumPose(
+            first_link_angle=side * first_link,
+            elbow_angle=side * elbow,
+            first_link_rate=side * first_link_rate,
+            elbow_rate=0.0,
+        )
+
     def curriculum_diagnostics(self) -> dict[str, float]:
         level = self.curriculum_level
         hanging_height, upright_height = self._tip_height_bounds
@@ -188,11 +321,13 @@ class TipHeightVelocityCurriculum:
             "curriculum_progress": float(stage_progress),
             "curriculum_start_tip_height": float(level.tip_height),
             "curriculum_start_tip_height_norm": float(height_norm),
-            # All current hosts reset a fully extended chain, so normalized
-            # gravitational potential is exactly normalized distal-tip height.
-            # Starting speed remains explicit rather than being folded into a
-            # misleading one-dimensional "energy level".
+            # Normalized gravitational potential of the extended chain, which
+            # is the level's reference pose: a fold raises the inner link above
+            # this value at the same tip height, by an amount the spread below
+            # bounds.  Starting speed remains explicit rather than being folded
+            # into a misleading one-dimensional "energy level".
             "curriculum_start_potential_energy_norm": float(height_norm),
             "curriculum_start_tip_speed": float(level.incoming_tip_speed),
+            "curriculum_start_elbow_spread": float(level.elbow_spread),
             "curriculum_complete": float(self.curriculum_complete),
         }

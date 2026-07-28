@@ -104,45 +104,72 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                 )
 
     def test_first_reset_is_near_upright_at_rest(self):
+        expected_height = (
+            ACROBOT_TIP_HEIGHT_BOUNDS[0]
+            + INITIAL_TIP_HEIGHT_NORM
+            * (ACROBOT_TIP_HEIGHT_BOUNDS[1] - ACROBOT_TIP_HEIGHT_BOUNDS[0])
+        )
         for task_type in (BalanceV43, BalanceV61):
             with self.subTest(task_type=task_type.__name__):
                 task = task_type(random=0)
-                self._reset_stage(task, 0)
+                for _ in range(64):
+                    self._reset_stage(task, 0)
 
-                tip = np.asarray(
-                    self.physics.named.data.site_xpos["tip"], dtype=np.float64
-                )
-                target = np.asarray(
-                    self.physics.named.data.site_xpos["target"],
-                    dtype=np.float64,
-                )
-                np.testing.assert_array_equal(
-                    np.asarray(self.physics.data.qvel), np.zeros(2)
-                )
-                expected_height = (
-                    ACROBOT_TIP_HEIGHT_BOUNDS[0]
-                    + INITIAL_TIP_HEIGHT_NORM
-                    * (
-                        ACROBOT_TIP_HEIGHT_BOUNDS[1]
-                        - ACROBOT_TIP_HEIGHT_BOUNDS[0]
+                    tip = np.asarray(
+                        self.physics.named.data.site_xpos["tip"],
+                        dtype=np.float64,
                     )
-                )
-                expected_angle = np.arccos((expected_height - 2.0) / 2.0)
-                self.assertAlmostEqual(
-                    abs(float(self.physics.data.qpos[0])),
-                    expected_angle,
-                    places=12,
-                )
-                self.assertEqual(float(self.physics.data.qpos[1]), 0.0)
-                self.assertAlmostEqual(tip[2], expected_height, places=12)
-                terms = task.reward_terms(self.physics)
-                expected_distance = float(np.linalg.norm(target - tip))
-                self.assertGreater(expected_distance, STRICT_CAPTURE_DISTANCE)
-                self.assertAlmostEqual(
-                    terms["tip_distance"], expected_distance, places=12
-                )
-                self.assertEqual(terms["tip_speed"], 0.0)
-                self.assertEqual(terms["strict_capture"], 0.0)
+                    target = np.asarray(
+                        self.physics.named.data.site_xpos["target"],
+                        dtype=np.float64,
+                    )
+                    np.testing.assert_array_equal(
+                        np.asarray(self.physics.data.qvel), np.zeros(2)
+                    )
+                    self.assertAlmostEqual(tip[2], expected_height, places=12)
+                    terms = task.reward_terms(self.physics)
+                    expected_distance = float(np.linalg.norm(target - tip))
+                    # Folding shortens the arm toward the goal, so the level's
+                    # narrow fold is what keeps every draw a recovery.
+                    self.assertGreaterEqual(
+                        expected_distance, STRICT_CAPTURE_DISTANCE
+                    )
+                    self.assertAlmostEqual(
+                        terms["tip_distance"], expected_distance, places=12
+                    )
+                    self.assertEqual(terms["tip_speed"], 0.0)
+                    self.assertEqual(terms["strict_capture"], 0.0)
+
+    def test_resets_fold_the_elbow_within_the_level_spread(self):
+        task = BalanceV43(random=3)
+
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                elbows = []
+                for _ in range(64):
+                    self._reset_stage(task, stage)
+                    elbows.append(float(self.physics.data.qpos[1]))
+                elbows = np.asarray(elbows)
+
+                self.assertGreater(level.elbow_spread, 0.0)
+                self.assertLessEqual(np.abs(elbows).max(), level.elbow_spread)
+                self.assertGreater(np.abs(elbows).max(), 0.5 * level.elbow_spread)
+                self.assertTrue((elbows > 0.0).any() and (elbows < 0.0).any())
+
+    def test_unfolded_curriculum_keeps_the_extended_chain(self):
+        task = BalanceV43(random=3, elbow_spread=0.0)
+
+        for stage, level in enumerate(task.curriculum_levels):
+            with self.subTest(stage=stage):
+                self.assertEqual(level.elbow_spread, 0.0)
+                for _ in range(8):
+                    self._reset_stage(task, stage)
+                    self.assertEqual(float(self.physics.data.qpos[1]), 0.0)
+                    self.assertAlmostEqual(
+                        abs(float(self.physics.data.qpos[0])),
+                        float(np.arccos((level.tip_height - 2.0) / 2.0)),
+                        places=12,
+                    )
 
     def test_descent_resets_have_exact_height_and_zero_velocity(self):
         task = BalanceV43(random=7)
@@ -155,7 +182,14 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                 actual_height = float(
                     self.physics.named.data.site_xpos["tip", "z"]
                 )
-                self.assertAlmostEqual(actual_height, height, places=12)
+                hanging = np.isclose(height, ACROBOT_TIP_HEIGHT_BOUNDS[0])
+                if hanging:
+                    # A folded chain cannot reach the lowest tip: the closest
+                    # pose in that fold splays symmetrically about vertical.
+                    self.assertGreaterEqual(actual_height, height)
+                    self.assertLess(actual_height - height, 0.07)
+                else:
+                    self.assertAlmostEqual(actual_height, height, places=12)
                 np.testing.assert_array_equal(
                     np.asarray(self.physics.data.qvel), np.zeros(2)
                 )
@@ -163,13 +197,18 @@ class TestAcrobotTipHeightVelocityCurriculum(unittest.TestCase):
                     task._tip_cartesian_speed(self.physics), 0.0, places=12
                 )
 
+        self.assertTrue(task.curriculum_complete)
+
+    def test_unfolded_final_stage_is_the_exact_hanging_state(self):
+        task = BalanceV43(random=7, elbow_spread=0.0)
+        self._reset_stage(task, task.num_curriculum_stages - 1)
+
         np.testing.assert_allclose(
             np.asarray(self.physics.data.qpos),
             [np.pi, 0.0],
             rtol=0.0,
             atol=1e-12,
         )
-        self.assertTrue(task.curriculum_complete)
 
     def test_stage_setter_clips_and_rejects_non_integer_values(self):
         task = BalanceV43(random=0)

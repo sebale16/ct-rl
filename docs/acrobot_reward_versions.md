@@ -175,9 +175,12 @@ Cartesian tip speed. The first level is a small near-upright displacement at
 rest. Every later level also starts at zero velocity and lowers the tip through
 a discrete ladder,
 $(\text{height}, \text{speed}) = (3.98, 0), (3.5, 0), (3.0, 0), (2.0, 0),
-(1.0, 0), (0.0, 0)$, ending at exact hanging at rest, which then remains the
+(1.0, 0), (0.0, 0)$, ending at hanging at rest, which then remains the
 training distribution. Left and right approaches are sampled with equal
-probability.
+probability, and the elbow is folded by a relative angle drawn uniformly from
+$\pm 30°$ — narrowed to $\pm 11.5°$ at the near-upright level, where a fold
+shortens the arm enough to place the tip inside the capture radius — so each
+height is presented through a family of shapes rather than one extended arm.
 
 Advancement is gated on demonstrated performance and carries no timestep
 schedule. A separate deterministic probe evaluates the current level at the

@@ -114,6 +114,7 @@ def _metric_line(name: str, metrics: dict[str, float]) -> str:
     return (
         f"{name}   tip h={metrics['start_tip_height']:+.2f} m   "
         f"potential={metrics['start_potential_energy_norm']:.3f}   "
+        f"fold=+/-{np.degrees(metrics['start_elbow_spread']):.0f} deg   "
         f"start speed={metrics['start_tip_speed']:.2f} m/s"
     )
 
@@ -137,10 +138,13 @@ def _annotate(
     final_stage = stage == num_stages - 1
     if initial_stage:
         stage_kind = "NEAR-UPRIGHT REST"
-        subtitle = "Small displacement from vertical at zero starting velocity"
+        subtitle = (
+            "Small displacement from vertical; narrow fold keeps the start "
+            "outside the capture radius"
+        )
     elif final_stage:
         stage_kind = "FINAL HANGING"
-        subtitle = "Exact hanging state at zero velocity"
+        subtitle = "Hanging at zero velocity, folded either way"
     else:
         stage_kind = "REST START"
         subtitle = "Zero starting velocity; mastery unlocks a lower tip height"
@@ -179,7 +183,7 @@ def _annotate(
     )
     _put_text(
         result,
-        "two-link arm; elbow extended at reset",
+        "two-link arm; elbow folded either way at reset",
         (16, 106),
         scale=0.34,
         color=MUTED_TEXT,
@@ -194,7 +198,7 @@ def _annotate(
     )
     _put_text(
         result,
-        "serial two-link chain; relative elbow = 0 deg at reset",
+        "serial two-link chain; relative elbow drawn per reset",
         (panel_width + 16, 106),
         scale=0.34,
         color=MUTED_TEXT,
@@ -224,7 +228,7 @@ def _annotate(
     )
     _put_text(
         result,
-        "potential = normalized gravitational potential of the selected reset",
+        "potential = normalized gravitational potential of the unfolded chain",
         (17, height - 37),
         scale=0.36,
         color=MUTED_TEXT,

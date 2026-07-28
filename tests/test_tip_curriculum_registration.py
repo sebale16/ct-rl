@@ -10,6 +10,7 @@ from common.utils import (
 try:
     from environment.dmc import DMCContinuousEnv
     from environment.tip_curriculum import (
+        DEFAULT_ELBOW_SPREAD,
         FRACTION_CURRICULUM_ENV_IDS,
         INITIAL_TIP_HEIGHT_NORM,
         PERFORMANCE_CURRICULUM_ENV_IDS,
@@ -71,10 +72,16 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                     INITIAL_TIP_HEIGHT_NORM,
                 )
                 self.assertEqual(metrics["start_tip_speed"], 0.0)
+                # The near-upright level folds, but only as far as the capture
+                # radius allows, so the start still requires a recovery.
+                self.assertGreater(metrics["start_elbow_spread"], 0.0)
+                self.assertLess(
+                    metrics["start_elbow_spread"], DEFAULT_ELBOW_SPREAD
+                )
                 self.assertIn(f"{domain}_strict_capture", info)
                 self.assertEqual(info[f"{domain}_strict_capture"], 0.0)
 
-    def test_wrapper_stage_forwarding_reaches_exact_hanging_final_reset(self):
+    def test_wrapper_stage_forwarding_reaches_the_hanging_final_reset(self):
         for domain, task in (
             ("acrobot", "swingup-v4.3"),
             ("acrobot", "swingup-v6.1"),
@@ -89,9 +96,17 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                     np.zeros(env._env.physics.model.nv),
                 )
                 self.assertEqual(env.curriculum_stage, 5)
-                expected_height = -1.0 if domain == "cartpole" else 0.0
-                self.assertAlmostEqual(
-                    info[f"{domain}_tip_height"], expected_height
+                self.assertEqual(
+                    env.curriculum_log_metrics()["start_elbow_spread"],
+                    DEFAULT_ELBOW_SPREAD,
+                )
+                hanging_height = -1.0 if domain == "cartpole" else 0.0
+                # A folded chain hangs with its tip just above the lowest one.
+                self.assertGreaterEqual(
+                    info[f"{domain}_tip_height"], hanging_height
+                )
+                self.assertLess(
+                    info[f"{domain}_tip_height"] - hanging_height, 0.07
                 )
 
     def test_disabled_primary_eval_is_fixed_final_task(self):
