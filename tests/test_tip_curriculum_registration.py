@@ -72,14 +72,11 @@ class TestTipCurriculumRegistration(unittest.TestCase):
                     INITIAL_TIP_HEIGHT_NORM,
                 )
                 self.assertEqual(metrics["start_tip_speed"], 0.0)
-                # The near-upright level folds, but only as far as the capture
-                # radius allows, so the start still requires a recovery.
-                self.assertGreater(metrics["start_elbow_spread"], 0.0)
-                self.assertLess(
-                    metrics["start_elbow_spread"], DEFAULT_ELBOW_SPREAD
-                )
+                # Stage 1 uses only the tiny mirrored whole-chain tilt; folded
+                # pose families begin on the next level.
+                self.assertEqual(metrics["start_elbow_spread"], 0.0)
                 self.assertIn(f"{domain}_strict_capture", info)
-                self.assertEqual(info[f"{domain}_strict_capture"], 0.0)
+                self.assertEqual(info[f"{domain}_strict_capture"], 1.0)
 
     def test_wrapper_stage_forwarding_reaches_the_hanging_final_reset(self):
         for domain, task in (

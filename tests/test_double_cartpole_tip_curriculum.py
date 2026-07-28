@@ -14,7 +14,10 @@ try:
         TIP_HEIGHT_BOUNDS,
         two_poles_v2,
     )
-    from environment.tip_curriculum import INITIAL_TIP_HEIGHT_NORM
+    from environment.tip_curriculum import (
+        INITIAL_TIP_ANGLE_OFFSET_RAD,
+        INITIAL_TIP_HEIGHT_NORM,
+    )
 
     HAVE_DMC = True
 except Exception:  # pragma: no cover - exercised only without dm_control
@@ -116,9 +119,14 @@ class TestDoubleCartpoleTipCurriculum(unittest.TestCase):
                     tip_z - STABILIZATION_POINT[1],
                 )
             )
-            # Folding shortens the chain toward the goal, so the level's
-            # narrow fold is what keeps every draw a recovery.
-            self.assertGreaterEqual(expected_distance, STRICT_CAPTURE_DISTANCE)
+            self.assertAlmostEqual(
+                abs(float(physics.data.qpos[1])),
+                INITIAL_TIP_ANGLE_OFFSET_RAD,
+                places=12,
+            )
+            self.assertEqual(float(physics.data.qpos[2]), 0.0)
+            self.assertGreater(expected_distance, 0.0)
+            self.assertLess(expected_distance, STRICT_CAPTURE_DISTANCE)
             self.assertAlmostEqual(
                 terms["tip_height"], expected_height, places=12
             )
@@ -126,8 +134,13 @@ class TestDoubleCartpoleTipCurriculum(unittest.TestCase):
                 terms["tip_distance"], expected_distance, places=12
             )
             self.assertEqual(terms["tip_speed"], 0.0)
-            self.assertEqual(terms["strict_capture"], 0.0)
-            self.assertEqual(terms["success"], 0.0)
+            self.assertEqual(terms["strict_capture"], 1.0)
+            self.assertEqual(terms["success"], 1.0)
+            physics.data.ctrl[:] = 0.0
+            physics.forward()
+            acceleration = np.asarray(physics.data.qacc, dtype=np.float64)
+            self.assertTrue(np.all(np.isfinite(acceleration)))
+            self.assertGreater(float(np.linalg.norm(acceleration)), 1e-6)
 
     def test_resets_fold_the_second_hinge_within_the_level_spread(self):
         env = self._env()
@@ -143,6 +156,10 @@ class TestDoubleCartpoleTipCurriculum(unittest.TestCase):
                     folds.append(float(env.physics.data.qpos[2]))
                 folds = np.asarray(folds)
 
+                if stage == 0:
+                    self.assertEqual(level.elbow_spread, 0.0)
+                    np.testing.assert_array_equal(folds, np.zeros(64))
+                    continue
                 self.assertGreater(level.elbow_spread, 0.0)
                 self.assertLessEqual(np.abs(folds).max(), level.elbow_spread)
                 self.assertGreater(

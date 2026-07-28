@@ -17,24 +17,28 @@ Those historical IDs remain unchanged.
 ## Reset ladder
 
 A level is specified by two physical quantities: world-frame tip height and
-Cartesian tip speed. It selects a family of poses rather than one pose, because
+Cartesian tip speed. From stage 2 onward it selects a family of poses because
 every reset also draws a mirror side and a relative angle between the two
-links.
+links. Stage 1 uses an unfolded chain and only a tiny mirrored whole-chain
+tilt.
 
-1. The first level starts at 99.5% normalized tip height and at rest, a small
-   mirrored displacement from vertical that requires active recovery.
+1. The first level starts at rest only `0.001 rad` (`0.057°`) left or right of
+   vertical. Its normalized tip height is
+   `(1 + cos(0.001))/2 = 0.9999997500000208`.
 2. Every level has exactly zero starting velocity; subsequent levels
    monotonically lower the tip.
 3. The last level hangs at zero velocity and remains the training distribution
    after it is reached.
 
 Default Acrobot levels are `(height, speed)` =
-`(3.98, 0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
-The serial two-pole CartPole uses `(2.98, 0), (2.5, 0), (2.0, 0),
+`(3.999999, 0), (3.5, 0), (3.0, 0), (2.0, 0), (1.0, 0), (0.0, 0)`.
+The serial two-pole CartPole uses `(2.999999, 0), (2.5, 0), (2.0, 0),
 (1.0, 0), (0.0, 0), (-1.0, 0)`. Heights and speeds are in metres and
-metres/second. In both mechanisms the unfolded first pose is about 8.1 degrees
-from vertical and 0.283 m from the stabilization point, outside the 0.2 m
-capture radius.
+metres/second. The first tip is only `0.002 m` sideways from the target and
+begins inside the instantaneous capture region. It is not an equilibrium:
+under zero action Acrobot and double CartPole leave capture after about
+`0.95 s` and `0.87 s`, respectively, so neither can pass the five-second
+terminal mastery hold without control.
 
 Both mechanisms are two unit links on a pivot — the Acrobot shoulder at
 `z = 2`, the cart at `z = 1` — with the second hinge relative, so
@@ -47,16 +51,14 @@ for `offset` the height above the pivot, and a rigid rotation of the folded arm
 delivers the requested tip speed at that shortened radius. Mirroring negates
 both angles. No reset noise is added.
 
-`e` is drawn uniformly from `±30` degrees, except where folding would hand the
-agent a start it has already reached: a fold shortens the arm, so near the
-stabilization point it moves the tip toward the goal rather than around it. The
-spread at each level is therefore capped at the fold whose tip sits exactly on
-the 0.2 m capture radius, which binds only at the near-upright first level and
-narrows it to `±11.5` degrees. Deep folds cannot span the full height range,
-so at the hanging level the drawn pose splays symmetrically about the vertical
-with its tip up to 0.068 m above the lowest one; every other level keeps its
-tip height exactly. The fixed evaluation reset is unaffected and remains the
-exact hanging state.
+`e` is drawn uniformly from `±30` degrees from stage 2 onward. Stage 1 sets
+`e = 0`: because its reference tip is intentionally already inside the capture
+radius, any elbow fold would be a much larger disturbance than the requested
+tiny sideways noise. Deep folds cannot span the full height range, so at the
+hanging level the drawn pose splays symmetrically about the vertical with its
+tip up to 0.068 m above the lowest one; every other level keeps its tip height
+exactly. The fixed evaluation reset is unaffected and remains the exact
+hanging state.
 
 ## Mastery gate
 

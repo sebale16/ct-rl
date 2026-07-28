@@ -2,9 +2,9 @@
 
 The Acrobot v4.3 and v6.1 tasks share the same reset ladder, so one Acrobot
 panel represents both reward branches.  The second panel shows the serial
-double-linked CartPole v2 ladder.  Each stage first holds the exact reset pose,
-then runs a zero-action preview to make the initial velocity (or lack of it)
-visible.
+double-linked CartPole v2 ladder.  Each stage holds several sampled reset poses
+to show the fold range its level admits, then runs a zero-action preview from
+the last of them to make the initial velocity (or lack of it) visible.
 
 Run from the repository root:
 
@@ -110,11 +110,25 @@ def _shade_band(
     frame[:] = cv2.addWeighted(overlay, opacity, frame, 1.0 - opacity, 0.0)
 
 
-def _metric_line(name: str, metrics: dict[str, float]) -> str:
+def _relative_link_angle(env: DMCContinuousEnv) -> float:
+    """Degrees between the two links in the current reset.
+
+    Both mechanisms carry the relative second-link hinge last, after the
+    Acrobot shoulder and after the CartPole slider and first hinge.
+    """
+
+    qpos = np.asarray(env._env.physics.data.qpos, dtype=np.float64)
+    return float(np.degrees(qpos[-1]))
+
+
+def _metric_line(
+    name: str, metrics: dict[str, float], fold_degrees: float
+) -> str:
     return (
         f"{name}   tip h={metrics['start_tip_height']:+.2f} m   "
         f"potential={metrics['start_potential_energy_norm']:.3f}   "
-        f"fold=+/-{np.degrees(metrics['start_elbow_spread']):.0f} deg   "
+        f"fold={fold_degrees:+.0f} of +/-"
+        f"{np.degrees(metrics['start_elbow_spread']):.0f} deg   "
         f"start speed={metrics['start_tip_speed']:.2f} m/s"
     )
 
@@ -127,6 +141,8 @@ def _annotate(
     phase: str,
     acrobot_metrics: dict[str, float],
     cartpole_metrics: dict[str, float],
+    acrobot_fold: float,
+    cartpole_fold: float,
     panel_width: int,
 ) -> np.ndarray:
     result = np.ascontiguousarray(frame.copy())
@@ -139,8 +155,7 @@ def _annotate(
     if initial_stage:
         stage_kind = "NEAR-UPRIGHT REST"
         subtitle = (
-            "Small displacement from vertical; narrow fold keeps the start "
-            "outside the capture radius"
+            "+/-0.057 deg tilt at rest; control is required to hold the top"
         )
     elif final_stage:
         stage_kind = "FINAL HANGING"
@@ -164,10 +179,14 @@ def _annotate(
         scale=0.43,
         color=MUTED_TEXT,
     )
+    # Right-align the phase: its width changes with the draw counter.
+    phase_width = cv2.getTextSize(
+        phase, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 2
+    )[0][0]
     _put_text(
         result,
         phase,
-        (width - 307, 31),
+        (width - phase_width - 17, 31),
         scale=0.48,
         color=TEXT,
         thickness=2,
@@ -214,14 +233,14 @@ def _annotate(
 
     _put_text(
         result,
-        _metric_line("Acrobot", acrobot_metrics),
+        _metric_line("Acrobot", acrobot_metrics, acrobot_fold),
         (17, height - 61),
         scale=0.39,
         color=TEXT,
     )
     _put_text(
         result,
-        _metric_line("CartPole", cartpole_metrics),
+        _metric_line("CartPole", cartpole_metrics, cartpole_fold),
         (panel_width + 17, height - 61),
         scale=0.39,
         color=TEXT,
@@ -307,6 +326,7 @@ def render_demo(
     motion_seconds: float = 1.4,
     duration_scale: float = 1.0,
     reset_seed: int = 17,
+    draws_per_stage: int = 3,
 ) -> None:
     if panel_width <= 0 or height <= 0 or fps <= 0:
         raise ValueError("panel_width, height, and fps must be positive")
@@ -316,6 +336,8 @@ def render_demo(
         raise ValueError("hold_seconds and motion_seconds must be positive")
     if duration_scale <= 0.0:
         raise ValueError("duration_scale must be positive")
+    if draws_per_stage < 1:
+        raise ValueError("draws_per_stage must be at least 1")
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -367,50 +389,63 @@ def render_demo(
             np.zeros(env.action_space.shape, dtype=np.float32) for env in envs
         )
         for stage in range(num_stages):
-            for env in envs:
-                env.set_curriculum_stage(stage)
-                # Reusing the seed keeps the sampled mirror side consistent
-                # between levels, while stage 6 remains canonical hanging.
-                env.reset(seed=reset_seed)
+            for draw in range(draws_per_stage):
+                for env in envs:
+                    env.set_curriculum_stage(stage)
+                    # A per-draw seed keeps each draw's mirror side and fold
+                    # aligned across levels, so the ladder reads as a descent
+                    # while each level still shows its own pose family.
+                    env.reset(seed=reset_seed + draw)
 
-            acrobot_metrics = acrobot.curriculum_log_metrics()
-            cartpole_metrics = cartpole.curriculum_log_metrics()
-            for stage_frame in range(hold_frames + motion_frames):
-                holding = stage_frame < hold_frames
-                if not holding:
-                    for env, action in zip(envs, zero_actions):
-                        _, _, terminated, truncated, _ = env.step(action)
-                        if terminated or truncated:
-                            raise RuntimeError(
-                                "demo environment ended inside a stage preview"
-                            )
+                acrobot_metrics = acrobot.curriculum_log_metrics()
+                cartpole_metrics = cartpole.curriculum_log_metrics()
+                acrobot_fold = _relative_link_angle(acrobot)
+                cartpole_fold = _relative_link_angle(cartpole)
+                # Only the last draw is released, so the zero-action preview
+                # stays a single readable event per level.
+                released = draw == draws_per_stage - 1
+                total_frames = hold_frames + (motion_frames if released else 0)
 
-                rendered = [
-                    env.render(
-                        mode="rgb_array",
-                        width=panel_width,
-                        height=height,
-                        camera_id=0,
+                for stage_frame in range(total_frames):
+                    holding = stage_frame < hold_frames
+                    if not holding:
+                        for env, action in zip(envs, zero_actions):
+                            _, _, terminated, truncated, _ = env.step(action)
+                            if terminated or truncated:
+                                raise RuntimeError(
+                                    "demo environment ended inside a stage "
+                                    "preview"
+                                )
+
+                    rendered = [
+                        env.render(
+                            mode="rgb_array",
+                            width=panel_width,
+                            height=height,
+                            camera_id=0,
+                        )
+                        for env in envs
+                    ]
+                    combined = np.hstack(rendered)
+                    phase = (
+                        f"SAMPLED RESET {draw + 1}/{draws_per_stage}"
+                        "  |  PAUSED"
+                        if holding
+                        else "ZERO-ACTION RELEASE (NO POLICY)"
                     )
-                    for env in envs
-                ]
-                combined = np.hstack(rendered)
-                phase = (
-                    "EXACT RESET  |  PAUSED"
-                    if holding
-                    else "ZERO-ACTION RELEASE (NO POLICY)"
-                )
-                combined = _annotate(
-                    combined,
-                    stage=stage,
-                    num_stages=num_stages,
-                    phase=phase,
-                    acrobot_metrics=acrobot_metrics,
-                    cartpole_metrics=cartpole_metrics,
-                    panel_width=panel_width,
-                )
-                writer.write(cv2.cvtColor(combined, cv2.COLOR_RGB2BGR))
-                frame_count += 1
+                    combined = _annotate(
+                        combined,
+                        stage=stage,
+                        num_stages=num_stages,
+                        phase=phase,
+                        acrobot_metrics=acrobot_metrics,
+                        cartpole_metrics=cartpole_metrics,
+                        acrobot_fold=acrobot_fold,
+                        cartpole_fold=cartpole_fold,
+                        panel_width=panel_width,
+                    )
+                    writer.write(cv2.cvtColor(combined, cv2.COLOR_RGB2BGR))
+                    frame_count += 1
     finally:
         if writer is not None:
             writer.release()
@@ -440,6 +475,12 @@ def parse_args() -> argparse.Namespace:
         help="Scale both phase durations; values below 1 are useful for smoke tests.",
     )
     parser.add_argument("--reset-seed", type=int, default=17)
+    parser.add_argument(
+        "--draws-per-stage",
+        type=int,
+        default=3,
+        help="Reset poses shown per level; each level is a family of folds.",
+    )
     return parser.parse_args()
 
 
@@ -454,4 +495,5 @@ if __name__ == "__main__":
         motion_seconds=args.motion_seconds,
         duration_scale=args.duration_scale,
         reset_seed=args.reset_seed,
+        draws_per_stage=args.draws_per_stage,
     )

@@ -5,12 +5,13 @@ near-upright displacement at rest, so the first skill is recovering into and
 maintaining balance.  Every later level also starts at rest and lowers the tip
 until the last level hangs.
 
-A level fixes the distal tip, not the pose that reaches it: the chain is folded
-by a random relative angle at every reset, so the same tip height is presented
-through a family of shapes rather than one extended arm.  Both hosts are two
-equal links on a pivot, so this module owns that mapping as well as the level
-specification and synchronization protocol.  Trainer-side deterministic probe
-evaluations decide when a level has been mastered.
+A level fixes the distal tip, not generally the pose that reaches it: from
+stage 2 onward the chain is folded by a random relative angle at every reset,
+so the same tip height is presented through a family of shapes.  Stage 1 is
+the deliberate exception—an unfolded chain with only a tiny mirrored tilt.
+Both hosts are two equal links on a pivot, so this module owns that mapping as
+well as the level specification and synchronization protocol.  Trainer-side
+deterministic probe evaluations decide when a level has been mastered.
 """
 
 from __future__ import annotations
@@ -35,7 +36,13 @@ PERFORMANCE_CURRICULUM_ENV_IDS = frozenset(
         "cartpole-two_poles-v2",
     }
 )
-INITIAL_TIP_HEIGHT_NORM = 0.995
+# Stage 1 is visually vertical but not an exact unstable equilibrium.  Its
+# fixed-magnitude tilt is mirrored left/right; expressing the level through
+# height preserves the mechanism-neutral curriculum representation.
+INITIAL_TIP_ANGLE_OFFSET_RAD = 1e-3
+INITIAL_TIP_HEIGHT_NORM = 0.5 * (
+    1.0 + float(np.cos(INITIAL_TIP_ANGLE_OFFSET_RAD))
+)
 # Half-width of the uniform relative-angle draw between the two links.  Zero
 # restores the extended chain, one pose per level and side.
 DEFAULT_ELBOW_SPREAD = float(np.pi / 6.0)
@@ -46,9 +53,9 @@ class TipCurriculumLevel:
     """One reset level: a distal-tip height and speed, plus its fold range.
 
     ``elbow_spread`` is the half-width of the relative-angle draw admitted at
-    this height.  It is the configured ceiling everywhere except within a
-    capture radius of the stabilization point, where folding the chain would
-    otherwise hand the agent a start it has already reached.
+    this height.  It is the configured ceiling except near the stabilization
+    point.  Stage 1 deliberately disables the fold so its only disturbance is
+    the tiny mirrored whole-chain tilt.
     """
 
     tip_height: float
@@ -170,16 +177,17 @@ class TipHeightVelocityCurriculum:
         )
 
     def _level_elbow_spread(self, tip_height: float) -> float:
-        """Largest fold at ``tip_height`` that still starts away from the goal.
+        """Largest fold allowed near the goal, or the configured full spread.
 
         Folding shortens the arm, so near the stabilization point it moves the
-        tip toward the goal rather than around it: a level a hair below upright
-        would otherwise be handed starts already inside the capture radius.
-        Writing ``c`` for the height above the pivot, the folded tip sits at
-        distance ``sqrt(reach^2 cos^2(e/2) - c^2 + (reach - c)^2)`` from the
-        goal, which gives the fold at which that distance first reaches the
-        required one.  The bound is inactive at every height further from the
-        goal than the capture radius, hanging included.
+        tip toward the goal rather than around it.  Writing ``c`` for the
+        height above the pivot, the folded tip sits at distance
+        ``sqrt(reach^2 cos^2(e/2) - c^2 + (reach - c)^2)`` from the goal,
+        which gives the fold at which that distance first reaches the requested
+        minimum.  If even the unfolded reference lies inside that minimum, as
+        the intentionally tiny stage-1 tilt does, the fold is disabled rather
+        than adding a larger second disturbance.  The five-second terminal
+        mastery hold ensures that this unstable start still requires control.
         """
 
         hanging_height, upright_height = self._tip_height_bounds
