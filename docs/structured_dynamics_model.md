@@ -107,21 +107,6 @@ $$
 
 The mass rate $\dot M$ reuses the same Jacobian $\partial M/\partial q$ as the Coriolis term, and $\ddot q$ is a dense solve against $M$. The position block $\dot q_{\text{obs}}$ is a slice of the observed velocities.
 
-### 2.5a Neither Coriolis term needs the Jacobian itself
-
-Both consumers of $\partial M/\partial q$ contract it twice with $\dot q$, so the full $(n_v,n_v,n_{\text{pos}})$ tensor is never used as such. Writing them as single directional derivatives:
-
-$$
-\dot M = \mathrm{JVP}\!\left[M\right](q;\,\dot q_{\text{obs}}), \qquad
-\tfrac12\,\dot q^\top\!\frac{\partial M}{\partial q}\,\dot q = \nabla_q\, s(q),\quad s(q)=\tfrac12\,\dot q^\top M(q)\,\dot q ,
-$$
-
-where $\dot q$ is held fixed in $s$. The mass rate is one *forward* tangent along the observed velocity, and the Coriolis force is the gradient of a *scalar* — one backward pass. A forward-mode Jacobian instead seeds one tangent per position coordinate ($n_{\text{pos}}=8$ on cheetah, and $\ge 2$ on every layout), so it does $n_{\text{pos}}$ times the work for a quantity that is immediately contracted away. The contact geometry is the mirror-image case: there the full Jacobians $J_n,J_t$ *are* needed, but with $K<n_{\text{pos}}$ outputs, reverse mode over the outputs is cheaper than forward mode over the inputs.
-
-Implementation note: with `analytic_derivatives=True` (the default) `models/port_hamiltonian.py` propagates these derivatives through the mechanics MLPs as explicit batched matmuls — the JVP is three matmuls the size of the forward pass, the VJP three more, plus the chain rule through the softplus-diagonal Cholesky factor and the sin/cos feature map. Setting it to `False` restores the `torch.func` (`vmap` + `jacfwd`/`grad`) formulation, which is the reference the equivalence tests in `tests/test_structured_analytic_derivatives.py` check values *and* parameter gradients against, per layout, with and without the contact port. The two agree to float32 roundoff (relative $\sim10^{-6}$).
-
-The motivation is entirely cost: a profile of the cheetah constraint arm attributed **36% of the training step** to four `vmap(jacfwd(...))`/`vmap(grad(...))` call sites, and roughly a quarter of that was Python interpreter overhead inside functorch's decomposition layer (`torch/_refs`, `_prims_common`, `inspect.Signature.bind`) rather than arithmetic — 490k of 1.12M `linear` calls per 1500 training steps took the reference path. The structured drift with the constraint solver measures **2.6× faster** in the forward pass and 2.4× with its backward; the compliant solver, whose remaining cost is smaller, gains 4.7×. This matters because the path is dispatch-bound rather than FLOP-bound, which is also why it does not respond to threads: the same arm ran at 1.05, 1.10 and 1.09 steps/s on 1, 4 and 14 torch threads.
-
 ### 2.6 Cyclic root-x
 
 The cheetah observation is $[q_{\text{pos}}\,(8);\ \dot q\,(9)]$: eight positions but nine velocities, because the root $x$ is dropped for translation invariance while its velocity is kept. That makes $x$ a **cyclic** coordinate: both $M$ and $V$ are independent of it. So its configuration-gradient slot in $\partial M/\partial q$ and $\partial V/\partial q$ is held at zero, while all nine velocities still enter $\dot q$. Concretely, the eight observed position-gradients are scattered into the nine-wide config axis by the observed-position-to-config map (config DOFs $1..8$); the cyclic index (config DOF 0) is absent from that map, so its slot stays zero. A **DOF layout** carries this mapping — the position and velocity slices, the cyclic config DOFs, the observed-position-to-config map, and an optional sparse actuator map — so the model applies to other manipulators through a supplied layout. The position-drift block is then exactly the slice of observed velocities that correspond to observed positions. The [cartpole note](structured_dynamics_cartpole.md) works the trivial layout (2 observed positions, 2 velocities, nothing cyclic) and the [cheetah note](structured_dynamics_cheetah.md) the full one, side by side with the physical terms each system asks the model to recover.
