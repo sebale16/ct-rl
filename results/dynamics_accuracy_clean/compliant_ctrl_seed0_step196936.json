@@ -1,0 +1,684 @@
+{
+  "primary": "policy",
+  "datasets": {
+    "reference": {
+      "physical_recovery": {
+        "gauge_scale_c": 4.447779308031592,
+        "mass_rel_frob_err": 0.5057316055044789,
+        "mass_entry_corr": 0.8605831445968435,
+        "mass_diag_rel_err": 0.2825952054218599,
+        "mass_offdiag_rel_err": 1.8561076114329644,
+        "mass_uppertri_corr": 0.9155769253641064,
+        "mass_eig_rel_err": 0.4257536217034398,
+        "mass_cond_ratio": 1.5491054697070998,
+        "mass_inverse_response_nrmse": 0.6965973296612016,
+        "mass_dMdz_ratio": 0.0,
+        "mass_dMdz_structural": true,
+        "potential_shape_R2": 0.9220923550721865,
+        "potential_slope_a": 11.591732657108029,
+        "potential_slope_ratio": 2.606184312286721,
+        "potential_locked_nrmse": 0.6543232617623955,
+        "kinetic_R2": 0.8297437160342562,
+        "kinetic_nrmse": 0.3641770198179665,
+        "total_H_shape_R2": 0.8640751428279588,
+        "total_H_locked_nrmse": 0.6732635595164228,
+        "gradV_force_corr": 0.12472967174327423,
+        "gradV_force_nrmse": 0.9996832223675486,
+        "gradV_force_err_p95": 1.2058365623077063,
+        "coriolis_force_corr": 0.18294256155746413,
+        "coriolis_force_nrmse": 1.2101442239392632,
+        "coriolis_force_err_p95": 2.9930549444237085,
+        "coriolis_force_nrmse_strata": {
+          "speed_low": 0.9029903502553752,
+          "speed_mid": 0.9097454512374427,
+          "speed_high": 1.220195038663516,
+          "flight": NaN,
+          "contact": 1.2101442239392632
+        },
+        "damping_force_corr": 0.8020849439595628,
+        "damping_force_nrmse": 0.5979950383166988,
+        "damping_force_err_p95": 1.297986522448497,
+        "actuator_force_corr": 0.22731021938859775,
+        "actuator_force_nrmse": 1.0957860037465381,
+        "actuator_force_err_p95": 1.2599882794350437,
+        "gradV_combined_corr": 0.12472967174327423,
+        "gradV_combined_nrmse": 0.9996832223675486,
+        "gradV_combined_err_p95": 1.2058365623077063,
+        "gradV_combined_nrmse_strata": {
+          "speed_low": 1.0422297768419366,
+          "speed_mid": 1.0140646849594037,
+          "speed_high": 0.9186076906617568,
+          "flight": NaN,
+          "contact": 0.9996832223675486
+        },
+        "contact_in_frac": 0.0,
+        "contact_spring_ratio": 2.3769424315008504e-24,
+        "contact_k": [
+          3.6701,
+          4.2939,
+          3.7917,
+          4.5424
+        ],
+        "contact_c": [
+          4.0987,
+          4.0644,
+          4.1129,
+          3.8874
+        ],
+        "contact_mu": [
+          0.856,
+          0.887,
+          0.8725,
+          0.9313
+        ],
+        "contact_in_frac_per": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "contact_gap_mean": 1.5321850776672363,
+        "contact_gap_min": 0.8974528312683105,
+        "contact_force_corr": -8.352112844275035e-10,
+        "contact_force_nrmse": 0.9999999999999997,
+        "contact_force_err_p95": 1.3707169891289626,
+        "contact_force_nrmse_strata": {
+          "speed_low": 0.9999999999999994,
+          "speed_mid": 0.9999999999999996,
+          "speed_high": 0.9999999999999996,
+          "flight": NaN,
+          "contact": 0.9999999999999997
+        },
+        "contact_power_corr": -1.1898146511263438e-09,
+        "contact_power_nrmse": 0.9999999999999986,
+        "contact_power_err_p95": 0.9017042922194792,
+        "contact_impulse_rel_err": 0.9999999999999982,
+        "contact_precision": 0.0,
+        "contact_recall": 0.0,
+        "contact_edge_offset_steps": NaN,
+        "contact_edge_count": 0,
+        "contact_edge_matched_frac": NaN,
+        "contact_match_corr": [],
+        "damping_learned": [
+          0.0002,
+          16.5757,
+          0.0139,
+          3.36,
+          2.478,
+          2.0294,
+          2.7352,
+          1.8708,
+          1.6124
+        ],
+        "damping_true": [
+          0.0,
+          0.0,
+          0.0,
+          6.0,
+          4.5,
+          3.0,
+          4.5,
+          3.0,
+          1.5
+        ],
+        "damping_rel_err": 1.73475229352112,
+        "damping_abs_err_per_dof": [
+          0.0002,
+          16.5757,
+          0.0139,
+          2.64,
+          2.022,
+          0.9706,
+          1.7648,
+          1.1292,
+          0.1124
+        ],
+        "damping_rel_err_per_dof": [
+          222252871.0263,
+          16575691223144.531,
+          13884787447.7506,
+          0.44,
+          0.4493,
+          0.3235,
+          0.3922,
+          0.3764,
+          0.0749
+        ],
+        "damping_locked_R2": -6.189039853040274,
+        "G_rel_frob_err": 0.8514895193313518,
+        "G_actuator_cosine": [
+          0.979,
+          0.976,
+          0.954,
+          0.302,
+          0.505,
+          0.746
+        ]
+      },
+      "predictive": {
+        "accel_corr": 0.5655651092529297,
+        "accel_nrmse": 1.6589765527011533,
+        "drift_nrmse": 1.657916730604105,
+        "rollout_rel_err_H4": 0.9470913404166096,
+        "rollout_rel_err_H8": 0.4912664461500791
+      },
+      "generator": {
+        "data_actions": {
+          "rmse": 34.35180292656826,
+          "bias": -31.329030973263865,
+          "p95": 57.144296181960456,
+          "p99": 68.95533408025072,
+          "corr": 0.11154098670974416,
+          "nrmse": 2.5619058510570376,
+          "rmse_strata": {
+            "speed_low": 30.22728758915533,
+            "speed_mid": 35.32343939226554,
+            "speed_high": 37.15787258454894,
+            "flight": NaN,
+            "contact": 34.35180292656826
+          }
+        },
+        "policy_actions": {
+          "rmse": 85.35159774054955,
+          "bias": -0.41511352663103024,
+          "p95": 163.0278647946867,
+          "p99": 192.76274561355245,
+          "corr": 0.4798462841834028,
+          "nrmse": 0.7594539931252445,
+          "rmse_strata": {
+            "speed_low": 81.7363340801563,
+            "speed_mid": 80.94901416711177,
+            "speed_high": 92.87441178120636,
+            "flight": NaN,
+            "contact": 85.35159774054955
+          }
+        },
+        "err_vs_action_novelty_corr": 0.1552588469094183
+      },
+      "quadrature": {
+        "rmse": 0.8099869683103991,
+        "bias": 0.14705020427703858,
+        "p95": 1.4836644172668456,
+        "p99": 1.7131154251098633,
+        "corr": 0.5306731462478638,
+        "nrmse": 0.836385013685247,
+        "sign_disagree_frac": 0.37,
+        "endpoint_state_nrmse": 0.12873598530387598,
+        "rmse_strata": {
+          "speed_low": 0.6990265846252441,
+          "speed_mid": 0.8038885593414307,
+          "speed_high": 0.9135757088661194,
+          "flight": NaN,
+          "contact": 0.80998694896698
+        }
+      },
+      "headline": {
+        "accel_corr": 0.5655651092529297,
+        "accel_nrmse": 1.6589765527011533,
+        "mass_rel_frob_err": 0.5057316055044789,
+        "coriolis_corr": 0.18294256155746413,
+        "coriolis_nrmse": 1.2101442239392632,
+        "gradV_combined_corr": 0.12472967174327423,
+        "gen_rmse": 34.35180292656826,
+        "quad_corr": 0.5306731462478638,
+        "quad_sign_disagree": 0.37
+      }
+    },
+    "policy": {
+      "physical_recovery": {
+        "gauge_scale_c": 4.204424434587674,
+        "mass_rel_frob_err": 0.522565510732533,
+        "mass_entry_corr": 0.8483158014611307,
+        "mass_diag_rel_err": 0.2864285163925684,
+        "mass_offdiag_rel_err": 2.8915442418721358,
+        "mass_uppertri_corr": 0.9095824786147938,
+        "mass_eig_rel_err": 0.442986765152434,
+        "mass_cond_ratio": 1.5404885216458177,
+        "mass_inverse_response_nrmse": 0.5792771439028199,
+        "mass_dMdz_ratio": 0.0,
+        "mass_dMdz_structural": true,
+        "potential_shape_R2": 0.9919178682382658,
+        "potential_slope_a": 8.090332915623629,
+        "potential_slope_ratio": 1.9242426737573461,
+        "potential_locked_nrmse": 0.48674436164063384,
+        "kinetic_R2": 0.9001298556091841,
+        "kinetic_nrmse": 0.2277511616643696,
+        "total_H_shape_R2": 0.9889213588301937,
+        "total_H_locked_nrmse": 0.49188494784516906,
+        "gradV_force_corr": 0.9118297884987785,
+        "gradV_force_nrmse": 0.6925406668267565,
+        "gradV_force_err_p95": 0.7167150171306373,
+        "coriolis_force_corr": 0.24797220814343032,
+        "coriolis_force_nrmse": 1.9351848114153067,
+        "coriolis_force_err_p95": 4.056289041506709,
+        "coriolis_force_nrmse_strata": {
+          "speed_low": 1.7136471725506897,
+          "speed_mid": 1.7270302037882492,
+          "speed_high": 1.9583717027235428,
+          "flight": NaN,
+          "contact": 1.9351848114153067
+        },
+        "damping_force_corr": 0.9196570465509193,
+        "damping_force_nrmse": 0.4754723099794082,
+        "damping_force_err_p95": 0.9066441783790802,
+        "actuator_force_corr": 0.28537145838617034,
+        "actuator_force_nrmse": 1.2216181422484242,
+        "actuator_force_err_p95": 1.2934232481316055,
+        "gradV_combined_corr": 0.9118297884987785,
+        "gradV_combined_nrmse": 0.6925406668267565,
+        "gradV_combined_err_p95": 0.7167150171306373,
+        "gradV_combined_nrmse_strata": {
+          "speed_low": 0.6884859006161459,
+          "speed_mid": 0.6910032793740668,
+          "speed_high": 0.6982721639559386,
+          "flight": NaN,
+          "contact": 0.6925406668267565
+        },
+        "contact_in_frac": 0.0,
+        "contact_spring_ratio": 3.218455936726929e-23,
+        "contact_k": [
+          3.4693,
+          4.0589,
+          3.5842,
+          4.2939
+        ],
+        "contact_c": [
+          3.8744,
+          3.842,
+          3.8879,
+          3.6747
+        ],
+        "contact_mu": [
+          0.856,
+          0.887,
+          0.8725,
+          0.9313
+        ],
+        "contact_in_frac_per": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "contact_gap_mean": 1.3161125183105469,
+        "contact_gap_min": 0.8633803725242615,
+        "contact_force_corr": 3.630552593132639e-08,
+        "contact_force_nrmse": 0.9999999999999998,
+        "contact_force_err_p95": 1.4885439705029082,
+        "contact_force_nrmse_strata": {
+          "speed_low": 0.9999999999999996,
+          "speed_mid": 0.9999999999999996,
+          "speed_high": 0.9999999999999996,
+          "flight": NaN,
+          "contact": 0.9999999999999998
+        },
+        "contact_power_corr": 7.83043472798561e-10,
+        "contact_power_nrmse": 0.9999999999999953,
+        "contact_power_err_p95": 1.8893558372051842,
+        "contact_impulse_rel_err": 0.9999999999999984,
+        "contact_precision": 0.0,
+        "contact_recall": 0.0,
+        "contact_edge_offset_steps": NaN,
+        "contact_edge_count": 0,
+        "contact_edge_matched_frac": NaN,
+        "contact_match_corr": [],
+        "damping_learned": [
+          0.0002,
+          15.6688,
+          0.0131,
+          3.1762,
+          2.3424,
+          1.9184,
+          2.5855,
+          1.7684,
+          1.5242
+        ],
+        "damping_true": [
+          0.0,
+          0.0,
+          0.0,
+          6.0,
+          4.5,
+          3.0,
+          4.5,
+          3.0,
+          1.5
+        ],
+        "damping_rel_err": 1.6534113876316623,
+        "damping_abs_err_per_dof": [
+          0.0002,
+          15.6688,
+          0.0131,
+          2.8238,
+          2.1576,
+          1.0816,
+          1.9145,
+          1.2316,
+          0.0242
+        ],
+        "damping_rel_err_per_dof": [
+          210092577.6176,
+          15668771743774.414,
+          13125098310.411,
+          0.4706,
+          0.4795,
+          0.3605,
+          0.4254,
+          0.4105,
+          0.0161
+        ],
+        "damping_locked_R2": -5.530670906681861,
+        "G_rel_frob_err": 0.838567505666964,
+        "G_actuator_cosine": [
+          0.979,
+          0.976,
+          0.954,
+          0.302,
+          0.505,
+          0.746
+        ]
+      },
+      "predictive": {
+        "accel_corr": 0.9082387089729309,
+        "accel_nrmse": 0.5052417276268135,
+        "drift_nrmse": 0.5052380524097123,
+        "rollout_rel_err_H4": 0.287857632745396,
+        "rollout_rel_err_H8": 0.2707814163699442
+      },
+      "generator": {
+        "data_actions": {
+          "rmse": 38.82081438866547,
+          "bias": 35.00741800390717,
+          "p95": 58.21846877567786,
+          "p99": 68.7987438367193,
+          "corr": -0.4129908956887923,
+          "nrmse": 2.5330517516031015,
+          "rmse_strata": {
+            "speed_low": 37.45397718915102,
+            "speed_mid": 38.54319721085123,
+            "speed_high": 40.41747523944461,
+            "flight": NaN,
+            "contact": 38.82081438866547
+          }
+        },
+        "policy_actions": {
+          "rmse": 37.560315554253876,
+          "bias": 32.76317722565624,
+          "p95": 58.04411488334012,
+          "p99": 65.42075221269985,
+          "corr": -0.4896221351824856,
+          "nrmse": 2.238530630966445,
+          "rmse_strata": {
+            "speed_low": 37.36790968395279,
+            "speed_mid": 36.59367805074936,
+            "speed_high": 38.69085630859862,
+            "flight": NaN,
+            "contact": 37.560315554253876
+          }
+        },
+        "err_vs_action_novelty_corr": -0.2403863305709289
+      },
+      "quadrature": {
+        "rmse": 0.37171100304400206,
+        "bias": 0.3336777234077454,
+        "p95": 0.5581247329711913,
+        "p99": 0.6387609291076659,
+        "corr": -0.5371618866920471,
+        "nrmse": 2.589239293383305,
+        "sign_disagree_frac": 0.5325,
+        "endpoint_state_nrmse": 0.4008530690937999,
+        "rmse_strata": {
+          "speed_low": 0.36947107315063477,
+          "speed_mid": 0.3689407408237457,
+          "speed_high": 0.376687616109848,
+          "flight": NaN,
+          "contact": 0.37171098589897156
+        }
+      },
+      "energy_balance": {
+        "residual_nrmse": 1.5287092480775755e-07,
+        "passivity_violation_frac": 0.0,
+        "power_actuator_mean": -0.013699343428015709,
+        "power_damping_mean": -1.565685749053955,
+        "power_joint_limit_mean": 0.0,
+        "power_contact_mean": -3.403350417870078e-22,
+        "power_spring_mean": -4.9011967484426725e-24,
+        "dE_dt_mean": -1.5793850421905518
+      },
+      "headline": {
+        "accel_corr": 0.9082387089729309,
+        "accel_nrmse": 0.5052417276268135,
+        "mass_rel_frob_err": 0.522565510732533,
+        "coriolis_corr": 0.24797220814343032,
+        "coriolis_nrmse": 1.9351848114153067,
+        "gradV_combined_corr": 0.9118297884987785,
+        "gen_rmse": 38.82081438866547,
+        "quad_corr": -0.5371618866920471,
+        "quad_sign_disagree": 0.5325
+      }
+    },
+    "best_policy": {
+      "physical_recovery": {
+        "gauge_scale_c": 4.311079979011793,
+        "mass_rel_frob_err": 0.5282694092172534,
+        "mass_entry_corr": 0.8448613541190583,
+        "mass_diag_rel_err": 0.295259311466611,
+        "mass_offdiag_rel_err": 2.5323404739837887,
+        "mass_uppertri_corr": 0.9065787167298072,
+        "mass_eig_rel_err": 0.43885790409291164,
+        "mass_cond_ratio": 1.438298717756572,
+        "mass_inverse_response_nrmse": 0.5148970083716023,
+        "mass_dMdz_ratio": 0.0,
+        "mass_dMdz_structural": true,
+        "potential_shape_R2": 0.9823007853383863,
+        "potential_slope_a": 7.833425867688168,
+        "potential_slope_ratio": 1.817044894973618,
+        "potential_locked_nrmse": 0.4650924607384056,
+        "kinetic_R2": 0.7853776661668157,
+        "kinetic_nrmse": 0.269241043971945,
+        "total_H_shape_R2": 0.6654944137445482,
+        "total_H_locked_nrmse": 0.5885897462133188,
+        "gradV_force_corr": 0.6644813953088297,
+        "gradV_force_nrmse": 0.7741083394223514,
+        "gradV_force_err_p95": 1.2066512105521785,
+        "coriolis_force_corr": 0.5049296169617878,
+        "coriolis_force_nrmse": 0.9586565769979114,
+        "coriolis_force_err_p95": 1.9354364903338106,
+        "coriolis_force_nrmse_strata": {
+          "speed_low": 1.222736940514489,
+          "speed_mid": 1.1015989140419098,
+          "speed_high": 0.9317665819334471,
+          "flight": 0.976575687429317,
+          "contact": 0.9138068253793883
+        },
+        "damping_force_corr": 0.7364965556059251,
+        "damping_force_nrmse": 0.6804826913199808,
+        "damping_force_err_p95": 1.0876380007226556,
+        "actuator_force_corr": 0.32407171766978055,
+        "actuator_force_nrmse": 1.249707821643127,
+        "actuator_force_err_p95": 1.4565315129707341,
+        "gradV_combined_corr": 0.6644813953088297,
+        "gradV_combined_nrmse": 0.7741083394223514,
+        "gradV_combined_err_p95": 1.2066512105521785,
+        "gradV_combined_nrmse_strata": {
+          "speed_low": 0.6974047482183947,
+          "speed_mid": 0.8757429031484139,
+          "speed_high": 0.7352422829666947,
+          "flight": 0.5615848907871684,
+          "contact": 0.9486931005991609
+        },
+        "contact_in_frac": 0.0,
+        "contact_spring_ratio": 2.8074057108664387e-18,
+        "contact_k": [
+          3.5573,
+          4.1619,
+          3.6751,
+          4.4028
+        ],
+        "contact_c": [
+          3.9727,
+          3.9395,
+          3.9865,
+          3.7679
+        ],
+        "contact_mu": [
+          0.856,
+          0.887,
+          0.8725,
+          0.9313
+        ],
+        "contact_in_frac_per": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "contact_gap_mean": 1.4405157566070557,
+        "contact_gap_min": 0.5744355916976929,
+        "contact_force_corr": 0.010098643001888102,
+        "contact_force_nrmse": 0.9999999999999999,
+        "contact_force_err_p95": 2.042891937089145,
+        "contact_force_nrmse_strata": {
+          "speed_low": 0.9999999999999998,
+          "speed_mid": 0.9999999999999998,
+          "speed_high": 0.9999999999999997,
+          "flight": 0.9999999999999993,
+          "contact": 0.9999999999999999
+        },
+        "contact_power_corr": 0.006138891460241262,
+        "contact_power_nrmse": 0.9999999999999999,
+        "contact_power_err_p95": 1.120810046735465,
+        "contact_impulse_rel_err": 0.9999999999999984,
+        "contact_precision": 0.0,
+        "contact_recall": 0.0,
+        "contact_edge_offset_steps": NaN,
+        "contact_edge_count": 34,
+        "contact_edge_matched_frac": 0.0,
+        "contact_match_corr": [],
+        "damping_learned": [
+          0.0002,
+          16.0662,
+          0.0135,
+          3.2568,
+          2.4019,
+          1.9671,
+          2.6511,
+          1.8133,
+          1.5629
+        ],
+        "damping_true": [
+          0.0,
+          0.0,
+          0.0,
+          6.0,
+          4.5,
+          3.0,
+          4.5,
+          3.0,
+          1.5
+        ],
+        "damping_rel_err": 1.6888442916917588,
+        "damping_abs_err_per_dof": [
+          0.0002,
+          16.0662,
+          0.0135,
+          2.7432,
+          2.0981,
+          1.0329,
+          1.8489,
+          1.1867,
+          0.0629
+        ],
+        "damping_rel_err_per_dof": [
+          215422100.1547,
+          16066249847412.11,
+          13458048924.8037,
+          0.4572,
+          0.4663,
+          0.3443,
+          0.4109,
+          0.3956,
+          0.0419
+        ],
+        "damping_locked_R2": -5.813577043775276,
+        "G_rel_frob_err": 0.8439438828754559,
+        "G_actuator_cosine": [
+          0.979,
+          0.976,
+          0.954,
+          0.302,
+          0.505,
+          0.746
+        ]
+      },
+      "predictive": {
+        "accel_corr": 0.9266079664230347,
+        "accel_nrmse": 0.3980599404261559,
+        "drift_nrmse": 0.39799334555330385,
+        "rollout_rel_err_H4": 0.19365619551954846,
+        "rollout_rel_err_H8": 0.1427158552164934
+      },
+      "generator": {
+        "data_actions": {
+          "rmse": 64.20683141961625,
+          "bias": 38.09147447784358,
+          "p95": 100.74293747836398,
+          "p99": 131.13189198029676,
+          "corr": 0.4098637210973782,
+          "nrmse": 1.1385191326286153,
+          "rmse_strata": {
+            "speed_low": 65.78760037260618,
+            "speed_mid": 67.55614477031563,
+            "speed_high": 58.94205202992065,
+            "flight": 67.39204011465185,
+            "contact": 59.95340297881905
+          }
+        },
+        "policy_actions": {
+          "rmse": 69.59432383669038,
+          "bias": 48.37707659830717,
+          "p95": 107.1064099137604,
+          "p99": 146.55127851591007,
+          "corr": 0.5417409394661797,
+          "nrmse": 1.184758680112559,
+          "rmse_strata": {
+            "speed_low": 73.11788195451382,
+            "speed_mid": 75.48400558650533,
+            "speed_high": 59.010754165401224,
+            "flight": 73.248341733883,
+            "contact": 64.69754493399807
+          }
+        },
+        "err_vs_action_novelty_corr": -0.25158159415467324
+      },
+      "quadrature": {
+        "rmse": 0.6665663462280447,
+        "bias": 0.48019949197769163,
+        "p95": 1.0248908042907714,
+        "p99": 1.3753147125244136,
+        "corr": 0.39894917607307434,
+        "nrmse": 1.3092942350574572,
+        "sign_disagree_frac": 0.635,
+        "endpoint_state_nrmse": 0.25657392093749526,
+        "rmse_strata": {
+          "speed_low": 0.7103747725486755,
+          "speed_mid": 0.7128554582595825,
+          "speed_high": 0.5654054284095764,
+          "flight": 0.7188342213630676,
+          "contact": 0.5942051410675049
+        }
+      },
+      "headline": {
+        "accel_corr": 0.9266079664230347,
+        "accel_nrmse": 0.3980599404261559,
+        "mass_rel_frob_err": 0.5282694092172534,
+        "coriolis_corr": 0.5049296169617878,
+        "coriolis_nrmse": 0.9586565769979114,
+        "gradV_combined_corr": 0.6644813953088297,
+        "gen_rmse": 64.20683141961625,
+        "quad_corr": 0.39894917607307434,
+        "quad_sign_disagree": 0.635
+      }
+    }
+  }
+}

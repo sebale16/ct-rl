@@ -1,0 +1,164 @@
+{
+ "constraint/seed0/all": {
+  "mass_rel": 0.3428489591070351,
+  "offdiag": 0.7632479908264908,
+  "plugin_cF": 0.5376415237454756,
+  "plugin_best_c": 0.45875904854271277,
+  "global_refit": 0.3392191923577689,
+  "own_drift": 0.5161398604939048,
+  "n": 6000
+ },
+ "constraint/seed0/flight": {
+  "mass_rel": 0.3271403154110713,
+  "offdiag": 0.7726713991046665,
+  "plugin_cF": 0.5348801036536339,
+  "plugin_best_c": 0.3705575534851825,
+  "global_refit": 0.23051628285197448,
+  "own_drift": 0.3513603393708659,
+  "n": 4712
+ },
+ "constraint/seed0/stance": {
+  "mass_rel": 0.38744142079344024,
+  "offdiag": 0.7438981929579214,
+  "plugin_cF": 0.5386132886664808,
+  "plugin_best_c": 0.5275070446917118,
+  "global_refit": 0.36920186593408444,
+  "own_drift": 0.6677600412791379,
+  "n": 1288
+ },
+ "constraint/seed1/all": {
+  "mass_rel": 0.38616041585953675,
+  "offdiag": 1.1554416239430085,
+  "plugin_cF": 0.5713691368963008,
+  "plugin_best_c": 0.5657373157899903,
+  "global_refit": 0.419299855534076,
+  "own_drift": 0.5770338461294852,
+  "n": 6000
+ },
+ "constraint/seed1/flight": {
+  "mass_rel": 0.38953263340715805,
+  "offdiag": 1.2241777907314397,
+  "plugin_cF": 0.4818633940937198,
+  "plugin_best_c": 0.4566314771392532,
+  "global_refit": 0.2716570538515697,
+  "own_drift": 0.4787095294418918,
+  "n": 4712
+ },
+ "constraint/seed1/stance": {
+  "mass_rel": 0.35943282162614876,
+  "offdiag": 0.8034390329135431,
+  "plugin_cF": 0.6628579864530216,
+  "plugin_best_c": 0.6622163256798915,
+  "global_refit": 0.46401951886206716,
+  "own_drift": 0.6806763495536798,
+  "n": 1288
+ },
+ "constraint/seed2/all": {
+  "mass_rel": 0.3231093808044104,
+  "offdiag": 0.6082848760012244,
+  "plugin_cF": 0.4581209428150553,
+  "plugin_best_c": 0.4524260063827545,
+  "global_refit": 0.3674432319045072,
+  "own_drift": 0.4821842065685679,
+  "n": 6000
+ },
+ "constraint/seed2/flight": {
+  "mass_rel": 0.2957480527992707,
+  "offdiag": 0.5994189221114586,
+  "plugin_cF": 0.29958164638693013,
+  "plugin_best_c": 0.26645417151611506,
+  "global_refit": 0.18840829475870421,
+  "own_drift": 0.280949204526549,
+  "n": 4712
+ },
+ "constraint/seed2/stance": {
+  "mass_rel": 0.431165486073718,
+  "offdiag": 0.6532918308432606,
+  "plugin_cF": 0.6167901979534385,
+  "plugin_best_c": 0.608975987398161,
+  "global_refit": 0.4533129567665895,
+  "own_drift": 0.6521842468824085,
+  "n": 1288
+ },
+ "compliant_ctrl/seed0/all": {
+  "mass_rel": 0.5680863879229789,
+  "offdiag": 2.149543227633612,
+  "plugin_cF": 1.4214769817271407,
+  "plugin_best_c": 0.9263133120871307,
+  "global_refit": 0.47294433636699473,
+  "own_drift": 0.6164429902754316,
+  "n": 6000
+ },
+ "compliant_ctrl/seed0/flight": {
+  "mass_rel": 0.5747317749872254,
+  "offdiag": 2.1910780284635876,
+  "plugin_cF": 1.2186836687149314,
+  "plugin_best_c": 0.6567712640592412,
+  "global_refit": 0.3336267414052005,
+  "own_drift": 0.49254768332661314,
+  "n": 4712
+ },
+ "compliant_ctrl/seed0/stance": {
+  "mass_rel": 0.5435152629307688,
+  "offdiag": 1.9947530490906002,
+  "plugin_cF": 1.6263437987460023,
+  "plugin_best_c": 1.1700174173610973,
+  "global_refit": 0.4076507239358811,
+  "own_drift": 0.7433295596157644,
+  "n": 1288
+ },
+ "compliant_ctrl/seed1/all": {
+  "mass_rel": 0.3623362481077893,
+  "offdiag": 1.1681147021549232,
+  "plugin_cF": 0.5672534404546524,
+  "plugin_best_c": 0.5627436613818556,
+  "global_refit": 0.3765870018363891,
+  "own_drift": 0.6198342944649753,
+  "n": 6000
+ },
+ "compliant_ctrl/seed1/flight": {
+  "mass_rel": 0.33777095815250285,
+  "offdiag": 1.179530080021269,
+  "plugin_cF": 0.477838363280953,
+  "plugin_best_c": 0.4614732513731382,
+  "global_refit": 0.2309568646150656,
+  "own_drift": 0.4946014249381765,
+  "n": 4712
+ },
+ "compliant_ctrl/seed1/stance": {
+  "mass_rel": 0.43206979871425966,
+  "offdiag": 1.1517428740492153,
+  "plugin_cF": 0.6694900813989741,
+  "plugin_best_c": 0.6675544435889466,
+  "global_refit": 0.4023410405087269,
+  "own_drift": 0.7479641738310587,
+  "n": 1288
+ },
+ "compliant_ctrl/seed2/all": {
+  "mass_rel": 0.35896498572348656,
+  "offdiag": 0.7893459305144279,
+  "plugin_cF": 0.5526460856025037,
+  "plugin_best_c": 0.5465840527153843,
+  "global_refit": 0.3768653495253459,
+  "own_drift": 0.6045676662871861,
+  "n": 6000
+ },
+ "compliant_ctrl/seed2/flight": {
+  "mass_rel": 0.35148350435136155,
+  "offdiag": 0.7572209527181588,
+  "plugin_cF": 0.5035204861551538,
+  "plugin_best_c": 0.49546273737891344,
+  "global_refit": 0.2649184047298724,
+  "own_drift": 0.4978758822320785,
+  "n": 4712
+ },
+ "compliant_ctrl/seed2/stance": {
+  "mass_rel": 0.3856652826231326,
+  "offdiag": 0.8914091524942388,
+  "plugin_cF": 0.6093337960633148,
+  "plugin_best_c": 0.6046111401733197,
+  "global_refit": 0.37522322820735515,
+  "own_drift": 0.7163826558894426,
+  "n": 1288
+ }
+}

@@ -1,0 +1,79 @@
+{
+ "500": {
+  "n_fit": 500,
+  "eq_per_par": 1.7543859649122806,
+  "sens_min": 0.011545936836398955,
+  "n_below_038": 305,
+  "mass_at_accel038_fit": 0.5336080564628665,
+  "mass_at_accel038_held": 0.4033692325877118,
+  "max_hideable_held": 0.17441859047205094,
+  "witness05_accel_fit": 0.005479268522906942,
+  "witness05_accel_held": 1.5472302590171256
+ },
+ "1000": {
+  "n_fit": 1000,
+  "eq_per_par": 3.508771929824561,
+  "sens_min": 0.015829640940937115,
+  "n_below_038": 155,
+  "mass_at_accel038_fit": 0.763708327300151,
+  "mass_at_accel038_held": 0.5515282051324983,
+  "max_hideable_held": 0.5282256808862121,
+  "witness05_accel_fit": 0.03171666786079876,
+  "witness05_accel_held": 0.2190057092243388
+ },
+ "2000": {
+  "n_fit": 2000,
+  "eq_per_par": 7.017543859649122,
+  "sens_min": 0.02010799331092056,
+  "n_below_038": 104,
+  "mass_at_accel038_fit": 0.796951592945579,
+  "mass_at_accel038_held": 0.7180785712028966,
+  "max_hideable_held": 0.5895376021162707,
+  "witness05_accel_fit": 0.03896994021132201,
+  "witness05_accel_held": 0.0577373802629046
+ },
+ "4000": {
+  "n_fit": 4000,
+  "eq_per_par": 14.035087719298245,
+  "sens_min": 0.021545396127219996,
+  "n_below_038": 69,
+  "mass_at_accel038_fit": 0.7757051072304002,
+  "mass_at_accel038_held": 0.7147437724846,
+  "max_hideable_held": 0.5758759118601856,
+  "witness05_accel_fit": 0.03912186832219244,
+  "witness05_accel_held": 0.045525451909822705
+ },
+ "8000": {
+  "n_fit": 8000,
+  "eq_per_par": 28.07017543859649,
+  "sens_min": 0.019754706258918862,
+  "n_below_038": 67,
+  "mass_at_accel038_fit": 0.7969866946220673,
+  "mass_at_accel038_held": 0.7837221350844995,
+  "max_hideable_held": 1.8809470741003151,
+  "witness05_accel_fit": 0.0067739483460997315,
+  "witness05_accel_held": 0.015038332037377184
+ },
+ "16000": {
+  "n_fit": 16000,
+  "eq_per_par": 56.14035087719298,
+  "sens_min": 0.021016742103649774,
+  "n_below_038": 67,
+  "mass_at_accel038_fit": 0.8443843303495505,
+  "mass_at_accel038_held": 0.7989651580814805,
+  "max_hideable_held": 0.6486272806385643,
+  "witness05_accel_fit": 0.03583506593305391,
+  "witness05_accel_held": 0.04058840101621547
+ },
+ "22000": {
+  "n_fit": 22000,
+  "eq_per_par": 77.19298245614036,
+  "sens_min": 0.021631133370534933,
+  "n_below_038": 58,
+  "mass_at_accel038_fit": 0.7953256867416791,
+  "mass_at_accel038_held": 0.823401184846271,
+  "max_hideable_held": 1.9990113976228614,
+  "witness05_accel_fit": 0.007654432326627422,
+  "witness05_accel_held": 0.007961677448885238
+ }
+}

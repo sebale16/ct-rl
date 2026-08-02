@@ -1,0 +1,11 @@
+{
+  "gate": "passed",
+  "n": 6000,
+  "solver": "compliant",
+  "A_freeze_nuisances": {
+    "accel_nrmse": 0.005557543132454157,
+    "rel_frob": 0.006644797045737505,
+    "off_diag": 0.024293987080454826,
+    "kinetic": 0.008466728149536818
+  }
+}

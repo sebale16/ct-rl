@@ -1,0 +1,14 @@
+{
+  "gate": "passed",
+  "n": 6000,
+  "solver": "compliant",
+  "B_freeze_mass": {
+    "accel_nrmse_before": 1.491007685661316,
+    "accel_nrmse_after": 0.4928392171859741,
+    "mass_error_frozen": {
+      "rel_frob": 0.7952329516410828,
+      "off_diag": 0.9535650610923767,
+      "kinetic": 0.8132430452330438
+    }
+  }
+}

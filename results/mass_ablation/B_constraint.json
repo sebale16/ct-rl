@@ -1,0 +1,14 @@
+{
+  "gate": "passed",
+  "n": 6000,
+  "solver": "constraint",
+  "B_freeze_mass": {
+    "accel_nrmse_before": 1.6599466800689697,
+    "accel_nrmse_after": 0.48441028594970703,
+    "mass_error_frozen": {
+      "rel_frob": 0.8848573565483093,
+      "off_diag": 0.8714026808738708,
+      "kinetic": 0.7742048590866314
+    }
+  }
+}
