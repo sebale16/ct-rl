@@ -926,7 +926,7 @@ with one unconstrained parameter $\hat c_i$ per contact point and $\kappa=0.1$ b
 
 Sharing one coefficient between a contact's normal and tangential slot is what preserves the cone implication of §7.1: the scaling applied inside a contact block stays uniform, so cone membership and the friction ratio are untouched.
 
-An equivalent position-level stiffness follows from static equilibrium. With a resting penetration $-g_i$ recovered at fraction $\beta_i$ over the response interval $h$, stationarity gives
+An equivalent position-level stiffness follows from static equilibrium. A resting contact has zero outgoing normal velocity and zero current normal velocity, so its request reduces to the recovery term and the compliance relation $v^+-v^*=-\tilde R\Lambda$ balances that request against the load carried. With a resting penetration $-g_i$ recovered at fraction $\beta_i$ over the response interval $h$, stationarity gives
 
 $$
 \beta_i\frac{-g_i}{h}=\tilde R_{ii}\Lambda_{n,i},
@@ -934,7 +934,15 @@ $$
 k_i=\frac{\beta_i}{\tilde R_{ii}h^2},
 $$
 
-so a resting contact carries load at a penetration set by $c_{0,i}$, $\beta_i$ and the response interval.
+the second relation following from the sustained force $\Lambda_{n,i}/h$ acting through a deflection equal to the penetration. The penetration cancels, so a loaded contact carries force in proportion to how far it has sunk, with $k_i$ as its spring constant.
+
+The gate value fixes which compliance enters that relation. A contact carrying load at rest has $g_i\le0=g_{\mathrm{on}}$, so $s_i=1$, the shape factor $1-s_i^2$ vanishes and $\tilde R_{ii}=\eta\sigma$:
+
+$$
+k_i=\frac{\beta_i}{\eta\,\sigma\,h^2}.
+$$
+
+A resting contact therefore carries load at a penetration set by the conditioning floor $\eta$, the recovery fraction $\beta_i$, the contact-space scale $\sigma$ and the response interval, and $c_{0,i}$ sets the softness of the taper, where its shape factor is active. Raising $g_{\mathrm{on}}$ above zero would place a load-bearing contact inside the compliant region and bring $c_{0,i}$ into this relation as well.
 
 ### 7.3 The target optimization problem
 
