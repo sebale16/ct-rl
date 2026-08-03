@@ -7,7 +7,7 @@ robots: noindex
 # The Contact-Impulse Quadratic Program, from First Principles
 
 :::info
-**Purpose.** This note derives the contact optimization used by the structured dynamics model from one mechanical principle. A contact reaction does no work along any motion the contact permits, so the outgoing motion is the kinetic-metric projection of the freely predicted motion onto the admissible set — a minimum. The note builds that projection into the contact quadratic program the model solves, then adds the friction cone, the implemented regularized form, and the fixed-budget solver.
+**Purpose.** This note derives the contact optimization used by the structured dynamics model from one mechanical principle. A contact reaction does no work along any motion the contact permits, so the outgoing motion is the kinetic-metric projection of the freely predicted motion onto the admissible set — a minimum. The note builds that projection into the contact quadratic program the model solves, then adds the friction cone, the gated compliant form, and the fixed-budget solver.
 
 The short version: **the outgoing motion is the admissible motion closest to the free motion in the kinetic-energy metric.** The impulse is the multiplier of non-penetration, the friction cone is the admissible-impulse set, and a requested outgoing velocity encodes inelastic impact, restitution, and penetration recovery. The solution's location identifies zero impulse, sticking, or friction saturation; a saturated residual distinguishes incipient slip from sliding. A fixed-budget ADMM solves it, and a small latent-impulse penalty conditions the solve.
 
@@ -16,7 +16,7 @@ This is a companion to [§2.7 and Appendix B.3 of the structured dynamics note](
 
 [TOC]
 
-Sections 1–5 build the ideal contact problem from the least-constraint principle: the principle (§1), the impulse and the contact map (§2), the projection written as a quadratic program (§3), the friction cone (§4), and the complete ideal problem (§5). Section 6 reads off its optimality conditions, §7 gives the implemented regularized form, §8 the solver, and §§9–11 its use, with §12 a summary. Worked numerical examples are collected in Appendix A and a minimal optimization vocabulary in Appendix B.
+Sections 1–5 build the ideal contact problem from the least-constraint principle: the principle (§1), the impulse and the contact map (§2), the projection written as a quadratic program (§3), the friction cone (§4), and the complete ideal problem (§5). Section 6 reads off its optimality conditions, §7 gives the gated compliant form, §8 the solver, and §§9–11 its use, with §12 a summary. Worked numerical examples are collected in Appendix A and a minimal optimization vocabulary in Appendix B.
 
 ---
 
@@ -57,7 +57,7 @@ where $\mathcal A$ is the set of admissible outgoing motions. The outgoing motio
 - **a one-sided reaction** — the ground pushes and never pulls, so the normal impulse is nonnegative;
 - **a friction bound** — the tangential impulse a contact can carry is limited by the normal impulse through the Coulomb coefficient.
 
-The first condition defines $\mathcal A$ in velocity space; the second and third describe the impulses allowed to enforce it. The rest of the note turns the boxed projection into a quadratic program: §2 introduces the impulse and the map from impulse to contact velocity, §3 writes the projection as that program, §4 gives the friction cone, and §5 states the complete ideal problem. Sections 6–8 add the optimality conditions, the implemented regularized form, and the solver.
+The first condition defines $\mathcal A$ in velocity space; the second and third describe the impulses allowed to enforce it. The rest of the note turns the boxed projection into a quadratic program: §2 introduces the impulse and the map from impulse to contact velocity, §3 writes the projection as that program, §4 gives the friction cone, and §5 states the complete ideal problem. Sections 6–8 add the optimality conditions, the gated compliant form, and the solver.
 
 ---
 
@@ -77,7 +77,7 @@ Computing the projection of §1 needs two things: the variable the contact choos
 | $\Lambda\ (2K)$ | physical contact impulse |
 | $v\ (2K)$ | contact-point velocity |
 | $W\ (2K\times 2K)$ | contact-space inverse mass, or Delassus matrix |
-| $h$ | contact response horizon; distinct from the learned horizontal offset $h_i(q)$ |
+| $h$ | contact response horizon |
 
 The impulse is ordered interleaved by contact:
 
@@ -99,17 +99,23 @@ Impulse has units of force times time, such as $\mathrm{N\,s}$. It directly chan
 
 ### 2.2 The contact Jacobian
 
-For learned point $i$, write its contact coordinates in normal–tangential order as
+For contact point $i$, write its contact coordinates in normal–tangential order as
 
 $$
 r_i^c(q)=
 \begin{bmatrix}
 g_i(q)\\
-x_{\mathrm{root}}+h_i(q)
-\end{bmatrix}.
+p_{i,x}(q)
+\end{bmatrix},
 $$
 
-The signed-gap convention is
+where $p_i(q)=(p_{i,x},p_{i,z})$ is the point's position in the plane of motion and
+
+$$
+g_i(q)=p_{i,z}(q)-\varrho_i
+$$
+
+is its signed distance to a ground plane at $z=0$, with $\varrho_i$ the radius of the capsule the point belongs to. The signed-gap convention is
 
 $$
 g_i>0\ \text{above the ground},
@@ -119,15 +125,52 @@ g_i=0\ \text{at the ground},
 g_i<0\ \text{in penetration}.
 $$
 
-The function $h_i(q)$ is the point's learned horizontal offset from the root. The row $e_x$ selects the root's horizontal velocity, so $e_x+\partial h_i/\partial q$ is the velocity of the point's absolute horizontal position.
-
-Its Jacobian rows are
+Both coordinates come from the kinematic tree in closed form. Each contact point is reached from the root through an ordered chain of hinge angles $a_0,a_1,\ldots,a_m$ with a link offset $d_k=(d_{k,x},d_{k,z})$ per joint, all hinges sharing one axis, so rotations compose by addition:
 
 $$
-J_{n,i}=\frac{\partial g_i}{\partial q},
+\Theta_{i,k}=\sum_{j\le k}q_{a_j},
+$$
+
+$$
+p_{i,z}=z_0+q_z+\sum_k\left(-d_{k,x}\sin\Theta_{i,k}+d_{k,z}\cos\Theta_{i,k}\right),
+$$
+
+$$
+p_{i,x}=q_x+\sum_k\left(d_{k,x}\cos\Theta_{i,k}+d_{k,z}\sin\Theta_{i,k}\right),
+$$
+
+where $z_0$ is the root frame's height offset and $q_x,q_z$ are the root translations.
+
+Differentiating a rotation about a shared axis gives the classical revolute-joint column, a cross product of the axis with the lever arm from that joint's pivot to the point:
+
+$$
+\frac{\partial p_i}{\partial q_{a_j}}
+=\hat\omega\times(p_i-p_j)
+=\begin{bmatrix}
++(p_{i,z}-p_{j,z})\\
+-(p_{i,x}-p_{j,x})
+\end{bmatrix},
+$$
+
+together with the two root columns
+
+$$
+\frac{\partial p_{i,x}}{\partial q_x}=1,
 \qquad
-J_{t,i}=e_x+\frac{\partial h_i}{\partial q}.
+\frac{\partial p_{i,z}}{\partial q_z}=1.
 $$
+
+The lever arm $p_i-p_j$ is the sum of every link offset from joint $a_j$ outward, so a single pair of cumulative sums along the chain — forward over the angles, backward over the placed offsets — supplies the whole point Jacobian at once.
+
+Collecting the two components gives the point Jacobian $J_{v,i}$, whose rows are the contact-frame directions for a ground plane of constant normal:
+
+$$
+J_{n,i}=\hat z^\top J_{v,i}=\frac{\partial g_i}{\partial q},
+\qquad
+J_{t,i}=\hat x^\top J_{v,i}.
+$$
+
+Two entries follow directly and fix the coupling to the root degrees of freedom: $J_{n,i}$ has a unit entry in the root-height column and vanishes in the root-horizontal column, since a point's height is independent of horizontal translation; $J_{t,i}$ has a unit entry in the root-horizontal column, since translating the root translates every point with it.
 
 Stacking those rows over all contacts gives $J$, which maps generalized velocity to contact velocity:
 
@@ -357,7 +400,7 @@ With upward velocity positive, $v_{n,i}^*=0$ requests rest in the normal directi
 | $\beta_i d_i$ | fractional outward motion for penetration recovery |
 | $v_{t,i}^*=0$ | sticking, if the friction budget permits it |
 
-The cap $v_{\max}$ keeps the requested penetration-recovery speed in the bounded range $0\le d_i\le v_{\max}$ across learned gap values. In the implementation, $e_i,\beta_i\in(0,0.5)$. Section 4 introduces the learned friction coefficient $\mu_i$.
+The cap $v_{\max}$ keeps the requested penetration-recovery speed in the bounded range $0\le d_i\le v_{\max}$ across gap values, and $e_i,\beta_i\in(0,0.5)$. Section 4 introduces the learned friction coefficient $\mu_i$, and §7.2 the learned compliance $c_{0,i}$.
 
 Stack these targets in the same interleaved ordering as the contact velocity:
 
@@ -492,7 +535,7 @@ $$
 
 Membership $\Lambda_{\mathrm{req}}\in\mathcal C_\mu$ gives exact attainment. The existence equation above supplies the corresponding test for a rank-deficient $W$.
 
-The equations above describe the ideal QP. The regularized target problem in §7 has a unique minimizer; at a fully enabled contact whose impulse lies in the strict cone interior, its component relation is $v_i^+-v_i^*=-(Ry)_i$. A clear-flight gate value $s_i=0$ sets $\Lambda_i=0$ and makes that contact's $v_i^*$ inactive bookkeeping. Section 8 explains the residual from the finite numerical solve.
+The equations above describe the ideal QP. The target problem in §7 has a unique minimizer; at a contact whose impulse lies in the strict cone interior, its component relation is $v_i^+-v_i^*=-\tilde R_{ii}\Lambda_i$, the compliance of §7.2 acting on that contact's impulse. A clear-flight gate value $s_i=0$ sets $\Lambda_i=0$ and makes that contact's $v_i^*$ inactive bookkeeping. Section 8 explains the residual from the finite numerical solve.
 
 ### 4.2 How $\mu$ controls exact sticking
 
@@ -715,22 +758,23 @@ The tangential reaction dissipates energy, and the maximum-dissipation reading o
 
 ---
 
-## 7. The implemented gated and regularized QP
+## 7. The gated, compliant and regularized QP
 
-The implementation extends the ideal QP with:
+The formulation extends the ideal QP with three ingredients:
 
-1. a location-dependent gate so a point in clear flight is exactly inactive;
-2. a small positive regularizer so duplicate and weakly gated contacts remain numerically stable.
+1. a location-dependent gate, so a point in clear flight is exactly inactive;
+2. a gate-shaped contact compliance carrying a learned stiffness;
+3. a small positive conditioning floor, so duplicate and weakly gated contacts remain numerically stable.
 
-The following formulation states the numerical target problem explicitly.
+The following states the numerical target problem explicitly.
 
-To match the implementation's names, this section writes
+Throughout this section, write
 
 $$
 W_{\mathrm{full}}=JM^{-1}J^\top
 $$
 
-for the ungated matrix called $W$ in §§2–6. The code reserves the shorter name `W` for its already-gated version.
+for the ungated matrix called $W$ in §§2–6, reserving the shorter name for its gated counterpart.
 
 ### 7.1 Compact flight gate
 
@@ -754,7 +798,7 @@ Then:
 - $0<s_i<1$ in the transition band: smoothly relaxed candidate;
 - $s_i=0$ at and above $g_{\mathrm{off}}$: exactly disabled.
 
-The defaults are $g_{\mathrm{on}}=0$ and $g_{\mathrm{off}}=0.06$.
+The gap is a metric quantity, so the band is set in metres. The thresholds are $g_{\mathrm{on}}=0$ and a configurable $g_{\mathrm{off}}$, with a default of $5\times10^{-3}\,\mathrm{m}$ for the exact-geometry contact set.
 
 ![contact_gate](https://hackmd.io/_uploads/Hyds50oEMl.svg)
 
@@ -769,7 +813,7 @@ s(1)=1,
 s'(1)=s''(1)=0.
 $$
 
-The clip supplies the two flat regions, giving the exact clear-flight cutoff; the vanishing endpoint derivatives remove the kinks where the ramp meets them, making the assembled gate $C^2$ in the learned gap. The cubic smoothstep $3u^2-2u^3$ is $C^1$ but leaves $s''=\pm6$ at the joins, and $s_i$ scales an impulse that enters acceleration, so that jump would reach the drift. The derivative factors as $s'(u)=30u^2(u-1)^2\ge0$, so the gate is monotone and never overshoots $[0,1]$.
+The clip supplies the two flat regions, giving the exact clear-flight cutoff; the vanishing endpoint derivatives remove the kinks where the ramp meets them, making the assembled gate $C^2$ in the gap. The cubic smoothstep $3u^2-2u^3$ is $C^1$ but leaves $s''=\pm6$ at the joins, and $s_i$ scales an impulse that enters acceleration, so that jump would reach the drift. The derivative factors as $s'(u)=30u^2(u-1)^2\ge0$, so the gate is monotone and never overshoots $[0,1]$.
 
 Repeat the same gate for the normal and tangential component of each contact:
 
@@ -793,45 +837,106 @@ $$
 
 At $s_i=0$, the corresponding physical impulse is exactly zero.
 
-The gate supplies smooth contact candidacy with an exact clear-flight cutoff. A point in the transition band $0<g_i<g_{\mathrm{off}}$ can transmit an attenuated impulse before its learned gap reaches zero.
+The gate supplies smooth contact candidacy with an exact clear-flight cutoff. A point in the transition band $0<g_i<g_{\mathrm{off}}$ can transmit an attenuated impulse before its gap reaches zero.
 
-The flat endpoints also flatten the geometry gradient, since $\partial s_i/\partial g_i=-s'(u_i)/(g_{\mathrm{off}}-g_{\mathrm{on}})$ vanishes there. At the constraint model's $u_i=0.02$ initialization the gate is $\approx7.8\times10^{-5}$, small enough to leave a fresh model undisturbed and large enough to keep the gap network trainable.
+Two properties of $s_i$ are used later. It is monotone in $u_i$ and confined to $[0,1]$, with $s_i=1$ attained exactly at $u_i=1$; and the derivative $\partial s_i/\partial g_i=-s'(u_i)/(g_{\mathrm{off}}-g_{\mathrm{on}})$ vanishes at both ends of the band, so the gate meets its flat regions smoothly. Evaluating the quintic just below $u_i=1$ rounds to within a few units in the last place of $1$, so quantities that depend on $1-s_i^2$ are formed with a nonnegative clamp and remain exactly in $[0,1]$ at any working precision.
 
-### 7.2 Scale-aware regularizer
+### 7.2 Gate-shaped compliance and the conditioning floor
 
-The regularizer is
+#### The contact-space scale
+
+Every diagonal term added to the QP acts in contact space, where the natural unit is an inverse mass. That unit is supplied by
 
 $$
-R
-=\eta\,
-\operatorname{stopgrad}\!\left[
+\sigma
+=\operatorname{stopgrad}\!\left[
 \max\!\left(
 \operatorname{mean}\operatorname{diag}(W_{\mathrm{full}}),
 10^{-6}
 \right)
-\right]I,
+\right],
 $$
 
-where
+with $W_{\mathrm{full}}=JM^{-1}J^\top$ evaluated before gating. `stopgrad` uses $\sigma$ in the forward calculation and treats it as constant during differentiation.
+
+Denominating diagonal terms in $\sigma$ makes them covariant with the mechanism: rescaling $M\mapsto\alpha M$ rescales $W_{\mathrm{full}}$ and $\sigma$ together, so the selected impulse scales as $\alpha$, exactly as a physical impulse does.
+
+#### The diagonal
+
+Let $c_{0,i}>0$ be a compliance coefficient for contact point $i$, shared by that point's normal and tangential slot, and let $\eta>0$ be a conditioning coefficient with a default of $10^{-2}$. The diagonal added to the gated Delassus matrix is
 
 $$
-W_{\mathrm{full}}=JM^{-1}J^\top
+R
+=\sigma\,
+\operatorname{diag}\!\left[
+c_0\odot(\mathbf 1-S^2)+\eta
+\right],
 $$
 
-is evaluated before gating and $\eta=0.01$ by default.
+with $c_0$ and the gate both repeated across each contact's two slots. Because $s_i\in[0,1]$, the shape factor $1-s_i^2$ lies in $[0,1]$ and $R$ is bounded on both sides:
 
-The regularizer:
+$$
+\eta\,\sigma I
+\ \preceq\ R\ \preceq\
+\sigma\operatorname{diag}(c_0+\eta).
+$$
 
-- adds curvature when $W_{\mathrm{full}}$ is singular or nearly singular;
-- bounds the magnitude of latent $y$ near a weak gate;
-- makes the exact target minimizer unique among redundant impulse distributions;
-- scales with contact-space inverse mass and preserves the model's global mass scaling.
+The lower bound makes $R$ positive-definite for every gate value, so $H$ is positive-definite and the target QP stays strictly convex. The upper bound keeps the matrix handed to the linear solve bounded, so its conditioning is uniform across the band.
 
-`stopgrad` uses the scale in the forward calculation and treats it as constant during differentiation. The regularizer provides numerical conditioning and tie-breaking among impulse distributions.
+#### The physical compliance
 
-Maintaining a fixed physical impulse as $s_i$ decreases requires $y_i=\Lambda_i/s_i$. The $R$ penalty makes this growth increasingly costly, producing a fading physical response through the transition band.
+Undoing the latent scaling of §7.1 with $\Lambda=Sy$ expresses the same diagonal in physical contact coordinates:
 
-### 7.3 Optimization problem targeted by the implementation
+$$
+\tilde R
+=S^{-1}RS^{-1}
+=\sigma\left[
+c_0\odot\left(S^{-2}-\mathbf 1\right)+\eta S^{-2}
+\right],
+$$
+
+that is, $\tilde R_{ii}=\sigma\left[c_{0,i}(1/s_i^2-1)+\eta/s_i^2\right]$ for each slot.
+
+$\tilde R$ is the contact compliance. At an interior optimum the exact relation is
+
+$$
+v^+-v^*=-\tilde R\Lambda,
+$$
+
+so $\tilde R$ maps impulse to the residual by which the requested outgoing velocity is missed: a small $\tilde R$ enforces the request closely, and a large $\tilde R$ yields under load. Its inverse is the contact impedance.
+
+The two ends of the band read directly off the formula:
+
+- at $s_i=1$ the shape factor vanishes and $\tilde R_{ii}=\eta\sigma$, the conditioning floor alone, so a fully engaged contact enforces its requested velocity to within that floor;
+- as $s_i\to0$ the compliance grows without bound and $\Lambda_i\to0$, so the physical response fades smoothly to zero through the transition band.
+
+$c_{0,i}$ therefore sets how soft a partially engaged contact is, and $\eta$ sets the conditioning of the linear algebra. Writing the diagonal so that the compliance term vanishes at full engagement keeps those two roles separate: the force a contact transmits through the taper is selected by $c_{0,i}$, and the same force is insensitive to $\eta$ over several decades.
+
+#### The learned stiffness
+
+$c_{0,i}$ is a constitutive property of the contact, learned alongside restitution, penetration recovery and friction:
+
+$$
+c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i),
+\qquad
+c_{\mathrm{floor}}=\kappa\,c_{0}^{\mathrm{init}},
+$$
+
+with one unconstrained parameter $\hat c_i$ per contact point and $\kappa=0.1$ by default. The offset keeps the compliance term present at every parameter value, so the separation of roles above holds throughout training.
+
+Sharing one coefficient between a contact's normal and tangential slot is what preserves the cone implication of §7.1: the scaling applied inside a contact block stays uniform, so cone membership and the friction ratio are untouched.
+
+An equivalent position-level stiffness follows from static equilibrium. With a resting penetration $-g_i$ recovered at fraction $\beta_i$ over the response interval $h$, stationarity gives
+
+$$
+\beta_i\frac{-g_i}{h}=\tilde R_{ii}\Lambda_{n,i},
+\qquad
+k_i=\frac{\beta_i}{\tilde R_{ii}h^2},
+$$
+
+so a resting contact carries load at a penetration set by $c_{0,i}$, $\beta_i$ and the response interval.
+
+### 7.3 The target optimization problem
 
 During one contact solve, $H$, $c$, and $\mu$ are known, and $y$ is the decision variable. Define
 
@@ -863,18 +968,7 @@ c=Sb,
 \Lambda=Sy.
 $$
 
-In exact arithmetic $SW_{\mathrm{full}}S$ is positive-semidefinite, and $R$ is positive-definite, so $H$ is positive-definite. The target objective is therefore strictly convex and has a unique exact minimizer. The fixed-iteration ADMM output is an approximation to that minimizer.
-
-The code uses the following names:
-
-| mathematics | implementation name |
-|---|---|
-| $W_{\mathrm{full}}=JM^{-1}J^\top$ | `W_full` |
-| $SW_{\mathrm{full}}S$ | `W` |
-| $H=\operatorname{sym}(SW_{\mathrm{full}}S)+R$ | `H` |
-| $c=Sb$ | `bias` |
-| exact QP variable $y$ | approximated by the final projected `latent_impulse` |
-| returned $\Lambda_{\mathrm{ret}}=S z^N$ | `physical_impulse` |
+In exact arithmetic $SW_{\mathrm{full}}S$ is positive-semidefinite, and $R$ is positive-definite by the lower bound of §7.2, so $H$ is positive-definite. The target objective is therefore strictly convex and has a unique exact minimizer. The fixed-iteration ADMM output is an approximation to that minimizer.
 
 The ideal residual is $r=W_{\mathrm{full}}\Lambda+b=v^+-v^*$. After symmetrization, the target objective has the mathematical gradient
 
@@ -883,7 +977,35 @@ Hy+c
 =S(v^+-v^*)+Ry.
 $$
 
-Consequently, the exact KKT conditions of the regularized target problem apply to the combined residual $S(v^+-v^*)+Ry$. The $Ry$ term permits a physical velocity residual and controls latent impulse magnitude. At a fully gated interior optimum, the exact relation is $v^+-v^*=-Ry$, so the residual magnitude depends on the state and the selected impulse.
+Consequently, the exact KKT conditions of the target problem apply to the combined residual $S(v^+-v^*)+Ry$. The $Ry$ term permits a physical velocity residual and controls latent impulse magnitude. At an interior optimum the exact relation is $v^+-v^*=-\tilde R\Lambda$ with $\tilde R=S^{-1}RS^{-1}$, so the residual is the compliance of §7.2 acting on the selected impulse.
+
+#### The same problem in physical coordinates
+
+Each planar Coulomb cone is invariant under a positive scaling applied uniformly inside its own block, and $S$ scales contact $i$'s two slots by the common factor $s_i$. Hence
+
+$$
+y\in\mathcal C_\mu
+\quad\Longleftrightarrow\quad
+Sy\in\mathcal C_\mu,
+$$
+
+and the substitution $\Lambda=Sy$ carries the target problem to an equivalent statement in physical impulse:
+
+$$
+\boxed{
+\begin{aligned}
+\underset{\Lambda\in\mathbb R^{2K}}{\operatorname{minimize}}
+&\quad
+\frac12\Lambda^\top\!\left(W_{\mathrm{full}}+\tilde R\right)\Lambda+b^\top\Lambda\\
+\operatorname{subject\ to}
+&\quad \Lambda\in\mathcal C_\mu.
+\end{aligned}
+}
+$$
+
+This is the ideal QP of §5 with the compliance $\tilde R$ added to the Delassus matrix, which is the precise sense in which the formulation is a compliant contact: the outgoing motion is the projection of the free motion onto the friction cone in a metric softened by $\tilde R$.
+
+The two statements are exactly equivalent, and each is convenient for a different purpose. The latent form is bounded and uniformly conditioned across the band, which suits the finite iteration of §8. The physical form exhibits the contact law directly, and is the form in which $c_{0,i}$ and $\eta$ read as a stiffness and a conditioning floor.
 
 ---
 
@@ -936,7 +1058,21 @@ Each sweep, $y$ slides toward the bowl's bottom, $z$ snaps back into the cone, a
 
 ### 8.2 The iteration and its guarantees
 
-Using a primal variable $y$, a feasible auxiliary variable $z$, a scaled dual bookkeeping variable $\xi$, and a positive penalty $\rho$, one iteration has the form
+The penalty $\rho$ sets the step of the iteration, and it is drawn from the part of the diagonal that describes how the mechanism resists an impulse:
+
+$$
+\rho
+=\max\!\left(
+\operatorname{mean}\!\left[
+\operatorname{diag}\!\left(SW_{\mathrm{full}}S\right)+\eta\,\sigma
+\right],
+10^{-6}
+\right),
+$$
+
+detached from differentiation. Matching $\rho$ to the gated Delassus diagonal and the conditioning floor keeps the step in proportion to the coordinates that carry load, so the fixed budget below converges on the contacts that matter.
+
+Using a primal variable $y$, a feasible auxiliary variable $z$, a scaled dual bookkeeping variable $\xi$, and that penalty, one iteration has the form
 
 $$
 y^{k+1}
@@ -1061,14 +1197,14 @@ as `stabilization_work`. The full-$h$ response quantity `discrete_work` is the t
 
 At each internal step, the constraint contact path performs the following calculation:
 
-1. Evaluate the learned gaps $g_i(q)$ and horizontal offsets $h_i(q)$.
-2. Differentiate them to obtain $J_n$ and $J_t$, then stack $J$.
+1. Evaluate the contact-point positions $p_i(q)$ from the kinematic tree, giving the gaps $g_i(q)$ and horizontal coordinates.
+2. Form $J_n$ and $J_t$ from the revolute-joint lever arms, then stack $J$.
 3. Evaluate $M(q)$ and the contact-free acceleration, including the current action.
 4. Predict $\dot q_{\mathrm{free}}=\dot q+h\ddot q_{\mathrm{free}}$.
 5. Compute $v_{\mathrm{free}}=J\dot q_{\mathrm{free}}$.
 6. Build the restitution/recovery target $v^*$ and bias $b=v_{\mathrm{free}}-v^*$.
-7. Compute $W_{\mathrm{full}}=JM^{-1}J^\top$.
-8. Evaluate the compact gate $S$ and regularizer $R$.
+7. Compute $W_{\mathrm{full}}=JM^{-1}J^\top$ and the contact-space scale $\sigma$.
+8. Evaluate the compact gate $S$, the compliance coefficients $c_0$, and the diagonal $R$.
 9. Approximate the latent cone-QP minimizer with the fixed ADMM budget (12 iterations by default), returning the feasible auxiliary iterate $y_{\mathrm{ret}}$.
 10. Form the physical impulse $\Lambda=Sy_{\mathrm{ret}}$.
 11. Apply $J^\top\Lambda$ to generalized momentum, or $J^\top\Lambda/h$ as its average-force equivalent.
@@ -1086,8 +1222,12 @@ At each internal step, the constraint contact path performs the following calcul
 | selected regime | the cone apex represents zero impulse; a strict-interior optimum represents sticking; a sloped-boundary optimum represents friction saturation; its tangential residual distinguishes incipient slip from sliding |
 | impulse variable | $\Lambda$ transfers momentum; $J^\top\Lambda/h$ is its equivalent average generalized force |
 | coupled contacts | off-diagonal entries of $W_{\mathrm{full}}$ coordinate the impulses across contact points |
+| contact geometry | gaps and contact Jacobians are the plane's forward kinematics in closed form, with $J_n$ and $J_t$ the two rows of the point Jacobian |
 | compact gate | supplies smooth contact candidacy and an exact clear-flight cutoff |
-| regularizer $R$ | supplies scale-aware curvature, bounds the latent impulse, and selects a unique target minimizer |
+| compliance $\tilde R$ | maps impulse to the velocity residual $v^+-v^*=-\tilde R\Lambda$; gate-shaped, so the response fades to zero across the band and a fully engaged contact tracks its requested velocity |
+| learned stiffness $c_{0,i}$ | a constitutive parameter, trained with restitution, recovery and friction, that selects the force a partially engaged contact transmits |
+| conditioning floor $\eta$ | supplies scale-aware curvature at every gate value, bounds the latent impulse, and selects a unique target minimizer |
+| bounded diagonal | $\eta\sigma I\preceq R\preceq\sigma\operatorname{diag}(c_0+\eta)$, so positive-definiteness and conditioning hold uniformly across the band |
 | cone projection | gives a feasible returned impulse at every ADMM iteration |
 | solver residual | measures finite-budget optimality |
 | Jacobian duality | $J$ maps generalized motion to contact motion; $J^\top$ maps contact impulse to generalized momentum and preserves virtual work |
@@ -1281,8 +1421,11 @@ At an unconstrained bowl minimum this gradient is zero; constraints can place th
 |---|---|
 | $q,\dot q$ | generalized configuration and velocity |
 | $M(q)$ | symmetric positive-definite mass matrix |
-| $g_i(q)$ | learned signed gap of contact point $i$ |
-| $h_i(q)$ | learned horizontal point offset |
+| $p_i(q)$ | planar position of contact point $i$ from the kinematic tree |
+| $\varrho_i$ | capsule radius of contact point $i$ |
+| $g_i(q)=p_{i,z}-\varrho_i$ | signed gap of contact point $i$ to the ground plane |
+| $\Theta_{i,k}$ | cumulative hinge angle placing the $k$-th link on the chain to point $i$ |
+| $J_{v,i}$ | point Jacobian of contact $i$; its rows are $J_{n,i}$ and $J_{t,i}$ |
 | $J$ | stacked normal/tangential contact Jacobian |
 | $v_{\mathrm{free}}$ | contact-free predicted velocity |
 | $v^*$ | requested outgoing contact velocity |
@@ -1299,8 +1442,16 @@ At an unconstrained bowl minimum this gradient is zero; constraints can place th
 | $y$ | exact latent decision variable of the target QP |
 | $y_{\mathrm{ret}}=z^N$ | feasible finite-ADMM approximation returned by the implementation |
 | $\Lambda$ | physical impulse; $Sy$ in the exact target problem and $Sy_{\mathrm{ret}}$ in the finite implementation |
-| $R$ | scale-aware positive numerical regularizer |
+| $\sigma$ | contact-space inverse-mass scale, the mean gated-free Delassus diagonal |
+| $c_{0,i}$ | learned compliance coefficient of contact point $i$, shared by its two slots |
+| $\hat c_i$ | unconstrained raw parameter learning $c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i)$ |
+| $c_{\mathrm{floor}}=\kappa c_0^{\mathrm{init}}$ | lower bound keeping the compliance term present at every parameter value |
+| $\eta$ | conditioning coefficient of the positive floor |
+| $R=\sigma\operatorname{diag}[c_0\odot(\mathbf 1-S^2)+\eta]$ | latent diagonal: gate-shaped compliance plus conditioning floor |
+| $\tilde R=S^{-1}RS^{-1}$ | physical contact compliance; $v^+-v^*=-\tilde R\Lambda$ at an interior optimum |
+| $k_i=\beta_i/(\tilde R_{ii}h^2)$ | equivalent position-level normal stiffness at rest |
 | $H=\operatorname{sym}(SW_{\mathrm{full}}S)+R$ | target QP Hessian |
+| $\rho$ | ADMM penalty, from the gated Delassus diagonal and the conditioning floor |
 | $I$ | identity matrix |
 | $h$ | fixed contact response interval |
 
