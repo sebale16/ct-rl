@@ -1,0 +1,21 @@
+{
+ "n_states": 5000,
+ "endpoint_height_max_abs_error_m": 1.3322676295501878e-15,
+ "endpoint_x_max_abs_error_m": 7.105427357601002e-15,
+ "gap_max_abs_error_m": 1.3322676295501878e-15,
+ "J_n_vs_autograd_max_abs_error": 0.0,
+ "J_t_vs_autograd_max_abs_error": 0.0,
+ "n_jacobian_states": 64,
+ "ou_rollout_states": 3000,
+ "ou_mujoco_contact_state_fraction": 0.5153333333333333,
+ "ou_kinematic_negative_gap_state_fraction": 0.5153333333333333,
+ "ou_contact_indicator_disagreement_fraction": 0.0,
+ "contact_points": [
+  "bfoot_minus",
+  "bfoot_plus",
+  "ffoot_minus",
+  "ffoot_plus",
+  "bshin_plus",
+  "fshin_minus"
+ ]
+}

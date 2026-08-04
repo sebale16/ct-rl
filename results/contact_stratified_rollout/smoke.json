@@ -1,0 +1,646 @@
+{
+  "eval_seed": 9137,
+  "n_eval": 300,
+  "n_windows": 30,
+  "stance_fraction": 1.0,
+  "horizons": [
+    1,
+    4
+  ],
+  "per_model": [
+    {
+      "tag": "kinematic_compliance_frozen_s0",
+      "arm": "kinematic_compliance_frozen",
+      "accel_nrmse_all": 0.7608460574809404,
+      "accel_nrmse_stance": 0.7608460574809404,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.4584740502130646,
+      "rollout_H1_stance": 0.4584740502130646,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.23834447343949747,
+      "rollout_H4_stance": 0.23834447343949747,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_compliance_frozen_s1",
+      "arm": "kinematic_compliance_frozen",
+      "accel_nrmse_all": 1.1604129344176908,
+      "accel_nrmse_stance": 1.1604129344176908,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.41208744015469295,
+      "rollout_H1_stance": 0.41208744015469295,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.2047466628816954,
+      "rollout_H4_stance": 0.2047466628816954,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_compliance_frozen_s2",
+      "arm": "kinematic_compliance_frozen",
+      "accel_nrmse_all": 0.8289797655933473,
+      "accel_nrmse_stance": 0.8289797655933473,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.5376391747547401,
+      "rollout_H1_stance": 0.5376391747547401,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.2573195662650413,
+      "rollout_H4_stance": 0.2573195662650413,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_compliance_s0",
+      "arm": "kinematic_compliance",
+      "accel_nrmse_all": 0.8195626624322212,
+      "accel_nrmse_stance": 0.8195626624322212,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.47313789534865075,
+      "rollout_H1_stance": 0.47313789534865075,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.26241091832870395,
+      "rollout_H4_stance": 0.26241091832870395,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_compliance_s1",
+      "arm": "kinematic_compliance",
+      "accel_nrmse_all": 1.3031668927008042,
+      "accel_nrmse_stance": 1.3031668927008042,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.43785332188738607,
+      "rollout_H1_stance": 0.43785332188738607,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.22130591290374899,
+      "rollout_H4_stance": 0.22130591290374899,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_compliance_s2",
+      "arm": "kinematic_compliance",
+      "accel_nrmse_all": 0.8172905711430156,
+      "accel_nrmse_stance": 0.8172905711430156,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.6738093869695068,
+      "rollout_H1_stance": 0.6738093869695068,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.3484424668274691,
+      "rollout_H4_stance": 0.3484424668274691,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_constraint_s0",
+      "arm": "kinematic_constraint",
+      "accel_nrmse_all": 0.6598819261147452,
+      "accel_nrmse_stance": 0.6598819261147452,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.38488838316807955,
+      "rollout_H1_stance": 0.38488838316807955,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.23356166631531317,
+      "rollout_H4_stance": 0.23356166631531317,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_constraint_s1",
+      "arm": "kinematic_constraint",
+      "accel_nrmse_all": 0.8308535891374483,
+      "accel_nrmse_stance": 0.8308535891374483,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.3645822140636731,
+      "rollout_H1_stance": 0.3645822140636731,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.19373312251595814,
+      "rollout_H4_stance": 0.19373312251595814,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "kinematic_constraint_s2",
+      "arm": "kinematic_constraint",
+      "accel_nrmse_all": 0.5994947278608675,
+      "accel_nrmse_stance": 0.5994947278608675,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.5655643419197968,
+      "rollout_H1_stance": 0.5655643419197968,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.2925709520154127,
+      "rollout_H4_stance": 0.2925709520154127,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "learned_constraint_s0",
+      "arm": "learned_constraint",
+      "accel_nrmse_all": 0.5895579822621577,
+      "accel_nrmse_stance": 0.5895579822621577,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.5019561102463513,
+      "rollout_H1_stance": 0.5019561102463513,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.24329753440962545,
+      "rollout_H4_stance": 0.24329753440962545,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "learned_constraint_s1",
+      "arm": "learned_constraint",
+      "accel_nrmse_all": 0.9121135931145129,
+      "accel_nrmse_stance": 0.9121135931145129,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.39374362024910936,
+      "rollout_H1_stance": 0.39374362024910936,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.21121246346914413,
+      "rollout_H4_stance": 0.21121246346914413,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    },
+    {
+      "tag": "learned_constraint_s2",
+      "arm": "learned_constraint",
+      "accel_nrmse_all": 0.5828546420457332,
+      "accel_nrmse_stance": 0.5828546420457332,
+      "accel_nrmse_flight": 0.0,
+      "frac_stance": 1.0,
+      "rollout_H1": 0.5754683753392904,
+      "rollout_H1_stance": 0.5754683753392904,
+      "rollout_H1_flight": NaN,
+      "rollout_H1_diverged": 0.0,
+      "rollout_H4": 0.29788000116794744,
+      "rollout_H4_stance": 0.29788000116794744,
+      "rollout_H4_flight": NaN,
+      "rollout_H4_diverged": 0.0
+    }
+  ],
+  "by_arm": {
+    "kinematic_compliance_frozen": {
+      "accel_nrmse_all": {
+        "mean": 0.9167462524973261,
+        "sd": 0.21375368874909922,
+        "seeds": [
+          0.7608460574809404,
+          1.1604129344176908,
+          0.8289797655933473
+        ]
+      },
+      "accel_nrmse_stance": {
+        "mean": 0.9167462524973261,
+        "sd": 0.21375368874909922,
+        "seeds": [
+          0.7608460574809404,
+          1.1604129344176908,
+          0.8289797655933473
+        ]
+      },
+      "accel_nrmse_flight": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frac_stance": {
+        "mean": 1.0,
+        "sd": 0.0,
+        "seeds": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rollout_H1": {
+        "mean": 0.46940022170749923,
+        "sd": 0.06348500163750896,
+        "seeds": [
+          0.4584740502130646,
+          0.41208744015469295,
+          0.5376391747547401
+        ]
+      },
+      "rollout_H1_stance": {
+        "mean": 0.46940022170749923,
+        "sd": 0.06348500163750896,
+        "seeds": [
+          0.4584740502130646,
+          0.41208744015469295,
+          0.5376391747547401
+        ]
+      },
+      "rollout_H1_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H1_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "rollout_H4": {
+        "mean": 0.23347023419541144,
+        "sd": 0.026623226677003252,
+        "seeds": [
+          0.23834447343949747,
+          0.2047466628816954,
+          0.2573195662650413
+        ]
+      },
+      "rollout_H4_stance": {
+        "mean": 0.23347023419541144,
+        "sd": 0.026623226677003252,
+        "seeds": [
+          0.23834447343949747,
+          0.2047466628816954,
+          0.2573195662650413
+        ]
+      },
+      "rollout_H4_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H4_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "kinematic_compliance": {
+      "accel_nrmse_all": {
+        "mean": 0.9800067087586802,
+        "sd": 0.2798672345306558,
+        "seeds": [
+          0.8195626624322212,
+          1.3031668927008042,
+          0.8172905711430156
+        ]
+      },
+      "accel_nrmse_stance": {
+        "mean": 0.9800067087586802,
+        "sd": 0.2798672345306558,
+        "seeds": [
+          0.8195626624322212,
+          1.3031668927008042,
+          0.8172905711430156
+        ]
+      },
+      "accel_nrmse_flight": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frac_stance": {
+        "mean": 1.0,
+        "sd": 0.0,
+        "seeds": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rollout_H1": {
+        "mean": 0.5282668680685145,
+        "sd": 0.12727222354905293,
+        "seeds": [
+          0.47313789534865075,
+          0.43785332188738607,
+          0.6738093869695068
+        ]
+      },
+      "rollout_H1_stance": {
+        "mean": 0.5282668680685145,
+        "sd": 0.12727222354905293,
+        "seeds": [
+          0.47313789534865075,
+          0.43785332188738607,
+          0.6738093869695068
+        ]
+      },
+      "rollout_H1_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H1_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "rollout_H4": {
+        "mean": 0.27738643268664065,
+        "sd": 0.06487777245415663,
+        "seeds": [
+          0.26241091832870395,
+          0.22130591290374899,
+          0.3484424668274691
+        ]
+      },
+      "rollout_H4_stance": {
+        "mean": 0.27738643268664065,
+        "sd": 0.06487777245415663,
+        "seeds": [
+          0.26241091832870395,
+          0.22130591290374899,
+          0.3484424668274691
+        ]
+      },
+      "rollout_H4_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H4_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "kinematic_constraint": {
+      "accel_nrmse_all": {
+        "mean": 0.6967434143710204,
+        "sd": 0.12000336520343782,
+        "seeds": [
+          0.6598819261147452,
+          0.8308535891374483,
+          0.5994947278608675
+        ]
+      },
+      "accel_nrmse_stance": {
+        "mean": 0.6967434143710204,
+        "sd": 0.12000336520343782,
+        "seeds": [
+          0.6598819261147452,
+          0.8308535891374483,
+          0.5994947278608675
+        ]
+      },
+      "accel_nrmse_flight": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frac_stance": {
+        "mean": 1.0,
+        "sd": 0.0,
+        "seeds": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rollout_H1": {
+        "mean": 0.43834497971718306,
+        "sd": 0.11064203412516437,
+        "seeds": [
+          0.38488838316807955,
+          0.3645822140636731,
+          0.5655643419197968
+        ]
+      },
+      "rollout_H1_stance": {
+        "mean": 0.43834497971718306,
+        "sd": 0.11064203412516437,
+        "seeds": [
+          0.38488838316807955,
+          0.3645822140636731,
+          0.5655643419197968
+        ]
+      },
+      "rollout_H1_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H1_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "rollout_H4": {
+        "mean": 0.23995524694889467,
+        "sd": 0.04972813630158881,
+        "seeds": [
+          0.23356166631531317,
+          0.19373312251595814,
+          0.2925709520154127
+        ]
+      },
+      "rollout_H4_stance": {
+        "mean": 0.23995524694889467,
+        "sd": 0.04972813630158881,
+        "seeds": [
+          0.23356166631531317,
+          0.19373312251595814,
+          0.2925709520154127
+        ]
+      },
+      "rollout_H4_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H4_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "learned_constraint": {
+      "accel_nrmse_all": {
+        "mean": 0.6948420724741347,
+        "sd": 0.1881925050408518,
+        "seeds": [
+          0.5895579822621577,
+          0.9121135931145129,
+          0.5828546420457332
+        ]
+      },
+      "accel_nrmse_stance": {
+        "mean": 0.6948420724741347,
+        "sd": 0.1881925050408518,
+        "seeds": [
+          0.5895579822621577,
+          0.9121135931145129,
+          0.5828546420457332
+        ]
+      },
+      "accel_nrmse_flight": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frac_stance": {
+        "mean": 1.0,
+        "sd": 0.0,
+        "seeds": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rollout_H1": {
+        "mean": 0.4903893686115837,
+        "sd": 0.09141287539061808,
+        "seeds": [
+          0.5019561102463513,
+          0.39374362024910936,
+          0.5754683753392904
+        ]
+      },
+      "rollout_H1_stance": {
+        "mean": 0.4903893686115837,
+        "sd": 0.09141287539061808,
+        "seeds": [
+          0.5019561102463513,
+          0.39374362024910936,
+          0.5754683753392904
+        ]
+      },
+      "rollout_H1_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H1_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "rollout_H4": {
+        "mean": 0.2507966663489057,
+        "sd": 0.043817727663303385,
+        "seeds": [
+          0.24329753440962545,
+          0.21121246346914413,
+          0.29788000116794744
+        ]
+      },
+      "rollout_H4_stance": {
+        "mean": 0.2507966663489057,
+        "sd": 0.043817727663303385,
+        "seeds": [
+          0.24329753440962545,
+          0.21121246346914413,
+          0.29788000116794744
+        ]
+      },
+      "rollout_H4_flight": {
+        "mean": NaN,
+        "sd": NaN,
+        "seeds": [
+          NaN,
+          NaN,
+          NaN
+        ]
+      },
+      "rollout_H4_diverged": {
+        "mean": 0.0,
+        "sd": 0.0,
+        "seeds": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+0f05ad559ae9885e7ba7887af77e68e0  models/port_hamiltonian.py
+e6797eea41b9d485af7db8b4a2a39abf  evaluations/kinematic_contact_smoke.py
+b97dcaaaa3cd9438c6d8bef5257910a1  evaluations/hamiltonian_recovery.py
+450687d252328bfdf789ab40dd54e939  evaluations/contact_compliance_smoke_summary.py
+20a7811ae5d0910cb0c720cae004f3e0  benchmarks/compliance_envelope_upper_bound.slurm
+2e06b7f54f331d8fc0d800987b5c8c22  /tmp/claude-904055/-work2-10976-sebale16-frontera-ct-rl/0d1690ee-517f-4bd9-8fb4-ef6179689f7c/scratchpad/smoke3000.npz

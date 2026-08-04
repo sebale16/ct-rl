@@ -1,0 +1,4 @@
+0f05ad559ae9885e7ba7887af77e68e0  models/port_hamiltonian.py
+b97dcaaaa3cd9438c6d8bef5257910a1  evaluations/hamiltonian_recovery.py
+e6797eea41b9d485af7db8b4a2a39abf  evaluations/kinematic_contact_smoke.py
+20a7811ae5d0910cb0c720cae004f3e0  benchmarks/compliance_envelope_upper_bound.slurm

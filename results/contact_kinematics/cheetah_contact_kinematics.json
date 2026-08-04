@@ -1,0 +1,527 @@
+{
+  "meta": {
+    "env": "dm_control suite cheetah-run",
+    "root_z_pos_index": 0,
+    "root_x_cfg_index": 0,
+    "base_z_const": 0.7,
+    "n_pos": 8,
+    "pos_index_names": [
+      "rootz",
+      "rooty",
+      "bthigh",
+      "bshin",
+      "bfoot",
+      "fthigh",
+      "fshin",
+      "ffoot"
+    ],
+    "floor_geom": 0,
+    "floor_geom_name": "ground",
+    "floor_plane_z": 0.0,
+    "collidable_geoms": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "base_x_const": 0.0
+  },
+  "convention": {
+    "pos": "obs[0:8] = qpos[1:9] = [rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot]",
+    "theta_k": "sum_{j<=k} angle_signs[j] * pos[angle_pos_indices[j]]",
+    "cx_k": "dx_k*cos(theta_k) + dz_k*sin(theta_k)",
+    "cz_k": "-dx_k*sin(theta_k) + dz_k*cos(theta_k)",
+    "z": "base_z_const + pos[root_z_pos_index] + sum_k cz_k",
+    "x": "x_root + base_x_const + sum_k cx_k",
+    "gap": "z - radius",
+    "dz_dpos_rootz": "1",
+    "dz_dpos_a_j": "-sign_j * sum_{k>=j} cx_k  == -(x_point - x_j)",
+    "dx_dpos_a_j": "+sign_j * sum_{k>=j} cz_k  == +(z_point - z_j)",
+    "dx_droot_x": "1 (config DOF 0, the friction tangent onehot)"
+  },
+  "endpoints": [
+    {
+      "name": "torso_plus",
+      "geom": "torso",
+      "geom_id": 1,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.5,
+      "angle_pos_indices": [
+        1
+      ],
+      "angle_signs": [
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          1.1102230246251565e-16
+        ]
+      ]
+    },
+    {
+      "name": "torso_minus",
+      "geom": "torso",
+      "geom_id": 1,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.5,
+      "angle_pos_indices": [
+        1
+      ],
+      "angle_signs": [
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          -1.1102230246251565e-16
+        ]
+      ]
+    },
+    {
+      "name": "head_plus",
+      "geom": "head",
+      "geom_id": 2,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.15,
+      "angle_pos_indices": [
+        1
+      ],
+      "angle_signs": [
+        1.0
+      ],
+      "offsets": [
+        [
+          0.7149066664678467,
+          0.1964181414529809
+        ]
+      ]
+    },
+    {
+      "name": "head_minus",
+      "geom": "head",
+      "geom_id": 2,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.15,
+      "angle_pos_indices": [
+        1
+      ],
+      "angle_signs": [
+        1.0
+      ],
+      "offsets": [
+        [
+          0.4850933335321533,
+          0.0035818585470191178
+        ]
+      ]
+    },
+    {
+      "name": "bthigh_plus",
+      "geom": "bthigh",
+      "geom_id": 3,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.145,
+      "angle_pos_indices": [
+        1,
+        2
+      ],
+      "angle_signs": [
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.1892709139222204,
+          -0.24426155927297472
+        ]
+      ]
+    },
+    {
+      "name": "bthigh_minus",
+      "geom": "bthigh",
+      "geom_id": 3,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.145,
+      "angle_pos_indices": [
+        1,
+        2
+      ],
+      "angle_signs": [
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.010729086077779629,
+          -0.015738440727025307
+        ]
+      ]
+    },
+    {
+      "name": "bshin_plus",
+      "geom": "bshin",
+      "geom_id": 4,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.15,
+      "angle_pos_indices": [
+        1,
+        2,
+        3
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.16,
+          -0.25
+        ],
+        [
+          -0.27481910694487505,
+          -0.13575567201836164
+        ]
+      ]
+    },
+    {
+      "name": "bshin_minus",
+      "geom": "bshin",
+      "geom_id": 4,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.15,
+      "angle_pos_indices": [
+        1,
+        2,
+        3
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.16,
+          -0.25
+        ],
+        [
+          -0.00518089305512498,
+          -0.004244327981638388
+        ]
+      ]
+    },
+    {
+      "name": "bfoot_plus",
+      "geom": "bfoot",
+      "geom_id": 5,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.094,
+      "angle_pos_indices": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.16,
+          -0.25
+        ],
+        [
+          -0.28,
+          -0.14
+        ],
+        [
+          0.005671009760363048,
+          -0.006202972328827591
+        ]
+      ]
+    },
+    {
+      "name": "bfoot_minus",
+      "geom": "bfoot",
+      "geom_id": 5,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.094,
+      "angle_pos_indices": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          -0.5,
+          0.0
+        ],
+        [
+          0.16,
+          -0.25
+        ],
+        [
+          -0.28,
+          -0.14
+        ],
+        [
+          0.05432899023963695,
+          -0.1877970276711724
+        ]
+      ]
+    },
+    {
+      "name": "fthigh_plus",
+      "geom": "fthigh",
+      "geom_id": 6,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.133,
+      "angle_pos_indices": [
+        1,
+        5
+      ],
+      "angle_signs": [
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.003500000000000017,
+          -0.004818621296669642
+        ]
+      ]
+    },
+    {
+      "name": "fthigh_minus",
+      "geom": "fthigh",
+      "geom_id": 6,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.133,
+      "angle_pos_indices": [
+        1,
+        5
+      ],
+      "angle_signs": [
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.1365,
+          -0.23518137870333033
+        ]
+      ]
+    },
+    {
+      "name": "fshin_plus",
+      "geom": "fshin",
+      "geom_id": 7,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.106,
+      "angle_pos_indices": [
+        1,
+        5,
+        6
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.14,
+          -0.24
+        ],
+        [
+          0.00572555223210084,
+          -0.002122017309165572
+        ]
+      ]
+    },
+    {
+      "name": "fshin_minus",
+      "geom": "fshin",
+      "geom_id": 7,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.106,
+      "angle_pos_indices": [
+        1,
+        5,
+        6
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.14,
+          -0.24
+        ],
+        [
+          0.12427444776789917,
+          -0.17787798269083444
+        ]
+      ]
+    },
+    {
+      "name": "ffoot_plus",
+      "geom": "ffoot",
+      "geom_id": 8,
+      "end": "plus",
+      "radius": 0.046,
+      "half_length": 0.07,
+      "angle_pos_indices": [
+        1,
+        5,
+        6,
+        7
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.14,
+          -0.24
+        ],
+        [
+          0.13,
+          -0.18
+        ],
+        [
+          0.005856496757047719,
+          -0.01196736992114708
+        ]
+      ]
+    },
+    {
+      "name": "ffoot_minus",
+      "geom": "ffoot",
+      "geom_id": 8,
+      "end": "minus",
+      "radius": 0.046,
+      "half_length": 0.07,
+      "angle_pos_indices": [
+        1,
+        5,
+        6,
+        7
+      ],
+      "angle_signs": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "offsets": [
+        [
+          0.5,
+          0.0
+        ],
+        [
+          -0.14,
+          -0.24
+        ],
+        [
+          0.13,
+          -0.18
+        ],
+        [
+          0.08414350324295228,
+          -0.12803263007885293
+        ]
+      ]
+    }
+  ],
+  "verification": {
+    "n_states_checked": 6000,
+    "fk_max_abs_error_m": 7.105427357601002e-15,
+    "fk_max_abs_error_x_m": 7.105427357601002e-15,
+    "fk_max_abs_error_z_m": 1.3322676295501878e-15,
+    "jac_max_abs_error_autograd": 0.0,
+    "jac_max_abs_error_mj_jac": 5.384581669432009e-15,
+    "jac_identity_max_abs_error_z": 2.220446049250313e-16,
+    "jac_identity_max_abs_error_x": 4.709774237277031e-16,
+    "n_jac_states": 64,
+    "n_floor_contacts": 1554,
+    "n_penetrating_contacts": 1554,
+    "gap_vs_contact_dist_max_abs_error_m": 4.440892098500626e-16,
+    "gap_min_vs_contact_dist_min_max_abs_error_m": 4.440892098500626e-16
+  }
+}

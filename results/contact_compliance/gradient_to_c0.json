@@ -1,0 +1,146 @@
+{
+ "description": "d(loss)/d(c0_raw) through the full contact solve at several clearances; loss = ||contact_acceleration||^2. Autograd is checked against a central finite difference on the summed raw parameter.",
+ "md5_before": {
+  "models/port_hamiltonian.py": "f83da52076cb1f0ce5e9298e5bc63c25",
+  "evaluations/contact_compliance_probe.py": "89b31ba3f525c7c268953c952f6d8bee"
+ },
+ "md5_after": {
+  "models/port_hamiltonian.py": "f83da52076cb1f0ce5e9298e5bc63c25",
+  "evaluations/contact_compliance_probe.py": "89b31ba3f525c7c268953c952f6d8bee"
+ },
+ "contact_regularization": 0.01,
+ "contact_gate_off": 0.06,
+ "c0": 40.0,
+ "rows": [
+  {
+   "gap": 0.045,
+   "gate": [
+    0.10351562499999928,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "loss": 3.662167536436124e-05,
+   "grad": [
+    -1.8302984926833859e-06,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 1.8302984926833859e-06,
+   "grad_sum_autograd": -1.8302984926833859e-06,
+   "grad_sum_finite_difference": -1.8303007618222136e-06,
+   "finite_difference_rel_error": 1.2397628166095732e-06,
+   "all_finite": true,
+   "nonzero": 1
+  },
+  {
+   "gap": 0.03,
+   "gate": [
+    0.4999999999999992,
+    0.0,
+    6.018891065190839e-07,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "loss": 0.03431849028483538,
+   "grad": [
+    -0.0017061084647461845,
+    0.0,
+    -9.478993175541936e-17,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 0.0017061084647461845,
+   "grad_sum_autograd": -0.0017061084647462792,
+   "grad_sum_finite_difference": -0.001706161803505246,
+   "finite_difference_rel_error": 3.126242707879039e-05,
+   "all_finite": true,
+   "nonzero": 2
+  },
+  {
+   "gap": 0.015,
+   "gate": [
+    0.8964843749999999,
+    0.0,
+    0.10770033807473624,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "loss": 4.450038341221036,
+   "grad": [
+    -0.194906979402735,
+    0.0,
+    -3.744411872463051e-05,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 0.19490698299948156,
+   "grad_sum_autograd": -0.19494442352145963,
+   "grad_sum_finite_difference": -0.20923787205084918,
+   "finite_difference_rel_error": 0.06831195705295616,
+   "all_finite": true,
+   "nonzero": 2
+  },
+  {
+   "gap": 0.001,
+   "gate": [
+    0.9999548533950608,
+    0.0,
+    0.4761228702978194,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "loss": 108.92599477491535,
+   "grad": [
+    -0.005265134159363498,
+    0.0,
+    -0.006094663270969663,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 0.00805397778135767,
+   "grad_sum_autograd": -0.011359797430333161,
+   "grad_sum_finite_difference": -4.440778092629216,
+   "finite_difference_rel_error": 0.9974419353560612,
+   "all_finite": true,
+   "nonzero": 2
+  },
+  {
+   "gap": -0.002,
+   "gate": [
+    1.0,
+    0.0,
+    0.569604322174444,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "loss": 14105.438883823907,
+   "grad": [
+    0.0,
+    0.0,
+    -0.10679151622173816,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 0.10679151622173816,
+   "grad_sum_autograd": -0.10679151622173816,
+   "grad_sum_finite_difference": -572.0319893043779,
+   "finite_difference_rel_error": 0.9998133119856608,
+   "all_finite": true,
+   "nonzero": 1
+  }
+ ]
+}

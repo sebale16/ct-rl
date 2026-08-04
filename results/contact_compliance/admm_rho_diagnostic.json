@@ -1,0 +1,151 @@
+{
+ "description": "why the gate-shaped law needs more ADMM iterations: rho is the mean of the WHOLE diagonal of H, and the gated-off slots now contribute c0*scale to it, so the step size is far too small for the active block. Measured by rerunning the solver's own scaled ADMM on its own H and bias with two rho choices; the reference is 20000 iterations. This is a diagnostic, not a code change.",
+ "md5_before": {
+  "models/port_hamiltonian.py": "f83da52076cb1f0ce5e9298e5bc63c25",
+  "evaluations/contact_compliance_probe.py": "89b31ba3f525c7c268953c952f6d8bee"
+ },
+ "md5_after": {
+  "models/port_hamiltonian.py": "f83da52076cb1f0ce5e9298e5bc63c25",
+  "evaluations/contact_compliance_probe.py": "89b31ba3f525c7c268953c952f6d8bee"
+ },
+ "rows": [
+  {
+   "gap": 0.001,
+   "F_converged_N": 35.367460794278095,
+   "gate": [
+    0.9999548533950608,
+    0.0,
+    0.4761228702978194,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "variants": {
+    "rho_mean_all_slots_shipped": {
+     "rho": 12.13544622653651,
+     "F_12_iterations_N": 11.987827500440961,
+     "relative_error_vs_converged": 0.6610492460804422
+    },
+    "rho_mean_gated_on_slots": {
+     "rho": 6.177946225681804,
+     "F_12_iterations_N": 19.486017191998993,
+     "relative_error_vs_converged": 0.44904110291255267
+    }
+   }
+  },
+  {
+   "gap": -0.002,
+   "F_converged_N": 396.04406192247797,
+   "gate": [
+    1.0,
+    0.0,
+    0.569604322174444,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "variants": {
+    "rho_mean_all_slots_shipped": {
+     "rho": 11.898143527422045,
+     "F_12_iterations_N": 134.6194647676674,
+     "relative_error_vs_converged": 0.6600896776126441
+    },
+    "rho_mean_gated_on_slots": {
+     "rho": 5.466038128338415,
+     "F_12_iterations_N": 233.95788933292448,
+     "relative_error_vs_converged": 0.40926297897954694
+    }
+   }
+  },
+  {
+   "gap": 0.03,
+   "F_converged_N": 0.2149829487477303,
+   "gate": [
+    0.4999999999999992,
+    0.0,
+    6.018891065190839e-07,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "variants": {
+    "rho_mean_all_slots_shipped": {
+     "rho": 14.50690091342541,
+     "F_12_iterations_N": 0.21498244113852202,
+     "relative_error_vs_converged": 2.361160321014615e-06
+    },
+    "rho_mean_gated_on_slots": {
+     "rho": 13.2923102863485,
+     "F_12_iterations_N": 0.21498279670402515,
+     "relative_error_vs_converged": 7.072361135593343e-07
+    }
+   }
+  }
+ ],
+ "rho_candidates": [
+  {
+   "gap": 0.001,
+   "F_converged_N": 35.367460794278095,
+   "variants": {
+    "shipped_mean_diag_H": {
+     "rho": 12.13544622653651,
+     "F_12_iterations_N": 11.987827500440961,
+     "relative_error_vs_converged": 0.6610492460804422
+    },
+    "mean_diag_W_plus_reg_scale": {
+     "rho": 0.11410764199424044,
+     "F_12_iterations_N": 35.36742796086827,
+     "relative_error_vs_converged": 9.283507803008494e-07
+    }
+   }
+  },
+  {
+   "gap": -0.002,
+   "F_converged_N": 396.04406192247797,
+   "variants": {
+    "shipped_mean_diag_H": {
+     "rho": 11.898143527422045,
+     "F_12_iterations_N": 134.6194647676674,
+     "relative_error_vs_converged": 0.6600896776126441
+    },
+    "mean_diag_W_plus_reg_scale": {
+     "rho": 0.1232215885724575,
+     "F_12_iterations_N": 396.0440108653332,
+     "relative_error_vs_converged": 1.2891783944379853e-07
+    }
+   }
+  },
+  {
+   "gap": 0.03,
+   "F_converged_N": 0.2149829487477303,
+   "variants": {
+    "shipped_mean_diag_H": {
+     "rho": 14.50690091342541,
+     "F_12_iterations_N": 0.21498244113852202,
+     "relative_error_vs_converged": 2.361160321014615e-06
+    },
+    "mean_diag_W_plus_reg_scale": {
+     "rho": 0.02608306704754421,
+     "F_12_iterations_N": 0.21493461440755862,
+     "relative_error_vs_converged": 0.0002248287152689354
+    }
+   }
+  },
+  {
+   "gap": 0.05,
+   "F_converged_N": 0.0008187034224365956,
+   "variants": {
+    "shipped_mean_diag_H": {
+     "rho": 15.111135915836927,
+     "F_12_iterations_N": 0.0008187033727220641,
+     "relative_error_vs_converged": 6.072349299412989e-08
+    },
+    "mean_diag_W_plus_reg_scale": {
+     "rho": 0.0038900073914913055,
+     "F_12_iterations_N": 0.0008185053895975847,
+     "relative_error_vs_converged": 0.00024188593034277431
+    }
+   }
+  }
+ ]
+}

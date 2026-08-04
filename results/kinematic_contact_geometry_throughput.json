@@ -1,0 +1,77 @@
+{
+ "setup": {
+  "batch": 256,
+  "obs_dim": 17,
+  "action_dim": 6,
+  "structured_hidden": [
+   128,
+   128
+  ],
+  "contact_solver": "constraint",
+  "device": "cpu",
+  "torch": "2.6.0+cpu",
+  "host": "login3.frontera.tacc.utexas.edu",
+  "note": "wall-clock per drift() call, mean of 200 reps after warmup"
+ },
+ "threads_1": {
+  "no_contact_port": {
+   "drift_ms": 2.5982,
+   "drift_and_backward_ms": 6.9271,
+   "drift_calls_per_s": 384.9
+  },
+  "learned_K4": {
+   "drift_ms": 10.669,
+   "drift_and_backward_ms": 27.9839,
+   "drift_calls_per_s": 93.7
+  },
+  "learned_K6": {
+   "drift_ms": 11.3895,
+   "drift_and_backward_ms": 37.3347,
+   "drift_calls_per_s": 87.8
+  },
+  "kinematic_K6": {
+   "drift_ms": 9.7548,
+   "drift_and_backward_ms": 26.9994,
+   "drift_calls_per_s": 102.5
+  },
+  "speedup_kinematicK6_vs_learnedK6": {
+   "drift": 1.168,
+   "drift_and_backward": 1.383
+  },
+  "speedup_kinematicK6_vs_learnedK4": {
+   "drift": 1.094,
+   "drift_and_backward": 1.036
+  }
+ },
+ "threads_default": {
+  "no_contact_port": {
+   "drift_ms": 2.0598,
+   "drift_and_backward_ms": 5.8865,
+   "drift_calls_per_s": 485.5
+  },
+  "learned_K4": {
+   "drift_ms": 9.2891,
+   "drift_and_backward_ms": 25.9043,
+   "drift_calls_per_s": 107.7
+  },
+  "learned_K6": {
+   "drift_ms": 10.8906,
+   "drift_and_backward_ms": 32.1372,
+   "drift_calls_per_s": 91.8
+  },
+  "kinematic_K6": {
+   "drift_ms": 9.8327,
+   "drift_and_backward_ms": 25.2498,
+   "drift_calls_per_s": 101.7
+  },
+  "_num_threads": 4,
+  "speedup_kinematicK6_vs_learnedK6": {
+   "drift": 1.108,
+   "drift_and_backward": 1.273
+  },
+  "speedup_kinematicK6_vs_learnedK4": {
+   "drift": 0.945,
+   "drift_and_backward": 1.026
+  }
+ }
+}

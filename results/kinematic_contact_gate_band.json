@@ -1,0 +1,135 @@
+{
+ "md5_before": {
+  "models/port_hamiltonian.py": "a5310e33eb06cf8b5cd79a182b3f7f8a",
+  "benchmarks/run_ct_rl.py": "972cd4bf320133a21bbaae7405ac843b",
+  "evaluations/hamiltonian_recovery.py": "b92fe7afb6253a5c7b4dad23632b2acf",
+  "tests/test_kinematic_contact_geometry.py": "651cb6a2fffa7f90b6b5e538dbc33f96"
+ },
+ "drop_test": {
+  "description": "cheetah dropped from rootz=0.6 with MuJoCo's own mass matrix and contact-free acceleration substituted for the learned mechanics, zero action, dt=contact_dt=0.002, 3000 steps; float64",
+  "body_weight_N": 137.34,
+  "default_gate_off_kinematic": 0.005,
+  "default_gate_off_learned": 0.06,
+  "rows": [
+   {
+    "contact_gate_off": 0.06,
+    "rest_rootz": -0.07884783772471468,
+    "rest_min_gap_m": 0.02577732156123458,
+    "rest_gaps_m": [
+     0.02637138507119763,
+     0.20705190011344032,
+     0.02577732156123458,
+     0.13437799708868503,
+     0.2171894755267046,
+     0.1477873217671294
+    ],
+    "rest_max_abs_qvel": 0.0014117845056451496,
+    "rest_total_normal_force_N": 137.34071431293418,
+    "solver_residual": 2.156692811238893e-09,
+    "cone_violation": 0.0
+   },
+   {
+    "contact_gate_off": 0.02,
+    "rest_rootz": -0.09715888180613717,
+    "rest_min_gap_m": 0.005407714680276343,
+    "rest_gaps_m": [
+     0.005779939309825233,
+     0.18555171859975517,
+     0.005407714680276343,
+     0.11587294220027267,
+     0.19565782385079145,
+     0.12950845787811693
+    ],
+    "rest_max_abs_qvel": 0.0007314721963760143,
+    "rest_total_normal_force_N": 137.33804843294536,
+    "solver_residual": 1.7085685456734676e-09,
+    "cone_violation": 0.0
+   },
+   {
+    "contact_gate_off": 0.01,
+    "rest_rootz": -0.10106639517169533,
+    "rest_min_gap_m": 0.0011406140874783421,
+    "rest_gaps_m": [
+     0.0014276852099766035,
+     0.18101938957906188,
+     0.0011406140874783421,
+     0.11195147401940037,
+     0.19111926541671326,
+     0.12562885451960903
+    ],
+    "rest_max_abs_qvel": 0.0005623451199665697,
+    "rest_total_normal_force_N": 137.33729340295244,
+    "solver_residual": 1.3736273115304832e-09,
+    "cone_violation": 0.0
+   },
+   {
+    "contact_gate_off": 0.005,
+    "rest_rootz": -0.10274596057136647,
+    "rest_min_gap_m": -5.492594948530716e-06,
+    "rest_gaps_m": [
+     -4.8947354676087684e-06,
+     0.17973773993889797,
+     -5.492594948530716e-06,
+     0.11043758785291019,
+     0.1898431371638537,
+     0.12406975535835729
+    ],
+    "rest_max_abs_qvel": 0.00024797268904080494,
+    "rest_total_normal_force_N": 137.33658156044788,
+    "solver_residual": 1.2784473691737693e-09,
+    "cone_violation": 0.0
+   },
+   {
+    "contact_gate_off": 0.002,
+    "rest_rootz": -0.10288461051417963,
+    "rest_min_gap_m": -5.492136927021107e-06,
+    "rest_gaps_m": [
+     -4.895238299718052e-06,
+     0.17979623935096778,
+     -5.492136927021107e-06,
+     0.11031535732863323,
+     0.18990366100876288,
+     0.12393267174937711
+    ],
+    "rest_max_abs_qvel": 0.00020981132337381345,
+    "rest_total_normal_force_N": 137.33764410940535,
+    "solver_residual": 1.2914350740520807e-09,
+    "cone_violation": 0.0
+   }
+  ]
+ },
+ "constitutive_sweep_at_gate_off_0.06": [
+  {
+   "contact_raw": -6.0,
+   "rest_min_gap_m": 0.02579623711566803,
+   "rest_total_normal_force_N": 137.3421753071052
+  },
+  {
+   "contact_raw": 0.0,
+   "rest_min_gap_m": 0.026969924012611668,
+   "rest_total_normal_force_N": 137.33980491911996
+  },
+  {
+   "contact_raw": 6.0,
+   "rest_min_gap_m": 0.02811682584041142,
+   "rest_total_normal_force_N": 137.34096824597063
+  }
+ ],
+ "compliant_kinematic": {
+  "rejected": true,
+  "message": "contact_geometry='kinematic' requires contact_solver='constraint'; the compliant penalty law's stiffness is initialized for a gap of arbitrary scale and is far too soft for a gap in metres.",
+  "measured_before_fix": {
+   "final_rootz_m": -13.489,
+   "final_min_gap_m": -13.578,
+   "steps": 3000,
+   "dt": 0.002,
+   "stiffness_init_N_per_m": 0.99998
+  }
+ },
+ "md5_after": {
+  "models/port_hamiltonian.py": "a5310e33eb06cf8b5cd79a182b3f7f8a",
+  "benchmarks/run_ct_rl.py": "972cd4bf320133a21bbaae7405ac843b",
+  "evaluations/hamiltonian_recovery.py": "b92fe7afb6253a5c7b4dad23632b2acf",
+  "tests/test_kinematic_contact_geometry.py": "651cb6a2fffa7f90b6b5e538dbc33f96"
+ }
+}

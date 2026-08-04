@@ -1,0 +1,757 @@
+{
+ "what_this_file_is": "Final acceptance numbers for the gate-shaped contact compliance AFTER the verifier findings (ADMM step size poisoned by c0; AC3 graded on a truncation artifact; c0 unbounded below; the law reachable from no entry point) were reproduced and fixed. Every number is read out of the JSON produced by the driver named next to it; nothing here is transcribed by hand. All source md5s were identical before and after every measurement (each driver asserts that itself and records md5_stable).",
+ "change": {
+  "law": "R = [c0 (1 - s^2) + reg] * scale * I_per_contact in _constraint_contact_solve, c0 = floor + softplus(_contact_compliance_raw), floor = _CONTACT_COMPLIANCE_FLOOR_FRACTION (0.1) * the initial c0 the constructor was given. Default disabled (contact_compliance=None).",
+  "admm_step_size": "rho is the mean of the gated Delassus diagonal plus the conditioning floor, diag(W) + reg * scale, not the mean of diag(H). The two are elementwise identical when R = reg * scale * I, so the disabled branch keeps the literal diag(H) expression (a mean over a strided diagonal view does not round like a mean over a contiguous vector, and the single-expression version broke bit-exactness on 8 of 25 fresh models); the enabled branch is c0-independent.",
+  "entry_points": "dynamics_contact_compliance in the benchmark CSV namespace (popped by benchmarks/run_ct_rl.py:_pop_structured_model_kwargs) and --contact_compliance in evaluations/hamiltonian_recovery.py, threaded into every PortHamiltonianModel it builds. A number is c0 itself, 'true' takes the model default, blank/'false' leaves the law off.",
+  "refused": "contact_compliance with contact_solver='compliant', with contact_force=0, and with c0 <= 0 / nan / inf."
+ },
+ "AC1_regularizer_insensitivity": {
+  "driver": "evaluations/contact_compliance_reg_range.py -> results/contact_compliance/ac1_reg_range.json",
+  "protocol": "held static state, MuJoCo M(q) and contact-free qdd substituted, contact_iterations 2000 so ADMM truncation is excluded, contact_regularization swept over eight decades 1e-1 .. 1e-8",
+  "verdict_in_the_taper": "PASS",
+  "verdict_at_full_engagement": "UNCHANGED BY DESIGN, and reported as such rather than as a pass: R = reg * scale * I exactly at s = 1, so a fully engaged contact is as reg-sensitive as it always was (ratio 1.1400 for both laws, identical to every digit at band 0.005). The claim the fix supports is that reg no longer sets the force where the gate is tapering, and therefore no longer sets the resting height.",
+  "taper_states": {
+   "taper_band_0.005_gap_+0.001": {
+    "baseline": {
+     "max_gate": 0.9420800000000003,
+     "force_N_by_reg": {
+      "0.1": 30.96029978708145,
+      "0.01": 35.28610706577823,
+      "0.001": 35.7864904521606,
+      "0.0001": 35.83731441160588,
+      "1e-05": 35.84240478845504,
+      "1e-06": 35.84291390607569,
+      "1e-07": 35.84296481863725,
+      "1e-08": 35.84296990990139
+     },
+     "ratio_max_over_min": 1.1577074562067804
+    },
+    "compliance_c0_40": {
+     "max_gate": 0.9420800000000003,
+     "force_N_by_reg": {
+      "0.1": 4.3800405719922315,
+      "0.01": 4.4563552839247915,
+      "0.001": 4.464133422165724,
+      "0.0001": 4.464912731132615,
+      "1e-05": 4.464990677009759,
+      "1e-06": 4.4649984717473075,
+      "1e-07": 4.46499925122256,
+      "1e-08": 4.464999329170101
+     },
+     "ratio_max_over_min": 1.0193967968518671
+    }
+   },
+   "taper_band_0.06_gap_+0.030": {
+    "baseline": {
+     "max_gate": 0.4999999999999992,
+     "force_N_by_reg": {
+      "0.1": 22.991455546632658,
+      "0.01": 33.94176452582804,
+      "0.001": 35.64326955459129,
+      "0.0001": 35.8228993291488,
+      "1e-05": 35.84096272129857,
+      "1e-06": 35.84277013280617,
+      "1e-07": 35.84295088568743,
+      "1e-08": 35.842968961095025
+     },
+     "ratio_max_over_min": 1.5589691086932775
+    },
+    "compliance_c0_40": {
+     "max_gate": 0.4999999999999992,
+     "force_N_by_reg": {
+      "0.1": 0.21434414493089904,
+      "0.01": 0.21498294874773047,
+      "0.001": 0.21504703861172936,
+      "0.0001": 0.21505344969988463,
+      "1e-05": 0.21505409082972465,
+      "1e-06": 0.21505415494291885,
+      "1e-07": 0.2150541613542404,
+      "1e-08": 0.2150541619953726
+     },
+     "ratio_max_over_min": 1.0033125097245015
+    }
+   },
+   "taper_band_0.06_gap_+0.050": {
+    "baseline": {
+     "max_gate": 0.035493827160493395,
+     "force_N_by_reg": {
+      "0.1": 0.32407758256034325,
+      "0.01": 2.989500852161347,
+      "0.001": 17.00846392759109,
+      "0.0001": 32.258244239110596,
+      "1e-05": 35.44885172020436,
+      "1e-06": 35.80316268488711,
+      "1e-07": 35.83898569350723,
+      "1e-08": 35.84257195731393
+     },
+     "ratio_max_over_min": 110.59873896288411
+    },
+    "compliance_c0_40": {
+     "max_gate": 0.035493827160493395,
+     "force_N_by_reg": {
+      "0.1": 0.000816863665151571,
+      "0.01": 0.0008187034224365961,
+      "0.001": 0.0008188878540571213,
+      "0.0001": 0.0008189063017894938,
+      "1e-05": 0.0008189081466084456,
+      "1e-06": 0.000818908331090798,
+      "1e-07": 0.0008189083495390379,
+      "1e-08": 0.0008189083513838618
+     },
+     "ratio_max_over_min": 1.002503093624456
+    }
+   }
+  },
+  "fully_engaged_states": {
+   "engaged_band_0.005_gap_-0.002": {
+    "baseline": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 351.9492332853735,
+      "0.01": 395.6728175749329,
+      "0.001": 400.6535375138074,
+      "0.0001": 401.1585499471653,
+      "1e-05": 401.20912157259505,
+      "1e-06": 401.2141794399505,
+      "1e-07": 401.2146852337353,
+      "1e-08": 401.21473581318395
+     },
+     "ratio_max_over_min": 1.1399790022780476
+    },
+    "compliance_c0_40": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 351.9492332853735,
+      "0.01": 395.6728175749329,
+      "0.001": 400.6535375138074,
+      "0.0001": 401.1585499471653,
+      "1e-05": 401.20912157259505,
+      "1e-06": 401.2141794399505,
+      "1e-07": 401.2146852337353,
+      "1e-08": 401.21473581318395
+     },
+     "ratio_max_over_min": 1.1399790022780476
+    }
+   },
+   "engaged_band_0.005_gap_-0.0006": {
+    "baseline": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 127.5940165869474,
+      "0.01": 143.44535880186078,
+      "0.001": 145.25104553844875,
+      "0.0001": 145.43413036632847,
+      "1e-05": 145.45246436510922,
+      "1e-06": 145.45429802050663,
+      "1e-07": 145.454481388602,
+      "1e-08": 145.45449972543707
+     },
+     "ratio_max_over_min": 1.1399790022780485
+    },
+    "compliance_c0_40": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 127.5940165869474,
+      "0.01": 143.44535880186078,
+      "0.001": 145.25104553844875,
+      "0.0001": 145.43413036632847,
+      "1e-05": 145.45246436510922,
+      "1e-06": 145.45429802050663,
+      "1e-07": 145.454481388602,
+      "1e-08": 145.45449972543707
+     },
+     "ratio_max_over_min": 1.1399790022780485
+    }
+   },
+   "engaged_band_0.06_gap_-0.002": {
+    "baseline": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 380.0432701555273,
+      "0.01": 436.47391147832485,
+      "0.001": 443.43575602769624,
+      "0.0001": 444.1501407229346,
+      "1e-05": 444.2217687882637,
+      "1e-06": 444.22893349875375,
+      "1e-07": 444.2296499888506,
+      "1e-08": 444.22972163805065
+     },
+     "ratio_max_over_min": 1.16889248283822
+    },
+    "compliance_c0_40": {
+     "max_gate": 1.0,
+     "force_N_by_reg": {
+      "0.1": 352.3123156814732,
+      "0.01": 396.0440619224763,
+      "0.001": 401.02570362701255,
+      "0.0001": 401.5308094515492,
+      "1e-05": 401.5813904284262,
+      "1e-06": 401.58644923104964,
+      "1e-07": 401.5869551183624,
+      "1e-08": 401.5870057071642
+     },
+     "ratio_max_over_min": 1.1398608218687434
+    }
+   }
+  },
+  "headline_ratios": {
+   "taper_gap_+0.050_band_0.06": {
+    "baseline": 110.5987,
+    "fixed": 1.0025
+   },
+   "taper_gap_+0.030_band_0.06": {
+    "baseline": 1.559,
+    "fixed": 1.0033
+   },
+   "taper_gap_+0.001_band_0.005": {
+    "baseline": 1.1577,
+    "fixed": 1.0194
+   },
+   "engaged_gap_-0.002_band_0.005": {
+    "baseline": 1.14,
+    "fixed": 1.14
+   },
+   "engaged_gap_-0.0006_band_0.005": {
+    "baseline": 1.14,
+    "fixed": 1.14
+   }
+  }
+ },
+ "AC1_at_body_weight": {
+  "driver": "evaluations/contact_compliance_rest_probe.py -> results/contact_compliance/rest_reg_insensitivity.json",
+  "protocol": "the whole 3000-step drop is re-run at each regularizer, so the rest pose is re-found under it; the settled pose carries body weight (137.34 N) in every row, force ratio <= 1.00002",
+  "verdict": "PASS",
+  "rest_min_gap_spread_over_five_decades_of_reg_m": {
+   "baseline_band_0.005": 0.00410194987887158,
+   "baseline_band_0.06": 0.026770703407933527,
+   "compliance_c0_40_band_0.005": 2.278161491486852e-05,
+   "compliance_c0_40_band_0.06": 0.0007128700554802636
+  },
+  "improvement_factor": {
+   "band_0.005": 180.05527238520853,
+   "band_0.06": 37.553412718251984
+  },
+  "note": "reg still moves the resting height by 2.3e-5 m in the shipped 0.005 m band and 7.1e-4 m in a 0.06 m band, because near s = 1 the c0 (1 - s^2) term and reg become comparable. That is 180x / 38x less than the pre-fix 4.1e-3 m and 2.7e-2 m -- not the 1250x / 8000x an earlier summary claimed, which was measured off an unconverged solve."
+ },
+ "AC2_c0_is_the_knob": {
+  "driver": "evaluations/contact_compliance_baseline.py --compliance 40 -> results/contact_compliance/fixed.json",
+  "verdict": "PASS",
+  "physical_c0_sweep": {
+   "state": "held static, min gap +0.030 m, band 0.06, gate 0.5, reg 1e-2",
+   "force_N_by_c0": {
+    "0.0001": 33.92827020144306,
+    "0.001": 33.80731080815994,
+    "0.01": 32.64373894514789,
+    "0.1": 24.29589055761628,
+    "1.0": 6.864769878596294,
+    "4.0": 2.030041164884177,
+    "10.0": 0.843175996217353,
+    "40.0": 0.21493461440755876,
+    "400.0": 0.02162112765254835
+   },
+   "ratio_max_over_min": 1569.2183472883823,
+   "monotone_decreasing": true
+  },
+  "raw_parameter_sweep_at_c0_init_40": {
+   "note": "what a fit can reach without changing the configuration: c0 = floor + softplus(raw) is bounded below by floor = 4.0, which is the whole point of the floor",
+   "force_N_by_c0": {
+    "4.00004539890142": 2.030019586839141,
+    "4.002475685207173": 2.0288626609184295,
+    "4.0485873483121395": 2.007158691726555,
+    "4.6931471824646": 1.7460715947395327,
+    "5.31326162815094": 1.5518728975089937,
+    "6.126928091049194": 1.3542488429092134,
+    "7.048587322235107": 1.1835330914185085,
+    "8.018149852752686": 1.0449626995292178,
+    "10.00247573852539": 0.8429726877098945,
+    "14.000045776367188": 0.6067151781830559,
+    "44.0": 0.1955116632491791
+   },
+   "ratio_max_over_min": 10.383112460415656,
+   "compliance_floor": 4.0
+  },
+  "baseline_comparison": "at the same state the learned restitution e and Baumgarte beta move the force by 0.000 N over their whole legal ranges and mu by ~1.07 N; see constitutive_sweep_gap_0.030_gate_off_0.06 in baseline_rerun.json"
+ },
+ "AC3_drop_test": {
+  "driver": "evaluations/contact_compliance_baseline.py -> fixed.json / baseline_rerun.json",
+  "protocol": "released from root z = 0.6 m, zero action, semi-implicit Euler at dt = contact_dt = 0.002 s for 3000 steps, MuJoCo M(q) and contact-free qdd every step, reg 1e-2, contact_iterations 12",
+  "verdict": "PASS for resting at the floor, carrying body weight, and being independent of the gate band; the model does NOT reproduce MuJoCo's resting penetration and that is stated, not claimed",
+  "body_weight_N": 137.34000000000003,
+  "mujoco_reference_rest_gap_m": -0.0005579719716763964,
+  "compliance_c0_40": {
+   "band_0.005": {
+    "rest_min_gap_m": -5.491480820074557e-06,
+    "rest_total_normal_force_N": 137.3378614722547,
+    "rest_total_normal_force_over_weight": 0.9999844289519053,
+    "rest_max_abs_qvel": 0.00022134429969756375,
+    "steps_to_settle": 2419,
+    "solver_residual": 9.26783968674642e-11,
+    "cone_violation": 0.0
+   },
+   "band_0.06": {
+    "rest_min_gap_m": -5.488563266542457e-06,
+    "rest_total_normal_force_N": 137.33750991477638,
+    "rest_total_normal_force_over_weight": 0.9999818691916146,
+    "rest_max_abs_qvel": 0.0002616835077361301,
+    "steps_to_settle": 2447,
+    "solver_residual": 1.0023500817207278e-10,
+    "cone_violation": 0.0
+   }
+  },
+  "baseline": {
+   "band_0.005": {
+    "rest_min_gap_m": -5.492592176525868e-06,
+    "rest_total_normal_force_N": 137.33662140604795,
+    "rest_total_normal_force_over_weight": 0.999975399781913,
+    "rest_max_abs_qvel": 0.00024797268904080494,
+    "steps_to_settle": 2468,
+    "solver_residual": 1.278461533091699e-09,
+    "cone_violation": 0.0
+   },
+   "band_0.06": {
+    "rest_min_gap_m": 0.025774688689809255,
+    "rest_total_normal_force_N": 137.34075836399887,
+    "rest_total_normal_force_over_weight": 1.0000055217999042,
+    "rest_max_abs_qvel": 0.0014117845056451496,
+    "steps_to_settle": -1,
+    "solver_residual": 2.156790776682843e-09,
+    "cone_violation": 0.0
+   }
+  },
+  "band_independence_m": 2.9175535321002144e-09,
+  "iteration_independence": {
+   "note": "the earlier 2.2e-6 m agreement with MuJoCo was an artifact of stopping the ADMM at exactly 12 iterations; with the step size fixed the rest gap moves by 8.6e-12 m between 12 and 200 iterations",
+   "rows": [
+    {
+     "arm": "baseline",
+     "contact_iterations": 12,
+     "rest_min_gap_m": 0.025774688689809255,
+     "rest_total_normal_force_N": 137.34075836399887,
+     "rest_max_abs_qvel": 0.0014117845056451496,
+     "steps_to_settle": -1,
+     "solver_residual": 2.156790776682843e-09,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 19.610028320241714
+    },
+    {
+     "arm": "baseline",
+     "contact_iterations": 25,
+     "rest_min_gap_m": 0.025774693645300828,
+     "rest_total_normal_force_N": 137.34075833978017,
+     "rest_max_abs_qvel": 0.0014117852563520258,
+     "steps_to_settle": -1,
+     "solver_residual": 2.620512059210055e-17,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 19.610016213346853
+    },
+    {
+     "arm": "baseline",
+     "contact_iterations": 50,
+     "rest_min_gap_m": 0.02577469364529006,
+     "rest_total_normal_force_N": 137.3407583397763,
+     "rest_max_abs_qvel": 0.0014117852564456987,
+     "steps_to_settle": -1,
+     "solver_residual": 2.4017389741494668e-17,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 19.610016212219286
+    },
+    {
+     "arm": "baseline",
+     "contact_iterations": 200,
+     "rest_min_gap_m": 0.02577469364529006,
+     "rest_total_normal_force_N": 137.34075833977636,
+     "rest_max_abs_qvel": 0.0014117852564456649,
+     "steps_to_settle": -1,
+     "solver_residual": 1.6573573485907837e-17,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 19.61001621221921
+    },
+    {
+     "arm": "compliance_c0_40",
+     "contact_iterations": 12,
+     "rest_min_gap_m": -5.488563266542457e-06,
+     "rest_total_normal_force_N": 137.33750991477638,
+     "rest_max_abs_qvel": 0.0002616835077361301,
+     "steps_to_settle": 2447,
+     "solver_residual": 1.0023500817207278e-10,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 49.15372137644124
+    },
+    {
+     "arm": "compliance_c0_40",
+     "contact_iterations": 25,
+     "rest_min_gap_m": -5.488498892702864e-06,
+     "rest_total_normal_force_N": 137.33752476213562,
+     "rest_max_abs_qvel": 0.0002623078495348088,
+     "steps_to_settle": 2447,
+     "solver_residual": 0.0,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 49.15392989063789
+    },
+    {
+     "arm": "compliance_c0_40",
+     "contact_iterations": 50,
+     "rest_min_gap_m": -5.488479484783149e-06,
+     "rest_total_normal_force_N": 137.33753098383,
+     "rest_max_abs_qvel": 0.00026255313763422374,
+     "steps_to_settle": 2447,
+     "solver_residual": 0.0,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 49.154004801770924
+    },
+    {
+     "arm": "compliance_c0_40",
+     "contact_iterations": 200,
+     "rest_min_gap_m": -5.488477415882542e-06,
+     "rest_total_normal_force_N": 137.3375316647655,
+     "rest_max_abs_qvel": 0.0002625794559038408,
+     "steps_to_settle": 2447,
+     "solver_residual": 0.0,
+     "cone_violation": 0.0,
+     "rho_over_active_R": 49.15401278353758
+    }
+   ]
+  },
+  "honest_statement": "The fix does NOT move the model's rest gap toward MuJoCo: the model rests at -5.49e-6 m where MuJoCo rests at -5.58e-4 m, i.e. 5.5e-4 m higher, the same offset the compliance-disabled model has in the narrow band (-5.49e-6 m). What it buys is that the resting height stops depending on the gate band: -5.4915e-6 m at band 0.005 and -5.4886e-6 m at band 0.06, against +2.5775e-2 m for the legacy law at band 0.06."
+ },
+ "AC4_bit_exactness_when_disabled": {
+  "driver": "evaluations/contact_compliance_bit_exactness.py -> results/contact_compliance/ac4_bit_exactness.json",
+  "reference": "pre-fix models/port_hamiltonian.py, md5 a5310e33eb06cf8b5cd79a182b3f7f8a",
+  "verdict": "PASS",
+  "all_fresh_bit_equal": true,
+  "all_fresh_keys_equal": true,
+  "all_corpus_bit_equal": true,
+  "corpus_count": 17
+ },
+ "AC5_gradient_reaches_c0": {
+  "driver": "evaluations/contact_compliance_baseline.py --compliance 40 -> fixed.json",
+  "verdict": "PASS",
+  "loss": "||_structured_drift||^2 over an 8-sample batch touching the floor",
+  "detail": {
+   "loss": 5123.025774470703,
+   "grad_per_contact": [
+    -0.07468878807699034,
+    0.0,
+    0.24912854001300194,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "grad_norm": 0.26008353372218607,
+   "grad_max_abs": 0.24912854001300194,
+   "all_finite": true,
+   "nonzero_entries": 2,
+   "reference_grad_norm_contact_raw": 5764.655908568762,
+   "reference_grad_norm_mass": 1806.5924807938547
+  },
+  "structural_zero": "dR/dc0 = (1 - s^2) scale is exactly zero at s = 1 and the impulse is exactly zero at s = 0, so only partially gated contacts can receive gradient (2 of 6 here). That is why c0 needs a floor rather than a learned prior: the contacts that carry the robot cannot train it."
+ },
+ "algebra_reverified": {
+  "cone_invariance_P(Sx)_equals_S_P(x)": {
+   "trials": 2000,
+   "K": 6,
+   "max_abs_error": 7.105427357601002e-15,
+   "max_rel_error": 2.106413272374955e-16,
+   "passed": true
+  },
+  "change_of_variables_Lambda_equals_Sy": {
+   "trials": 24,
+   "K": 4,
+   "reg": 0.01,
+   "admm_iterations": 20000,
+   "tol": 1e-08,
+   "worst_max_rel_error": 1.0725309258170613e-14,
+   "worst_trial": {
+    "trial": 7,
+    "max_rel_error": 1.0725309258170613e-14,
+    "max_abs_error": 1.9895196601282805e-13,
+    "latent_residual": 0.0,
+    "physical_residual": 1.213813865424197e-18,
+    "contacts_on_cone_boundary": 3,
+    "contacts_at_zero_normal": 1,
+    "min_gate": 0.012890945543939769
+   },
+   "max_latent_residual": 3.0579033148115964e-16,
+   "max_physical_residual": 2.0402630923724392e-16,
+   "total_contacts_on_cone_boundary": 56,
+   "total_contacts_at_zero_normal": 31,
+   "cone_was_active": true,
+   "passed": true,
+   "rows": [
+    {
+     "trial": 0,
+     "max_rel_error": 4.754248574354022e-16,
+     "max_abs_error": 6.938893903907228e-18,
+     "latent_residual": 3.95044018889777e-18,
+     "physical_residual": 6.021442349730021e-19,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.149139720214304
+    },
+    {
+     "trial": 1,
+     "max_rel_error": 1.4006880215603312e-15,
+     "max_abs_error": 1.9984014443252818e-15,
+     "latent_residual": 1.192639505281454e-17,
+     "physical_residual": 1.120777204857818e-16,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.08529545642019143
+    },
+    {
+     "trial": 2,
+     "max_rel_error": 1.0890874747581796e-15,
+     "max_abs_error": 2.498001805406602e-16,
+     "latent_residual": 5.325974035476557e-17,
+     "physical_residual": 1.1924765774811414e-17,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.18241199487660165
+    },
+    {
+     "trial": 3,
+     "max_rel_error": 7.093494946865832e-16,
+     "max_abs_error": 2.842170943040401e-14,
+     "latent_residual": 0.0,
+     "physical_residual": 9.24354530735443e-17,
+     "contacts_on_cone_boundary": 1,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.02991188775052178
+    },
+    {
+     "trial": 4,
+     "max_rel_error": 5.6363484841033054e-15,
+     "max_abs_error": 1.3460521586239338e-10,
+     "latent_residual": 7.669580055458346e-17,
+     "physical_residual": 3.24906665083018e-17,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.19279293298772315
+    },
+    {
+     "trial": 5,
+     "max_rel_error": 6.742818055960013e-16,
+     "max_abs_error": 3.469446951953614e-18,
+     "latent_residual": 0.0,
+     "physical_residual": 3.3682718555210246e-20,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.029231450812695958
+    },
+    {
+     "trial": 6,
+     "max_rel_error": 3.3682836700247474e-16,
+     "max_abs_error": 5.551115123125783e-17,
+     "latent_residual": 1.0957758689944452e-17,
+     "physical_residual": 9.814235331949958e-18,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.39601394685082114
+    },
+    {
+     "trial": 7,
+     "max_rel_error": 1.0725309258170613e-14,
+     "max_abs_error": 1.9895196601282805e-13,
+     "latent_residual": 0.0,
+     "physical_residual": 1.213813865424197e-18,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.012890945543939769
+    },
+    {
+     "trial": 8,
+     "max_rel_error": 1.1785511876775885e-15,
+     "max_abs_error": 3.9968028886505635e-15,
+     "latent_residual": 0.0,
+     "physical_residual": 0.0,
+     "contacts_on_cone_boundary": 1,
+     "contacts_at_zero_normal": 3,
+     "min_gate": 0.4199233096551508
+    },
+    {
+     "trial": 9,
+     "max_rel_error": 1.3978113159992756e-15,
+     "max_abs_error": 5.684341886080801e-13,
+     "latent_residual": 1.3072548658038084e-16,
+     "physical_residual": 7.180376756680514e-17,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.2730926428267363
+    },
+    {
+     "trial": 10,
+     "max_rel_error": 2.1339170526431383e-16,
+     "max_abs_error": 2.7755575615628914e-17,
+     "latent_residual": 2.055180993126501e-17,
+     "physical_residual": 0.0,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.16529712725176016
+    },
+    {
+     "trial": 11,
+     "max_rel_error": 0.0,
+     "max_abs_error": 0.0,
+     "latent_residual": 5.085104298993333e-17,
+     "physical_residual": 1.032574929243895e-17,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.08201284023898181
+    },
+    {
+     "trial": 12,
+     "max_rel_error": 7.055002859566102e-16,
+     "max_abs_error": 1.3322676295501878e-15,
+     "latent_residual": 2.4437376793352145e-17,
+     "physical_residual": 4.051127605339857e-17,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.37995952429051105
+    },
+    {
+     "trial": 13,
+     "max_rel_error": 5.7989529572952e-15,
+     "max_abs_error": 3.751665644813329e-12,
+     "latent_residual": 1.764717317166277e-17,
+     "physical_residual": 2.2738202121640617e-17,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.3200915209979722
+    },
+    {
+     "trial": 14,
+     "max_rel_error": 9.42464893445775e-16,
+     "max_abs_error": 1.2434497875801753e-14,
+     "latent_residual": 0.0,
+     "physical_residual": 1.4247406739307026e-16,
+     "contacts_on_cone_boundary": 1,
+     "contacts_at_zero_normal": 3,
+     "min_gate": 0.24608889915992183
+    },
+    {
+     "trial": 15,
+     "max_rel_error": 3.0097073090318835e-16,
+     "max_abs_error": 3.469446951953614e-18,
+     "latent_residual": 8.459110810485774e-19,
+     "physical_residual": 9.541466868745716e-19,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.43083822563984486
+    },
+    {
+     "trial": 16,
+     "max_rel_error": 8.774545125428974e-16,
+     "max_abs_error": 3.2751579226442118e-15,
+     "latent_residual": 0.0,
+     "physical_residual": 9.793677754131103e-18,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 1,
+     "min_gate": 0.08025629911386711
+    },
+    {
+     "trial": 17,
+     "max_rel_error": 4.873669125252942e-15,
+     "max_abs_error": 1.304512053934559e-15,
+     "latent_residual": 0.0,
+     "physical_residual": 0.0,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.0990607282744963
+    },
+    {
+     "trial": 18,
+     "max_rel_error": 3.5618062555758464e-15,
+     "max_abs_error": 4.796163466380676e-14,
+     "latent_residual": 9.252879436151105e-17,
+     "physical_residual": 7.65725515077547e-17,
+     "contacts_on_cone_boundary": 3,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.4356397724131126
+    },
+    {
+     "trial": 19,
+     "max_rel_error": 4.372017242872642e-15,
+     "max_abs_error": 9.549694368615746e-12,
+     "latent_residual": 1.7932846323799045e-17,
+     "physical_residual": 8.460330756298552e-17,
+     "contacts_on_cone_boundary": 4,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.17889847820309213
+    },
+    {
+     "trial": 20,
+     "max_rel_error": 3.892757697960297e-15,
+     "max_abs_error": 2.0599841277224584e-18,
+     "latent_residual": 0.0,
+     "physical_residual": 1.2114555524786486e-19,
+     "contacts_on_cone_boundary": 1,
+     "contacts_at_zero_normal": 3,
+     "min_gate": 0.03706955191708383
+    },
+    {
+     "trial": 21,
+     "max_rel_error": 1.0528490603549074e-15,
+     "max_abs_error": 9.71445146547012e-17,
+     "latent_residual": 1.3615527520193108e-17,
+     "physical_residual": 0.0,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.28538454243487665
+    },
+    {
+     "trial": 22,
+     "max_rel_error": 4.391501694344162e-16,
+     "max_abs_error": 1.0658141036401503e-14,
+     "latent_residual": 3.632908012692877e-17,
+     "physical_residual": 1.1891814913633985e-16,
+     "contacts_on_cone_boundary": 4,
+     "contacts_at_zero_normal": 0,
+     "min_gate": 0.5118400045172556
+    },
+    {
+     "trial": 23,
+     "max_rel_error": 2.3401334329015915e-15,
+     "max_abs_error": 1.0547118733938987e-15,
+     "latent_residual": 3.0579033148115964e-16,
+     "physical_residual": 2.0402630923724392e-16,
+     "contacts_on_cone_boundary": 2,
+     "contacts_at_zero_normal": 2,
+     "min_gate": 0.11030354787006669
+    }
+   ]
+  },
+  "H_recovery_crosscheck_fixed_law": true,
+  "H_recovery_crosscheck_fixed_law_max_dev": 0.0,
+  "H_recovery_crosscheck_baseline_law": true,
+  "H_recovery_crosscheck_baseline_max_dev": 2.710505431213761e-19
+ },
+ "tests": {
+  "full_suite_after": "580 collected, 1 failed, 579 passed (182 s)",
+  "pre_existing_failure": "tests/test_acrobot_model_representation.py::TestAcrobotFinalHyperparameters::test_all_final_modes_parse_periodic_observations_and_shared_parameters -- an acrobot hyperparameter-CSV assertion (gamma 0.99 vs 0.995 in benchmarks/hyperparams/ct_sac.csv, which this work does not touch), failing before any of it",
+  "compliance_file": "tests/test_contact_gate_shaped_compliance.py, 46 tests, all passing",
+  "new_regression_tests_confirmed_failing_before_each_fix": {
+   "rho = mean(diag H) restored": "6 failures: the 5 TestADMMStepSizeIsNotPoisonedByTheCompliance tests and the AC3 drop test",
+   "compliance floor fraction set to 0": "2 failures: test_insensitivity_survives_a_collapsed_raw_parameter and test_the_compliance_floor_is_a_fixed_fraction_of_the_initial_c0",
+   "entry-point threading and the contact_force guard removed": "5 failures: the 4 reachable TestEntryPointsCanBuildAnEnabledModel tests and test_compliance_without_contact_points_is_refused"
+  }
+ },
+ "md5_after_every_measurement": {
+  "models/port_hamiltonian.py": "0f05ad559ae9885e7ba7887af77e68e0",
+  "tests/test_contact_gate_shaped_compliance.py": "f9a6f8e61a8aebbe23d7113813c73e3c",
+  "benchmarks/run_ct_rl.py": "c8f9ffa227c9fc59a34010e3bab2c386",
+  "evaluations/hamiltonian_recovery.py": "3e2e091567b736b9f6a5f900f77df4a5",
+  "evaluations/contact_compliance_probe.py": "b2be7b8e50c606b6c8cfc053c18341a0",
+  "evaluations/contact_compliance_baseline.py": "8e72ad7745146d1b79cbfd1bbf4918a2",
+  "evaluations/contact_compliance_rest_probe.py": "ecb18492098f5a4d3303e12fefb42ba0",
+  "evaluations/contact_compliance_reg_range.py": "c1caae5bd261e443567a6670908971b4",
+  "evaluations/contact_compliance_bit_exactness.py": "7313249a1df70a94c81db5fcd9e8f581"
+ },
+ "known_caveats_not_fixed": [
+  "The resting penetration scales as contact_dt^2 (the compliance acts at the velocity level), so halving contact_dt makes the floor four times stiffer, while MuJoCo's rest gap is dt-independent. Not addressed.",
+  "At MuJoCo's own resting pose the model's total normal force is ~2.4x MuJoCo's, identically with the compliance enabled and disabled: the fix moves the equilibrium height, not the contact stiffness at a given penetration.",
+  "12 ADMM iterations are not exact. Worst measured truncation with the compliance over a (band, gap) grid is 9.2e-3 relative (band 0.06, 10 mm penetration, two contacts at different partial gates) against 1.1e-2 relative for the legacy law at its own worst state on the same grid. Parity with the historical solver, not exactness.",
+  "The compliance floor is derived from the constructor argument and is not persisted in the state_dict, exactly like contact_regularization and the gate band; loading a sidecar into a model built with a different contact_compliance changes the floor.",
+  "c0 is one number per contact point and is only trainable where the gate is tapering; nothing here demonstrates that a real fit recovers a useful c0."
+ ]
+}
