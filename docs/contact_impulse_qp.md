@@ -763,7 +763,7 @@ The tangential reaction dissipates energy, and the maximum-dissipation reading o
 The formulation extends the ideal QP with three ingredients:
 
 1. a location-dependent gate, so a point in clear flight is exactly inactive;
-2. a gate-shaped contact compliance carrying a learned stiffness;
+2. a gate-shaped compliance across the contact-candidate band;
 3. a small positive conditioning floor, so duplicate and weakly gated contacts remain numerically stable.
 
 The following states the numerical target problem explicitly.
@@ -907,14 +907,35 @@ so $\tilde R$ maps impulse to the residual by which the requested outgoing veloc
 
 The two ends of the band read directly off the formula:
 
-- at $s_i=1$ the shape factor vanishes and $\tilde R_{ii}=\eta\sigma$, the conditioning floor alone, so a fully engaged contact enforces its requested velocity to within that floor;
+- at $s_i=1$ the shape factor $1-s_i^2$ vanishes and $\tilde R_{ii}=\eta\sigma$, so a fully engaged contact enforces its requested velocity to within the conditioning floor;
 - as $s_i\to0$ the compliance grows without bound and $\Lambda_i\to0$, so the physical response fades smoothly to zero through the transition band.
 
-$c_{0,i}$ therefore sets how soft a partially engaged contact is, and $\eta$ sets the conditioning of the linear algebra. Writing the diagonal so that the compliance term vanishes at full engagement keeps those two roles separate: the force a contact transmits through the taper is selected by $c_{0,i}$, and the same force is insensitive to $\eta$ over several decades.
+#### Where each quantity acts
 
-#### The learned stiffness
+The two limits above fix the region of action of each term, and stating it explicitly bounds what the diagonal represents.
 
-$c_{0,i}$ is a constitutive property of the contact, learned alongside restitution, penetration recovery and friction:
+$c_{0,i}$ acts on the open interval $g_{\mathrm{on}}<g_i<g_{\mathrm{off}}$, and only there. Its coefficient $1-s_i^2$ is identically zero at and below $g_{\mathrm{on}}$, so $c_{0,i}$ leaves a contact at or inside the ground surface unchanged. Measured at $\eta=10^{-2}$ and $g_{\mathrm{off}}=5\times10^{-3}$, $\tilde R_{ii}/\sigma$ equals $10^{-2}$ at every gap $g_i\le0$ for $c_{0,i}=4$, $40$ and $400$ alike:
+
+| $g_i$ [m] | $s_i$ | $\tilde R_{ii}/\sigma$, $c_0=4$ | $c_0=40$ | $c_0=400$ |
+|---|---|---|---|---|
+| $-1.0\times10^{-2}$ | $1.000000$ | $0.0100$ | $0.0100$ | $0.0100$ |
+| $-2.0\times10^{-3}$ | $1.000000$ | $0.0100$ | $0.0100$ | $0.0100$ |
+| $0$ | $1.000000$ | $0.0100$ | $0.0100$ | $0.0100$ |
+| $+5.0\times10^{-4}$ | $0.991440$ | $0.0795$ | $0.7039$ | $6.947$ |
+| $+2.5\times10^{-3}$ | $0.500000$ | $12.04$ | $120.0$ | $1200$ |
+| $+4.0\times10^{-3}$ | $0.057920$ | $1191$ | $1.19\times10^4$ | $1.19\times10^5$ |
+
+So what $c_{0,i}$ selects is the profile by which a contact fades out across the transition band, and with it the clearance at which a given load is carried.
+
+$\eta$ acts everywhere, and at full engagement it acts alone. With $\tilde R_{ii}=\eta\sigma$ there, the force transmitted at a given penetration and the penetration reached under a given load are set by $\eta$, $\sigma$ and the mechanism. For $\eta\le10^{-2}$ the product $\eta\sigma$ is small against $\operatorname{diag}(W_{\mathrm{full}})$, so a fully engaged contact is close to rigid: a held static force varies by a factor of $1.14$ across eight decades of $\eta$ at $g_i=-2\times10^{-3}$.
+
+The two roles therefore separate across the transition band, where the transmitted force is selected by $c_{0,i}$ and is insensitive to $\eta$ to within $0.25\%$ over five decades, and the fully engaged response is governed by $\eta$, $\sigma$ and the mechanism.
+
+Section 7.2a states what carrying a learned stiffness into the fully engaged region requires.
+
+#### The taper coefficient
+
+$c_{0,i}$ is learned alongside restitution, penetration recovery and friction:
 
 $$
 c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i),
@@ -922,7 +943,15 @@ c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i),
 c_{\mathrm{floor}}=\kappa\,c_{0}^{\mathrm{init}},
 $$
 
-with one unconstrained parameter $\hat c_i$ per contact point and $\kappa=0.1$ by default. The offset keeps the compliance term present at every parameter value, so the separation of roles above holds throughout training.
+with one unconstrained parameter $\hat c_i$ per contact point and $\kappa=0.1$ by default. The offset keeps the taper term present at every parameter value.
+
+Its gradient carries the same region of action as the term itself:
+
+$$
+\frac{\partial R_{ii}}{\partial c_{0,i}}=\left(1-s_i^2\right)\sigma,
+$$
+
+which is zero at $s_i=1$ and zero where the impulse is zero at $s_i=0$, so the samples that inform $c_{0,i}$ are those with a contact inside the transition band.
 
 Sharing one coefficient between a contact's normal and tangential slot is what preserves the cone implication of §7.1: the scaling applied inside a contact block stays uniform, so cone membership and the friction ratio are untouched.
 
@@ -934,7 +963,25 @@ $$
 k_i=\frac{\beta_i}{\tilde R_{ii}h^2},
 $$
 
-so a resting contact carries load at a penetration set by $c_{0,i}$, $\beta_i$ and the response interval.
+so a resting contact carries load at a penetration set by $\tilde R_{ii}$, $\beta_i$ and the response interval. Evaluating this at full engagement gives $k_i=\beta_i/(\eta\sigma h^2)$, and the factor $h^2$ records that the softening acts on velocity, so the stiffness realized at a given penetration scales with the square of the response interval.
+
+### 7.2a A stiffness at full engagement
+
+Realizing a learned stiffness where a contact is at or inside the ground surface requires a diagonal term that survives the conversion $\tilde R=S^{-1}RS^{-1}$ as a constant. A term carrying $S^2$ does so:
+
+$$
+R=\sigma\operatorname{diag}\!\left[
+c_g\odot S^2+c_0\odot(\mathbf 1-S^2)+\eta
+\right],
+\qquad
+\tilde R=\sigma\left[
+c_g+c_0\odot\left(S^{-2}-\mathbf 1\right)+\eta S^{-2}
+\right].
+$$
+
+This carries $\tilde R_{ii}=\sigma(c_{g,i}+\eta)$ at $s_i=1$, retains the divergence as $s_i\to0$, and keeps $R\succeq\eta\sigma I$ since every coefficient is non-negative. Its gradient $\partial R_{ii}/\partial c_{g,i}=s_i^2\sigma$ is largest exactly at full engagement, so the loaded samples inform it. Setting $c_g=0$ recovers the diagonal of §7.2.
+
+A stiffness stated in physical units offers a further property. Choosing $\tilde R_{ii}=\beta_i/(k_ih^2)$ realizes a normal stiffness $k_i$ in newtons per metre by the static relation above, and such a $\tilde R$ carries absolute units rather than the contact-space scale $\sigma$. Because $\sigma$ is the mean gated-free Delassus diagonal, a diagonal proportional to it is covariant with any rescaling of the learned mass matrix, while a diagonal in absolute units fixes the mass scale against a known ground stiffness.
 
 ### 7.3 The target optimization problem
 
@@ -1224,9 +1271,9 @@ At each internal step, the constraint contact path performs the following calcul
 | coupled contacts | off-diagonal entries of $W_{\mathrm{full}}$ coordinate the impulses across contact points |
 | contact geometry | gaps and contact Jacobians are the plane's forward kinematics in closed form, with $J_n$ and $J_t$ the two rows of the point Jacobian |
 | compact gate | supplies smooth contact candidacy and an exact clear-flight cutoff |
-| compliance $\tilde R$ | maps impulse to the velocity residual $v^+-v^*=-\tilde R\Lambda$; gate-shaped, so the response fades to zero across the band and a fully engaged contact tracks its requested velocity |
-| learned stiffness $c_{0,i}$ | a constitutive parameter, trained with restitution, recovery and friction, that selects the force a partially engaged contact transmits |
-| conditioning floor $\eta$ | supplies scale-aware curvature at every gate value, bounds the latent impulse, and selects a unique target minimizer |
+| compliance $\tilde R$ | maps impulse to the velocity residual $v^+-v^*=-\tilde R\Lambda$; gate-shaped, so the response fades to zero across the band, and equal to $\eta\sigma$ at full engagement |
+| taper coefficient $c_{0,i}$ | learned per contact point; acts on $g_{\mathrm{on}}<g_i<g_{\mathrm{off}}$ and selects the force a partially engaged contact transmits, with $\partial R_{ii}/\partial c_{0,i}=(1-s_i^2)\sigma$ |
+| conditioning floor $\eta$ | supplies scale-aware curvature at every gate value, bounds the latent impulse, selects a unique target minimizer, and with $\sigma$ governs the fully engaged response |
 | bounded diagonal | $\eta\sigma I\preceq R\preceq\sigma\operatorname{diag}(c_0+\eta)$, so positive-definiteness and conditioning hold uniformly across the band |
 | cone projection | gives a feasible returned impulse at every ADMM iteration |
 | solver residual | measures finite-budget optimality |
@@ -1443,13 +1490,14 @@ At an unconstrained bowl minimum this gradient is zero; constraints can place th
 | $y_{\mathrm{ret}}=z^N$ | feasible finite-ADMM approximation returned by the implementation |
 | $\Lambda$ | physical impulse; $Sy$ in the exact target problem and $Sy_{\mathrm{ret}}$ in the finite implementation |
 | $\sigma$ | contact-space inverse-mass scale, the mean gated-free Delassus diagonal |
-| $c_{0,i}$ | learned compliance coefficient of contact point $i$, shared by its two slots |
+| $c_{0,i}$ | learned taper coefficient of contact point $i$, shared by its two slots; acts on $g_{\mathrm{on}}<g_i<g_{\mathrm{off}}$ |
 | $\hat c_i$ | unconstrained raw parameter learning $c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i)$ |
-| $c_{\mathrm{floor}}=\kappa c_0^{\mathrm{init}}$ | lower bound keeping the compliance term present at every parameter value |
+| $c_{\mathrm{floor}}=\kappa c_0^{\mathrm{init}}$ | lower bound keeping the taper term present at every parameter value |
 | $\eta$ | conditioning coefficient of the positive floor |
-| $R=\sigma\operatorname{diag}[c_0\odot(\mathbf 1-S^2)+\eta]$ | latent diagonal: gate-shaped compliance plus conditioning floor |
+| $R=\sigma\operatorname{diag}[c_0\odot(\mathbf 1-S^2)+\eta]$ | latent diagonal: gate-shaped taper plus conditioning floor |
 | $\tilde R=S^{-1}RS^{-1}$ | physical contact compliance; $v^+-v^*=-\tilde R\Lambda$ at an interior optimum |
-| $k_i=\beta_i/(\tilde R_{ii}h^2)$ | equivalent position-level normal stiffness at rest |
+| $k_i=\beta_i/(\tilde R_{ii}h^2)$ | equivalent position-level normal stiffness at rest; $\beta_i/(\eta\sigma h^2)$ at full engagement |
+| $c_{g,i}$ | fully engaged stiffness coefficient of §7.2a, carried on $S^2$ |
 | $H=\operatorname{sym}(SW_{\mathrm{full}}S)+R$ | target QP Hessian |
 | $\rho$ | ADMM penalty, from the gated Delassus diagonal and the conditioning floor |
 | $I$ | identity matrix |
