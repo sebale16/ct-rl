@@ -236,11 +236,42 @@ def _pop_structured_model_kwargs(
     contact_solver = str(
         algo_kwargs.pop("dynamics_contact_solver", "") or ""
     ).strip()
+    # 'kinematic' reads the gap and both contact Jacobians from the layout's
+    # exact forward kinematics instead of fitting MLPs to them; 'learned'
+    # (the default when the column is absent) keeps the historical behaviour.
+    contact_geometry = str(
+        algo_kwargs.pop("dynamics_contact_geometry", "") or ""
+    ).strip()
+    if contact_geometry:
+        model_kwargs["contact_geometry"] = contact_geometry
+    # Upper edge of the contact-candidate gate band, in the units of the gap.
+    # Absent, the model picks its own default per geometry (unitless 0.06 for the
+    # learned gap, a few millimetres for the metric kinematic gap).
+    contact_gate_off = algo_kwargs.pop("dynamics_contact_gate_off", None)
     contact_dt = algo_kwargs.pop("dynamics_contact_dt", None)
     contact_iterations = algo_kwargs.pop("dynamics_contact_iterations", None)
     contact_regularization = algo_kwargs.pop(
         "dynamics_contact_regularization", None
     )
+    if contact_gate_off is not None and str(contact_gate_off).strip():
+        model_kwargs["contact_gate_off"] = float(contact_gate_off)
+    # Initial value of the learned constitutive contact compliance c0. Blank or
+    # absent leaves the historical fixed Delassus regularizer, in which the gate
+    # cancels everywhere except R and contact_regularization IS the contact
+    # stiffness; 'true' takes the model's default c0; a number sets it.
+    contact_compliance = str(
+        algo_kwargs.pop("dynamics_contact_compliance", "") or ""
+    ).strip()
+    if contact_compliance:
+        lowered = contact_compliance.lower()
+        if lowered in ("true", "yes"):
+            # the model's own default initial c0
+            model_kwargs["contact_compliance"] = True
+        elif lowered in ("false", "no", "none"):
+            model_kwargs["contact_compliance"] = None
+        else:
+            # a number is the initial c0 itself, so '1' means c0 = 1, not "on"
+            model_kwargs["contact_compliance"] = float(contact_compliance)
 
     if contact_solver:
         model_kwargs["contact_solver"] = contact_solver

@@ -379,6 +379,152 @@ def _scale_diagonal(matrix: th.Tensor, scale: th.Tensor) -> th.Tensor:
 
 
 @dataclass(frozen=True)
+class PlanarContactPoint:
+    """One rigid point that can strike a flat floor, as exact kinematics.
+
+    Contact geometry is not a dynamics unknown: over a plane at a known height
+    the signed gap of a rigid point is forward kinematics of the observed
+    coordinates.  For a planar mechanism whose hinges all share one axis the
+    rotations compose additively, so the point is reached from the floating
+    base through an ordered chain of hinge angles ``angle_pos`` (observed-position
+    indices, root-most first) with one rigid offset per angle.
+
+    ``offsets[k] = (dx_k, dz_k)`` is the segment offset expressed in the frame
+    that exists *after* applying angles ``angle_pos[0] .. angle_pos[k]``.  With
+    ``Theta_k = sum_{j<=k} pos[angle_pos[j]]``,
+
+        cx_k = dx_k cos(Theta_k) + dz_k sin(Theta_k)
+        cz_k = -dx_k sin(Theta_k) + dz_k cos(Theta_k)
+        z    = base_height + pos[height_pos] + sum_k cz_k
+        x    = x_base + sum_k cx_k                  (x_base is cyclic; it cancels)
+        gap  = z - radius
+
+    ``height_pos`` is the observed-position index of the base's vertical
+    translation and ``base_height`` the constant offset of the base frame above
+    the floor.  ``radius`` is the collision radius subtracted from the point
+    height to give the signed gap (a capsule end-cap radius).
+    """
+
+    name: str
+    radius: float
+    height_pos: int
+    base_height: float
+    angle_pos: Tuple[int, ...]
+    offsets: Tuple[Tuple[float, float], ...]
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.name, str) and self.name, "contact point needs a name"
+        assert np.isfinite(self.radius) and self.radius > 0.0, (
+            f"contact point {self.name!r}: radius must be finite and > 0"
+        )
+        assert np.isfinite(self.base_height), (
+            f"contact point {self.name!r}: base_height must be finite"
+        )
+        assert int(self.height_pos) == self.height_pos and self.height_pos >= 0, (
+            f"contact point {self.name!r}: height_pos must be a non-negative index"
+        )
+        assert len(self.offsets) == len(self.angle_pos), (
+            f"contact point {self.name!r}: one (dx, dz) offset per chain angle "
+            f"({len(self.offsets)} offsets vs {len(self.angle_pos)} angles)"
+        )
+        assert len(set(self.angle_pos)) == len(self.angle_pos), (
+            f"contact point {self.name!r}: an angle may appear once per chain"
+        )
+        assert all(int(a) == a and a >= 0 for a in self.angle_pos), (
+            f"contact point {self.name!r}: angle_pos entries must be indices"
+        )
+        for offset in self.offsets:
+            assert len(offset) == 2, (
+                f"contact point {self.name!r}: offsets are planar (dx, dz) pairs"
+            )
+            assert all(np.isfinite(v) for v in offset), (
+                f"contact point {self.name!r}: offsets must be finite"
+            )
+
+    @property
+    def depth(self) -> int:
+        return len(self.angle_pos)
+
+
+# ---- dm_control suite cheetah-run: exact floor-contact kinematics ------------
+# pos = obs[0:8] = qpos[1:9] = [rootz, rooty, bthigh, bshin, bfoot, fthigh,
+# fshin, ffoot]; every hinge turns about +y so the rotations compose additively,
+# every collidable geom is a capsule of radius 0.046, and the floor is the plane
+# z = 0.  The offsets below are capsule end-caps
+# (geom_pos +/- R(geom_quat) @ (0, 0, half_length)) walked down the body tree and
+# were verified against mjModel/mjData forward kinematics to 7.1e-15 m over 6000
+# random states (evaluations/extract_contact_kinematics.py; the spec it emits is
+# results/contact_kinematics/cheetah_contact_kinematics.json).
+#
+# The six points are both end-caps of both feet plus the near-ankle end-cap of
+# each shin.  A contact census over MuJoCo's own contact set (OU exploration and
+# three trained policies, >130k floor contacts, in
+# results/cheetah_contact_endpoint_census.json) found MuJoCo's floor contacts to
+# be exactly the set of capsule end-caps with negative gap -- there are no
+# mid-shaft contacts -- and these six cover 99.1% of upright contact events and
+# 100% of contact states.  Torso and head end-caps only ever touch when the
+# cheetah has flipped onto its back.
+_CHEETAH_ROOT_Z_POS = 0        # observed-position index of the root height
+_CHEETAH_BASE_HEIGHT = 0.7     # torso frame height above the floor at rootz = 0
+CHEETAH_CONTACT_POINTS: Tuple[PlanarContactPoint, ...] = (
+    PlanarContactPoint(
+        name='bfoot_minus',     # rear toe tip
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 2, 3, 4),
+        offsets=((-0.5, 0.0), (0.16, -0.25), (-0.28, -0.14),
+                 (0.05432899023963695, -0.1877970276711724)),
+    ),
+    PlanarContactPoint(
+        name='bfoot_plus',      # rear heel
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 2, 3, 4),
+        offsets=((-0.5, 0.0), (0.16, -0.25), (-0.28, -0.14),
+                 (0.005671009760363048, -0.006202972328827591)),
+    ),
+    PlanarContactPoint(
+        name='ffoot_minus',     # front toe tip
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 5, 6, 7),
+        offsets=((0.5, 0.0), (-0.14, -0.24), (0.13, -0.18),
+                 (0.08414350324295228, -0.12803263007885293)),
+    ),
+    PlanarContactPoint(
+        name='ffoot_plus',      # front heel
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 5, 6, 7),
+        offsets=((0.5, 0.0), (-0.14, -0.24), (0.13, -0.18),
+                 (0.005856496757047719, -0.01196736992114708)),
+    ),
+    PlanarContactPoint(
+        name='bshin_plus',      # rear ankle
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 2, 3),
+        offsets=((-0.5, 0.0), (0.16, -0.25),
+                 (-0.27481910694487505, -0.13575567201836164)),
+    ),
+    PlanarContactPoint(
+        name='fshin_minus',     # front ankle
+        radius=0.046,
+        height_pos=_CHEETAH_ROOT_Z_POS,
+        base_height=_CHEETAH_BASE_HEIGHT,
+        angle_pos=(1, 5, 6),
+        offsets=((0.5, 0.0), (-0.14, -0.24),
+                 (0.12427444776789917, -0.17787798269083444)),
+    ),
+)
+
+
+@dataclass(frozen=True)
 class DOFLayout:
     """Maps a flat observation to a manipulator (q, qd) phase state for the
     structured port-Hamiltonian model. Kept domain-agnostic: every DOF fact the
@@ -401,6 +547,11 @@ class DOFLayout:
     ground reaction cannot be absorbed into M as a contact proxy.
     contact_tangent_cfg is the config-DOF index of the horizontal translation that
     contact friction pushes against (cheetah: the cyclic root x).
+    contact_points optionally declares the EXACT kinematics of each candidate
+    contact point (see :class:`PlanarContactPoint`).  It is data, not a learned
+    head: a model built with ``contact_geometry="kinematic"`` reads the gap and
+    both contact Jacobians straight out of these fields instead of fitting an
+    MLP to them.  The default empty tuple keeps every legacy layout unchanged.
 
     Mechanism fields are opt-in so legacy layouts retain their architecture:
     ``periodic_pos`` feeds sin/cos rather than a raw angle to the mechanical
@@ -417,6 +568,7 @@ class DOFLayout:
     act_to_cfg: Optional[Tuple[int, ...]] = None
     m_invariant_pos: Tuple[int, ...] = ()
     contact_tangent_cfg: Optional[int] = None
+    contact_points: Tuple[PlanarContactPoint, ...] = ()
     # Optional structure known from the mechanism.  Defaults deliberately keep
     # the historical cheetah/raw-state architecture unchanged.
     enforce_m_invariance: bool = False
@@ -490,6 +642,48 @@ class DOFLayout:
             seen_limits.add(pos_i)
         if self.contact_tangent_cfg is not None:
             assert 0 <= self.contact_tangent_cfg < self.nv, "contact_tangent_cfg out of range"
+        self._validate_contact_points()
+
+    def _validate_contact_points(self) -> None:
+        """Range-check the exact contact kinematics and verify they form a tree.
+
+        Every index is an observed-position index, so it must be observable
+        (in ``[0, npos)``) for the model to evaluate the gap from an observation.
+        "Prefix-consistent" means the declared chains are consistent branches of
+        one kinematic tree: an angle reached through a given parent in one chain
+        is reached through that same parent in every other chain, and no angle is
+        a root in one chain and a descendant in another.  Otherwise two points
+        would silently disagree about the mechanism they hang off.
+        """
+        if not self.contact_points:
+            return
+        names = [p.name for p in self.contact_points]
+        assert len(set(names)) == len(names), "contact point names must be unique"
+        parent_of: dict[int, Optional[int]] = {}
+        for point in self.contact_points:
+            assert 0 <= point.height_pos < self.npos, (
+                f"contact point {point.name!r}: height_pos indexes observed "
+                f"positions, so it must be in [0, {self.npos})"
+            )
+            previous: Optional[int] = None
+            for angle in point.angle_pos:
+                assert 0 <= angle < self.npos, (
+                    f"contact point {point.name!r}: angle index {angle} indexes "
+                    f"observed positions, so it must be in [0, {self.npos})"
+                )
+                assert angle != point.height_pos, (
+                    f"contact point {point.name!r}: angle index {angle} is also "
+                    "the base height coordinate"
+                )
+                if angle in parent_of:
+                    assert parent_of[angle] == previous, (
+                        f"contact point {point.name!r}: angle {angle} follows "
+                        f"{previous} here but {parent_of[angle]} in an earlier "
+                        "chain; contact point chains must be prefix-consistent"
+                    )
+                else:
+                    parent_of[angle] = previous
+                previous = angle
 
     @classmethod
     def raw_state(cls, nv: int, act_to_cfg: Optional[Tuple[int, ...]] = None) -> "DOFLayout":
@@ -603,6 +797,8 @@ class DOFLayout:
             act_to_cfg=None,
             m_invariant_pos=(0,),   # root z: M is invariant to vertical translation
             contact_tangent_cfg=0,  # friction acts along the cyclic root x
+            # Exact floor kinematics, used only by contact_geometry="kinematic".
+            contact_points=CHEETAH_CONTACT_POINTS,
         )
 
 
@@ -618,10 +814,13 @@ class PortHamiltonianModel(nn.Module):
         dissipation_rank: int = 4,
         human_input_intensity: float = 0.0,
         contact_force: int = 0,
+        contact_geometry: str = "learned",
         contact_solver: str = "constraint",
+        contact_gate_off: Optional[float] = None,
         contact_dt: float = 0.002,
         contact_iterations: int = 12,
         contact_regularization: float = 0.01,
+        contact_compliance: Optional[float | bool] = None,
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
         structured_hidden: Sequence[int] = (128, 128),
@@ -641,10 +840,40 @@ class PortHamiltonianModel(nn.Module):
         self.action_dim = int(action_dim)
         self.human_input_intensity = float(human_input_intensity)
         self.contact_force = int(contact_force)
+        self.contact_geometry = str(contact_geometry).strip().lower()
         self.contact_solver = str(contact_solver).strip().lower()
         self.contact_dt = float(contact_dt)
         self.contact_iterations = int(contact_iterations)
         self.contact_regularization = float(contact_regularization)
+        # Gate-shaped contact compliance. ``None`` (the default) keeps the
+        # historical Delassus regularizer R = reg * scale * I, in which the gate
+        # cancels out of every term except R itself, so the solver's numerical
+        # conditioning parameter IS its contact stiffness. When enabled the
+        # regularizer becomes R = [c0 (1 - s^2) + reg] * scale * I_per_contact
+        # with s the per-contact gate and c0 = floor + softplus of
+        # ``_contact_compliance_raw``, a learned (and floored -- see
+        # ``_CONTACT_COMPLIANCE_FLOOR_FRACTION``) constitutive parameter, which
+        # puts the physical compliance
+        # Rtilde = S^-1 R S^-1 = scale [c0 (1/s^2 - 1) + reg/s^2] under c0 and
+        # demotes reg to a conditioning floor. ``_contact_compliance_raw`` stays
+        # a plain ``None`` attribute when disabled so no state_dict key appears.
+        self._contact_compliance_raw: Optional[nn.Parameter] = None
+        if contact_compliance is True:
+            self.contact_compliance: Optional[float] = self._DEFAULT_CONTACT_COMPLIANCE
+        elif contact_compliance is False or contact_compliance is None:
+            self.contact_compliance = None
+        else:
+            self.contact_compliance = float(contact_compliance)
+        # c0 = floor + softplus(raw). The floor is what stops a fit from
+        # annihilating the compliance and handing the contact stiffness back to
+        # contact_regularization; it is a plain float derived from the
+        # constructor argument, like every other contact configuration here, so
+        # it adds no state_dict entry. Zero when the law is disabled.
+        self._contact_compliance_floor: float = (
+            0.0
+            if self.contact_compliance is None
+            else self._CONTACT_COMPLIANCE_FLOOR_FRACTION * self.contact_compliance
+        )
         self.device = th.device(device)
         self._drift_fn = drift_fn
         self.last_fit_accepted: bool = False
@@ -667,6 +896,50 @@ class PortHamiltonianModel(nn.Module):
                 "contact_solver must be either 'compliant' or 'constraint', "
                 f"got {contact_solver!r}"
             )
+        if self.contact_geometry not in ("learned", "kinematic"):
+            raise ValueError(
+                "contact_geometry must be either 'learned' or 'kinematic', "
+                f"got {contact_geometry!r}"
+            )
+        if self.contact_geometry == "kinematic" and self.contact_solver == "compliant":
+            # The compliant Hunt--Crossley law initializes its stiffness at
+            # softplus(0.5413) ~ 1 N/m, which only ever made sense because the
+            # learned gap's output scale was free to absorb it. Against an exact
+            # gap in metres it is four orders of magnitude too soft to carry a
+            # body weight: a dropped cheetah falls straight through the floor
+            # (measured -13.5 m after 3 s) from the very first step. Refuse the
+            # combination rather than start a fit that cannot integrate.
+            raise ValueError(
+                "contact_geometry='kinematic' requires contact_solver='constraint'; "
+                "the compliant penalty law's stiffness is initialized for a gap of "
+                "arbitrary scale and is far too soft for a gap in metres."
+            )
+        # Contact-candidate gate band. The gate is exactly off at
+        # ``g >= contact_gate_off`` and fully on at ``g <= contact_gate_on``.
+        # With the learned geometry the gap carried no units, so 0.06 was a pure
+        # relaxation width. With exact kinematics the gap is metres and the band
+        # is a physical clearance -- and the constraint solve is near-rigid
+        # wherever the gate is appreciably nonzero, because the gate cancels out
+        # of the impulse except through the ungated regularization term. A 6 cm
+        # band therefore rests the model 2.6 cm above the floor no matter what
+        # the constitutive parameters do. A few millimetres is the physically
+        # meaningful band for a metric gap.
+        if contact_gate_off is None:
+            self._contact_gate_off = (
+                self._KINEMATIC_GATE_OFF
+                if self.contact_geometry == "kinematic"
+                else type(self)._contact_gate_off
+            )
+        else:
+            self._contact_gate_off = float(contact_gate_off)
+        if (
+            not np.isfinite(self._contact_gate_off)
+            or self._contact_gate_off <= self._contact_gate_on
+        ):
+            raise ValueError(
+                "contact_gate_off must be finite and greater than contact_gate_on "
+                f"({self._contact_gate_on}), got {contact_gate_off!r}"
+            )
         if not np.isfinite(self.contact_dt) or self.contact_dt <= 0.0:
             raise ValueError("contact_dt must be finite and > 0")
         if self.contact_iterations < 1:
@@ -676,6 +949,41 @@ class PortHamiltonianModel(nn.Module):
             or self.contact_regularization <= 0.0
         ):
             raise ValueError("contact_regularization must be finite and > 0")
+        if self.contact_compliance is not None:
+            if (
+                not np.isfinite(self.contact_compliance)
+                or self.contact_compliance <= 0.0
+            ):
+                raise ValueError(
+                    "contact_compliance is the initial constitutive compliance c0 "
+                    "and must be finite and > 0 (pass None to disable the "
+                    f"gate-shaped compliance), got {contact_compliance!r}"
+                )
+            if self.contact_solver != "constraint":
+                # c0 reshapes the Delassus regularizer of the cone QP. The
+                # compliant Hunt--Crossley law has no such term, so the
+                # combination cannot mean anything; refuse it rather than
+                # silently ignore the parameter.
+                raise ValueError(
+                    "contact_compliance requires contact_solver='constraint'; the "
+                    "compliant penalty law has no Delassus regularizer to shape."
+                )
+            if self.contact_force <= 0:
+                # There is no contact port at all, so there is nothing for c0 to
+                # shape. Silently accepting this would let a caller believe the
+                # gate-shaped law is active on a model that has no contact.
+                raise ValueError(
+                    "contact_compliance shapes the contact solver's Delassus "
+                    "regularizer, so it needs contact points: got "
+                    f"contact_compliance={self.contact_compliance!r} with "
+                    f"contact_force={self.contact_force}"
+                )
+            if not 0.0 <= self._CONTACT_COMPLIANCE_FLOOR_FRACTION < 1.0:
+                raise ValueError(
+                    "_CONTACT_COMPLIANCE_FLOOR_FRACTION must lie in [0, 1) so "
+                    "that softplus(raw) = c0_init - floor is positive, got "
+                    f"{self._CONTACT_COMPLIANCE_FLOOR_FRACTION!r}"
+                )
 
         if self.mode == "mujoco":
             if drift_fn is None:
@@ -723,6 +1031,10 @@ class PortHamiltonianModel(nn.Module):
         assert layout.obs_dim == self.obs_dim, "dof_layout.obs_dim must match obs_dim"
         self.layout = layout
         self.base_damping_reg = float(layout.base_damping_reg)
+        # Kept so a contact geometry swapped in by ``load_state_dict`` can rebuild
+        # the gap/tangent nets with exactly the architecture this model was built
+        # with. Plain attribute: the state_dict contract is unchanged.
+        self._structured_hidden = tuple(int(h) for h in hidden)
         nv, npos = layout.nv, layout.npos
 
         def mlp(out: int, inp: int = npos) -> nn.Sequential:
@@ -822,35 +1134,46 @@ class PortHamiltonianModel(nn.Module):
             self.register_buffer("_limit_upper", None)
 
         if self.contact_force > 0:
-            # Explicit contact-force port: K learned point contacts against the
-            # ground. Each has a gap function g_i(q) and a horizontal foot offset
-            # h_i(q); their gradients form the contact Jacobian. New models use
-            # the coupled action-aware constraint solve below. ``compliant``
-            # retains the historical Hunt--Crossley/tanh force law.
+            # Explicit contact-force port: K point contacts against the ground.
+            # Each has a gap function g_i(q) and a horizontal foot offset h_i(q);
+            # their gradients form the contact Jacobian. ``learned`` fits both
+            # with MLPs; ``kinematic`` reads them from the layout's exact
+            # forward kinematics and leaves only the constitutive parameters
+            # (restitution/Baumgarte/friction, or stiffness/damping/friction)
+            # learned. New models use the coupled action-aware constraint solve
+            # below; ``compliant`` retains the historical Hunt--Crossley/tanh law.
             assert layout.contact_tangent_cfg is not None, (
                 "contact_force > 0 requires dof_layout.contact_tangent_cfg (the "
                 "config DOF of the horizontal translation friction acts along)."
             )
-            self.gap_net = mlp(self.contact_force)      # g_i(q): signed gap heights
-            self.tangent_net = mlp(self.contact_force)  # h_i(q): horizontal offsets
-            with th.no_grad():
-                # Both formulations start quiet but reachable. The constraint
-                # gate initializes just inside its compact support; the legacy
-                # law uses its historical 2.5-softplus-width initialization.
-                if self.contact_solver == "constraint":
-                    # Start just inside the smooth candidate envelope: the
-                    # contact is nearly silent but the gate derivative is live.
-                    self.gap_net[-1].weight.mul_(0.01)
-                    self.gap_net[-1].bias.fill_(0.98 * self._contact_gate_off)
-                else:
-                    self.gap_net[-1].weight.mul_(0.1)
-                    self.gap_net[-1].bias.fill_(2.5 * self._contact_gap_width)
+            if self.contact_geometry == "learned":
+                self._build_learned_contact_geometry()
+            else:
+                self._build_kinematic_contact_geometry()
+            # The persistent marker records which geometry produced a sidecar,
+            # orthogonally to the force-law marker below. Version 0 is the
+            # learned gap/tangent MLP pair, version 1 the exact kinematics.
+            self.register_buffer(
+                "_contact_geometry_version",
+                th.tensor(
+                    1 if self.contact_geometry == "kinematic" else 0,
+                    dtype=th.int64,
+                ),
+            )
             # The persistent marker makes the force-law semantics explicit.
             # Version 0 is the historical compliant penalty law. Version 1 is
-            # the action-conditioned constraint solve below. It is deliberately
-            # a buffer rather than a Python-only flag so a sidecar roundtrip
-            # restores the formulation that produced it.
-            solver_version = 1 if self.contact_solver == "constraint" else 0
+            # the action-conditioned constraint solve below. Version 2 is that
+            # same solve with the gate-shaped compliance, which is a third force
+            # law and not an orthogonal flag: c0 is meaningless without the
+            # Delassus regularizer, so it shares this marker rather than adding a
+            # buffer that would appear in every default-disabled sidecar. It is
+            # deliberately a buffer rather than a Python-only flag so a sidecar
+            # roundtrip restores the formulation that produced it.
+            solver_version = (
+                2
+                if self.contact_compliance is not None
+                else (1 if self.contact_solver == "constraint" else 0)
+            )
             self.register_buffer(
                 "_contact_solver_version",
                 th.tensor(solver_version, dtype=th.int64),
@@ -873,9 +1196,137 @@ class PortHamiltonianModel(nn.Module):
                     ]
                 )
             self._contact_raw = nn.Parameter(raw)
+            if self.contact_compliance is not None:
+                # One constitutive compliance per contact point, broadcast over
+                # that point's normal and tangent slot exactly as the gate is.
+                # A separate parameter, not a fourth row of ``_contact_raw``, so
+                # every existing sidecar still loads strictly. ``th.full`` draws
+                # no random numbers, so registering it changes nothing else in a
+                # freshly seeded model. The raw value is offset by the floor so
+                # the *effective* initial c0 is exactly the requested one.
+                self._contact_compliance_raw = nn.Parameter(
+                    th.full(
+                        (self.contact_force,),
+                        _inverse_softplus(
+                            self.contact_compliance
+                            - self._contact_compliance_floor
+                        ),
+                    )
+                )
             onehot = th.zeros(nv)
             onehot[layout.contact_tangent_cfg] = 1.0
             self.register_buffer("_tangent_onehot", onehot)
+
+    # ------------------------ contact geometry construction --------------------
+
+    def _contact_mlp(self, out: int) -> nn.Sequential:
+        """The gap/tangent architecture: an MLP on the raw observed positions.
+
+        Kept identical to the local ``mlp`` helper in :meth:`_init_structured`
+        (same layer sizes in the same order) so building the learned geometry
+        draws exactly the same random numbers it always has.
+        """
+        layers: list[nn.Module] = []
+        last = self.layout.npos
+        for h in self._structured_hidden:
+            layers += [nn.Linear(last, h), nn.SiLU()]
+            last = h
+        layers += [nn.Linear(last, out)]
+        return nn.Sequential(*layers)
+
+    def _build_learned_contact_geometry(self) -> None:
+        """Historical learned geometry: g_i(q) and h_i(q) as MLPs."""
+        self.gap_net = self._contact_mlp(self.contact_force)      # signed gaps
+        self.tangent_net = self._contact_mlp(self.contact_force)  # horizontal offsets
+        with th.no_grad():
+            # Both formulations start quiet but reachable. The constraint
+            # gate initializes just inside its compact support; the legacy
+            # law uses its historical 2.5-softplus-width initialization.
+            if self.contact_solver == "constraint":
+                # Start just inside the smooth candidate envelope: the
+                # contact is nearly silent but the gate derivative is live.
+                self.gap_net[-1].weight.mul_(0.01)
+                self.gap_net[-1].bias.fill_(0.98 * self._contact_gate_off)
+            else:
+                self.gap_net[-1].weight.mul_(0.1)
+                self.gap_net[-1].bias.fill_(2.5 * self._contact_gap_width)
+
+    def _build_kinematic_contact_geometry(self) -> None:
+        """Pack ``layout.contact_points`` into rectangular (K, L) buffers.
+
+        The buffers are non-persistent: they are a restatement of
+        ``layout.contact_points``, which the constructor already requires, so a
+        sidecar carries only the version marker and the learned constitutive
+        parameters.
+
+        Chains of different depth are right-padded to the deepest chain L with a
+        zero offset, which contributes nothing to either the point position or
+        its Jacobian, so the whole batch evaluates as dense tensor algebra with
+        no python loop over points or samples.
+        """
+        layout = self.layout
+        points = layout.contact_points
+        if len(points) != self.contact_force:
+            raise ValueError(
+                "contact_geometry='kinematic' requires one declared contact point "
+                f"per contact force: dof_layout.contact_points has {len(points)} "
+                f"point(s) but contact_force is {self.contact_force}. Either pass "
+                f"contact_force={len(points)} or a layout with matching "
+                "contact_points."
+            )
+        # The friction direction is the base translation, whose Jacobian column
+        # this branch supplies with ``_tangent_onehot``. If that DOF were an
+        # observed coordinate the chain walk would already write a column there
+        # and the onehot would double it, so require it to be cyclic.
+        if layout.contact_tangent_cfg not in layout.cyclic_cfg:
+            raise ValueError(
+                "contact_geometry='kinematic' requires contact_tangent_cfg to be "
+                "a cyclic config DOF (the unobserved horizontal base "
+                f"translation); config DOF {layout.contact_tangent_cfg} is an "
+                "observed coordinate, so its tangent column would be counted twice."
+            )
+        depth = max(p.depth for p in points)
+        K = len(points)
+        angle_pos = th.zeros(K, depth, dtype=th.long)
+        mask = th.zeros(K, depth)
+        dx = th.zeros(K, depth)
+        dz = th.zeros(K, depth)
+        for i, point in enumerate(points):
+            for k, (angle, (ox, oz)) in enumerate(zip(point.angle_pos, point.offsets)):
+                angle_pos[i, k] = int(angle)
+                mask[i, k] = 1.0
+                dx[i, k] = float(ox)
+                dz[i, k] = float(oz)
+        pos_to_cfg = th.tensor(layout.obs_pos_to_cfg, dtype=th.long)
+        height_pos = th.tensor([int(p.height_pos) for p in points], dtype=th.long)
+        self.register_buffer("_kin_angle_pos", angle_pos, persistent=False)
+        self.register_buffer(
+            "_kin_angle_cfg", pos_to_cfg[angle_pos], persistent=False
+        )
+        self.register_buffer("_kin_mask", mask, persistent=False)
+        self.register_buffer("_kin_dx", dx, persistent=False)
+        self.register_buffer("_kin_dz", dz, persistent=False)
+        self.register_buffer(
+            "_kin_radius",
+            th.tensor([float(p.radius) for p in points]),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_kin_base_height",
+            th.tensor([float(p.base_height) for p in points]),
+            persistent=False,
+        )
+        self.register_buffer("_kin_height_pos", height_pos, persistent=False)
+        self.register_buffer(
+            "_kin_height_cfg", pos_to_cfg[height_pos], persistent=False
+        )
+
+    # There is deliberately no method that switches an existing instance between
+    # the two geometries. The geometry decides which parameters exist, and an
+    # optimizer built over ``model.parameters()`` (CTSAC builds
+    # ``dynamics_optimizer`` at construction time, before any checkpoint load)
+    # cannot be told about the swap from here. ``load_state_dict`` therefore
+    # rejects a sidecar whose geometry disagrees with the constructor's.
 
     # ------------------------ structure helpers (phast) ------------------------
 
@@ -1207,11 +1658,99 @@ class PortHamiltonianModel(nn.Module):
     _contact_gap_width: float = 0.02
     _contact_stick_vel: float = 0.1
     _contact_gate_on: float = 0.0
+    # Default gate band. ``_contact_gate_off`` is the historical unitless width
+    # kept for the learned geometry; ``_KINEMATIC_GATE_OFF`` is the metric
+    # default the constructor picks when the gap is exact forward kinematics.
+    # Both are only defaults: ``__init__`` writes the resolved band onto the
+    # instance, so ``_contact_gate`` below reads one number either way.
     _contact_gate_off: float = 0.06
+    _KINEMATIC_GATE_OFF: float = 0.005
     _contact_max_correction_vel: float = 5.0
+    # Initial constitutive compliance c0 used by ``contact_compliance=True``.
+    # Rtilde = scale [c0 (1/s^2 - 1) + reg/s^2], so c0 sets how fast the contact
+    # softens as the gate tapers: at c0 = 40 the impulse a partially engaged
+    # point can carry is already three orders of magnitude below the rigid
+    # answer at half gate, while the s = 1 limit stays exactly reg * scale.
+    _DEFAULT_CONTACT_COMPLIANCE: float = 40.0
+    # Lower bound on the learned c0, as a fraction of the value the constructor
+    # was given: c0 = floor + softplus(raw) with floor = fraction * c0_init, so
+    # the fit may soften the contact without bound but may not stiffen it past
+    # 1/fraction times its initialization. Without a floor c0 is free to reach 0,
+    # at which point R collapses back to reg * scale * I and the regularizer is
+    # the contact stiffness again -- measured at gate 0.5: sweeping reg over
+    # 1e-1..1e-8 moves the normal force by 1.0033x at c0 = 40 but by 1.5587x at
+    # c0 = 1e-4, versus 1.5590x with the compliance disabled entirely. The
+    # gradient cannot defend the taper on its own because dR/dc0 = (1 - s^2)
+    # scale is exactly zero at s = 1, i.e. the fully engaged contacts that carry
+    # the robot supply no signal about c0 at all.
+    _CONTACT_COMPLIANCE_FLOOR_FRACTION: float = 0.1
+
+    def _kinematic_point_kinematics(self, pos: th.Tensor):
+        """Exact planar forward kinematics of every contact point.
+
+        Returns ``(z, x_rel, cx, cz, mask)``: the point heights ``(B, K)``, the
+        point horizontal offsets from the (unobserved, cyclic) base translation
+        ``(B, K)``, and the per-segment world-frame displacements ``(B, K, L)``
+        the Jacobians are assembled from.
+        """
+        # (B, K, L) segment angles; padded slots read a real coordinate but are
+        # masked to zero so the running sum of a shorter chain is unaffected.
+        theta = pos[:, self._kin_angle_pos] * self._kin_mask
+        total = th.cumsum(theta, dim=2)             # Theta_k = sum_{j<=k} angle_j
+        cos_t, sin_t = th.cos(total), th.sin(total)
+        # Padded segments carry dx = dz = 0, hence cx = cz = 0 and no contribution.
+        cx = self._kin_dx * cos_t + self._kin_dz * sin_t
+        cz = -self._kin_dx * sin_t + self._kin_dz * cos_t
+        height = pos[:, self._kin_height_pos]       # (B, K)
+        z = self._kin_base_height + height + cz.sum(dim=2)
+        x_rel = cx.sum(dim=2)
+        return z, x_rel, cx, cz, self._kin_mask
+
+    def _kinematic_contact_geometry(self, pos: th.Tensor, qd: th.Tensor):
+        """Exact point-contact geometry over a flat floor at height zero.
+
+        The gap of a rigid point above a plane is forward kinematics, not a
+        dynamics unknown, so nothing here is learned. For a planar mechanism the
+        Jacobians are reverse cumulative sums of the same per-segment
+        displacements the position needs:
+
+            dz/d(base height) = 1,   dz/d(angle_j) = -sum_{k>=j} cx_k
+            dx/d(base x)      = 1,   dx/d(angle_j) = +sum_{k>=j} cz_k
+
+        which are exactly the planar cross product ``y_hat x (p - p_j)``, i.e.
+        ``dz/d(angle_j) = -(x_point - x_j)`` and ``dx/d(angle_j) = z_point - z_j``.
+        Unlike the learned branch the root-x column of ``J_t`` comes out of the
+        kinematics itself (``dx/d(base x) = 1``); the ``_tangent_onehot`` buffer
+        supplies exactly that column and must not be added twice.
+        """
+        B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
+        z, _, cx, cz, mask = self._kinematic_point_kinematics(pos)
+        g = z - self._kin_radius
+        # sum_{k>=j}: reverse cumulative sum along the chain.
+        dz_dangle = -cx.flip(2).cumsum(2).flip(2) * mask
+        dx_dangle = cz.flip(2).cumsum(2).flip(2) * mask
+        index = self._kin_angle_cfg.expand(B, K, mask.shape[1])
+        ones = pos.new_ones(B, K, 1)
+        height_index = self._kin_height_cfg.expand(B, K).unsqueeze(2)
+        # scatter_add, not index_copy: chains share angles across points only
+        # along the K axis (never within one chain), and the padded slots
+        # contribute an exact zero.
+        J_n = pos.new_zeros(B, K, nv).scatter_add(2, index, dz_dangle)
+        J_n = J_n.scatter_add(2, height_index, ones)
+        J_t = pos.new_zeros(B, K, nv).scatter_add(2, index, dx_dangle)
+        J_t = J_t + self._tangent_onehot        # dx/d(base translation) = 1
+        gdot = th.einsum("nkv,nv->nk", J_n, qd)
+        v_t = th.einsum("nkv,nv->nk", J_t, qd)
+        return g, gdot, v_t, J_n, J_t
 
     def _contact_geometry(self, pos: th.Tensor, qd: th.Tensor):
-        """Learned point-contact geometry shared by both force formulations."""
+        """Point-contact geometry shared by both force formulations.
+
+        Returns ``(g, gdot, v_t, J_n, J_t)`` with shapes ``(B, K)`` x3 and
+        ``(B, K, nv)`` x2, in config-DOF space, for either geometry source.
+        """
+        if self.contact_geometry == "kinematic":
+            return self._kinematic_contact_geometry(pos, qd)
         B, nv, K = pos.shape[0], self.layout.nv, self.contact_force
         if self.analytic_derivatives:
             # The gap/tangent nets read raw positions, and K < npos here, so a
@@ -1353,13 +1892,80 @@ class PortHamiltonianModel(nn.Module):
             .detach()
         )
         eye = th.eye(2 * K, dtype=qd.dtype, device=qd.device).unsqueeze(0)
-        H = W + self.contact_regularization * scale[:, None, None] * eye
+        if self._contact_compliance_raw is None:
+            # Historical regularizer, kept as the literal expression it always
+            # was so a disabled model is bit-identical rather than merely close.
+            H = W + self.contact_regularization * scale[:, None, None] * eye
+            c0_pair = None
+            # ADMM step size, the literal historical expression (a mean over a
+            # strided diagonal view does not round identically to a mean over a
+            # freshly materialized contiguous vector, so this branch keeps the
+            # view). ``diag(H)`` here IS the gated Delassus diagonal plus the
+            # conditioning floor, elementwise -- see the enabled branch.
+            rho_diag = H.diagonal(dim1=-2, dim2=-1)
+        else:
+            # Gate-shaped compliance. The change of variables Lambda = S y is
+            # exact even with the cone active (each Coulomb cone is invariant
+            # under the positive uniform scaling S acts by within a contact
+            # block), so in physical coordinates the problem is
+            #     min 0.5 L' (W_full + Rtilde) L + b' L,  Rtilde = S^-1 R S^-1,
+            # i.e. R is the ONLY place the gate survives and Rtilde is literally
+            # the contact compliance (v+ - v* = -Rtilde Lambda at an interior
+            # optimum). With R = reg * scale * I that made the conditioning
+            # parameter the contact stiffness. Adding c0 (1 - s^2) puts the
+            # stiffness under a learned constitutive parameter:
+            #     Rtilde = scale [c0 (1/s^2 - 1) + reg / s^2],
+            # which is reg * scale at s = 1 (the fully engaged limit is
+            # unchanged) and diverges as s -> 0 so the impulse tapers to zero,
+            # while R itself stays bounded by (c0 + reg) * scale and >=
+            # reg * scale * I, so H remains positive definite and reg is once
+            # again nothing but a conditioning floor.
+            # The floor is what keeps this a taper: at c0 = 0 the law degenerates
+            # back to R = reg * scale * I and the regularizer is the stiffness
+            # again, and the fully engaged contacts cannot object because
+            # dR/dc0 = (1 - s^2) scale vanishes at s = 1.
+            c0 = self._contact_compliance_floor + th.nn.functional.softplus(
+                self._contact_compliance_raw
+            )
+            c0_pair = c0.unsqueeze(-1).expand(K, 2).reshape(2 * K)
+            # clamp_min guards the reg * scale floor in float32. The quintic
+            # smoothstep is exactly bounded by 1 in float64, but in float32 it
+            # overshoots to 1.0000007 near u = 1 (243 of 200001 sampled u), so
+            # 1 - s^2 reaches -1.4e-6 and c0 * (1 - s^2) turns into a *negative*
+            # diagonal contribution. The floor then fails once c0 * 1.4e-6 > reg
+            # -- about c0 > 7e3 at the default reg = 1e-2 -- and because c0 is
+            # unbounded above and the fit pushes it upward (measured 40 -> 58
+            # over 100k steps) that is reachable. H would lose positive
+            # definiteness and cholesky_ex would report it as a diverged mass
+            # matrix, blaming the wrong term entirely.
+            shape_factor = (1.0 - gate_pair.square()).clamp_min(0.0)
+            r_diag = (
+                c0_pair * shape_factor + self.contact_regularization
+            ) * scale[:, None]
+            H = W + th.diag_embed(r_diag)
+            # ADMM step size, from the GATED DELASSUS diagonal plus the
+            # conditioning floor rather than from diag(H). The two agree
+            # elementwise whenever R = reg * scale * I (hence the disabled
+            # branch above), but they diverge sharply once the compliance is
+            # active: a gated-off coordinate then carries c0 * scale on the
+            # diagonal of H, which is deliberately enormous -- that is exactly
+            # how its impulse is tapered to zero -- and averaging it into a
+            # single scalar rho makes the step orders of magnitude too small for
+            # the coordinates that carry load, so a fixed, small iteration
+            # budget stops far short of the optimum (measured: 46 N instead of
+            # 143 N at the cheetah's resting pose, 12 iterations, c0 = 40).
+            # diag(W) + reg * scale is insensitive to the taper because a
+            # gated-off coordinate contributes s^2 W_full_ii -> 0 there.
+            rho_diag = (
+                W.diagonal(dim1=-2, dim2=-1)
+                + self.contact_regularization * scale[:, None]
+            )
         bias = (physical_bias.reshape(B, 2 * K) * gate_pair)
 
         # Scaled ADMM: one batched dense factorization, then a fixed number of
         # tiny triangular solves and exact cone projections. Fixed iteration
         # count avoids data-dependent control flow/synchronization in BPTT.
-        rho = H.diagonal(dim1=-2, dim2=-1).mean(-1).detach().clamp_min(1e-6)
+        rho = rho_diag.mean(-1).detach().clamp_min(1e-6)
         # H is PSD plus a positive diagonal by construction, so the factorization
         # can only fail once the learned mass matrix is ill-conditioned enough
         # that M^-1 J^T is numerically indefinite (or has gone non-finite) --
@@ -1420,7 +2026,13 @@ class PortHamiltonianModel(nn.Module):
         ).sum(-1) + 0.5 * (generalized_impulse * delta_qd).sum(-1)
         stabilization_work = -(stabilization_bias * normal_impulse).sum(-1)
 
+        extra: dict[str, th.Tensor] = {}
+        if c0_pair is not None:
+            # Reported only when the law is active, so the disabled path returns
+            # exactly the keys it always did.
+            extra["compliance_c0"] = c0_pair.reshape(K, 2)[:, 0]
         return {
+            **extra,
             "gap": g,
             "gap_rate": gdot,
             "tangent_velocity": v_t,
@@ -1662,6 +2274,19 @@ class PortHamiltonianModel(nn.Module):
         this instance to that law before it is used. New sidecars carry the marker
         and therefore restore their own formulation even when the constructor's
         default changes.
+
+        The contact GEOMETRY marker is orthogonal to the force law but is NOT
+        handled the same way: the force law only changes how existing parameters
+        are read, while the geometry changes which parameters exist at all.
+        Silently switching it would leave any already-built optimizer tracking
+        the wrong tensors, so a disagreement raises instead. A sidecar without
+        the marker predates exact kinematics and is unambiguously the learned
+        gap/tangent pair, which is exactly what a learned-configured model
+        wants and what a kinematic-configured model is refused.
+
+        Solver version 2 (the gate-shaped compliance) is the same kind of change
+        as the geometry marker rather than the same kind as 0 <-> 1: it adds
+        ``_contact_compliance_raw``. A disagreement therefore raises too.
         """
         incoming = state_dict
         if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
@@ -1679,16 +2304,86 @@ class PortHamiltonianModel(nn.Module):
                         "contact solver version marker must contain one scalar"
                     )
                 version = int(marker.detach().cpu().item())
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(f"unsupported contact solver version {version}")
-            self.contact_solver = "constraint" if version == 1 else "compliant"
+            # Versions 0 and 1 read the same parameters and only differ in how
+            # they are used, so a disagreement is still flipped silently.
+            # Version 2 adds ``_contact_compliance_raw``, i.e. it changes which
+            # parameters exist, so it is handled like the geometry marker: an
+            # optimizer built over ``model.parameters()`` before the load (CTSAC
+            # builds ``dynamics_optimizer`` in ``__init__`` and calls this from
+            # ``load``) would otherwise silently track the wrong tensor set.
+            has_compliance = self.contact_compliance is not None
+            if (version == 2) != has_compliance:
+                written, want = (
+                    ("a gate-shaped-compliance", "contact_compliance=<c0>")
+                    if version == 2
+                    else ("a fixed-regularizer", "contact_compliance=None")
+                )
+                raise RuntimeError(
+                    "contact compliance mismatch: this model was constructed with "
+                    f"contact_compliance={self.contact_compliance!r} but the state "
+                    f"dict was written by {written} model. Construct the model "
+                    f"with {want} to load it."
+                )
+            if version != 2:
+                self.contact_solver = "constraint" if version == 1 else "compliant"
+        if self.contact_force > 0 and hasattr(self, "_contact_geometry_version"):
+            marker_name = "_contact_geometry_version"
+            if marker_name not in incoming:
+                if incoming is state_dict:
+                    incoming = state_dict.copy()
+                    if hasattr(state_dict, "_metadata"):
+                        incoming._metadata = state_dict._metadata
+                incoming[marker_name] = self._contact_geometry_version.new_zeros(())
+                geometry_version = 0
+            else:
+                marker = th.as_tensor(incoming[marker_name])
+                if marker.numel() != 1:
+                    raise RuntimeError(
+                        "contact geometry version marker must contain one scalar"
+                    )
+                geometry_version = int(marker.detach().cpu().item())
+            if geometry_version not in (0, 1):
+                raise RuntimeError(
+                    f"unsupported contact geometry version {geometry_version}"
+                )
+            restored = "kinematic" if geometry_version == 1 else "learned"
+            if restored != self.contact_geometry:
+                # Unlike the force law, the geometry decides which PARAMETERS
+                # exist: switching adds or removes the gap/tangent MLPs. Any
+                # optimizer built over ``model.parameters()`` before the load
+                # (CTSAC builds ``dynamics_optimizer`` in ``__init__`` and calls
+                # this from ``load``) would then silently track the wrong tensor
+                # set, so the rebuilt geometry could never train and a resumed
+                # optimizer state would not match. Refuse instead: the caller
+                # knows the sidecar and can construct the model to match it.
+                raise RuntimeError(
+                    "contact geometry mismatch: this model was constructed with "
+                    f"contact_geometry={self.contact_geometry!r} but the state "
+                    f"dict was written by a {restored!r}-geometry model"
+                    + (
+                        " (no geometry marker, so it predates exact kinematics "
+                        "and is unambiguously learned)"
+                        if marker_name not in state_dict
+                        else ""
+                    )
+                    + f". Construct the model with contact_geometry={restored!r} "
+                    "to load it."
+                )
         try:
             result = super().load_state_dict(incoming, strict=strict, assign=assign)
         except TypeError:  # PyTorch releases before the ``assign`` keyword.
             result = super().load_state_dict(incoming, strict=strict)
         if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
             self._contact_solver_version.fill_(
-                1 if self.contact_solver == "constraint" else 0
+                2
+                if self.contact_compliance is not None
+                else (1 if self.contact_solver == "constraint" else 0)
+            )
+        if self.contact_force > 0 and hasattr(self, "_contact_geometry_version"):
+            self._contact_geometry_version.fill_(
+                1 if self.contact_geometry == "kinematic" else 0
             )
         return result
 
