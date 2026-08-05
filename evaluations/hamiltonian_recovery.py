@@ -17,10 +17,10 @@ accurate on the strength of one alone:
 Physical recovery fixes two gauge freedoms first:
 
   * global scale: M -> cM, V -> cV, D -> cD, G_a -> cG_a leaves the flow
-    invariant (the Coriolis force scales with M automatically). One scalar c*
-    is fit on the mass matrices and applied to every learned term — four
-    objects share a single gauge parameter, which is itself part of the test.
-    No per-term scales are fit: that would hide inconsistent attribution.
+    invariant (the Coriolis force scales with M automatically). The version-3
+    contact law adds k -> ck to the same gauge. One scalar c* is fit on the mass
+    matrices and applied to every learned term. No per-term scales are fit:
+    that would hide inconsistent attribution.
   * potential offset: V and V + const generate the same flow.
 
 After c* is fixed, only the potential (and total energy) retain an offset
@@ -57,9 +57,10 @@ Usage (offline fit, OU exploration data):
 
 Usage (model trained by an RL run, saved by the CTSAC checkpoint sidecar):
     python -m evaluations.hamiltonian_recovery \
-        --dynamics_path saved_models/.../best_model.dynamics.pth --contact_force 4 \
-        --contact_solver constraint \
-        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_cforce_roll] \
+        --dynamics_path saved_models/.../best_model.dynamics.pth --contact_force 6 \
+        --contact_solver constraint --contact_geometry kinematic \
+        --contact_stiffness 100000 --contact_attenuation 0.2 \
+        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_stiffness_roll] \
         [--best_checkpoint saved_models/.../peak_model.pth]
 
 ``--checkpoint`` rolls the saved policy to collect the evaluation states (the
@@ -71,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import mujoco
 import numpy as np
@@ -381,6 +383,37 @@ def learned_terms(
         if getattr(m, "contact_force", 0) > 0:
             contact_solver = getattr(m, "contact_solver", "compliant")
             out["contact_solver"] = contact_solver
+            # Record the geometry that actually ran, not the one requested on the
+            # command line, so a report cannot claim exact kinematics while the
+            # model it audited used the learned gap/tangent MLPs.
+            out["contact_geometry"] = getattr(m, "contact_geometry", "learned")
+            out["contact_gate_off"] = (
+                None
+                if getattr(m, "_contact_stiffness_log", None) is not None
+                else float(getattr(m, "_contact_gate_off", float("nan")))
+            )
+            # Likewise for the contact stiffness law: with the gate-shaped
+            # compliance disabled, contact_regularization is the stiffness, so a
+            # report must say which of the two it audited. c0 is the effective
+            # per-point value (floor + softplus(raw)), not the raw parameter.
+            raw_c0 = getattr(m, "_contact_compliance_raw", None)
+            out["contact_compliance_c0"] = (
+                None
+                if raw_c0 is None
+                else (
+                    m._contact_compliance_floor
+                    + th.nn.functional.softplus(raw_c0.detach())
+                ).numpy()
+            )
+            log_k = getattr(m, "_contact_stiffness_log", None)
+            out["contact_stiffness"] = (
+                None if log_k is None else th.exp(log_k.detach()).numpy()
+            )
+            out["contact_attenuation"] = (
+                None
+                if log_k is None
+                else float(m._contact_attenuation.detach().cpu().item())
+            )
             if contact_solver == "compliant":
                 g, gdot, v_t, lam, f_t, J_n, J_t = m._contact_parts(pos, qd)
                 k_i, c_i, mu_i = th.nn.functional.softplus(m._contact_raw)
@@ -428,6 +461,12 @@ def learned_terms(
                     "beta", "mu", "discrete_work", "stabilization_work",
                 ):
                     out[f"contact_{key}"] = as_numpy(diagnostics[key])
+                for key in (
+                    "active_contact", "predicted_gap_free",
+                    "physical_compliance", "normal_velocity_target",
+                ):
+                    if key in diagnostics:
+                        out[f"contact_{key}"] = as_numpy(diagnostics[key])
 
                 J_n = diagnostics["J_n"]
                 J_t = diagnostics["J_t"]
@@ -777,7 +816,12 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
 
     # ---- action-conditioned differentiable constraint solve ----
     if learned.get("contact_solver") == "constraint":
-        rep["contact_formulation"] = "constraint"
+        is_predicted_crossing = "contact_active_contact" in learned
+        rep["contact_formulation"] = (
+            "predicted_crossing_stiffness"
+            if is_predicted_crossing
+            else "constraint"
+        )
         gap = np.asarray(learned["contact_gap"], np.float64)
         gate = np.asarray(learned["contact_gate"], np.float64)
         normal_impulse = c * np.asarray(
@@ -802,6 +846,36 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
         rep["contact_gate_saturated_frac"] = float(
             ((gate < 1e-4) | (gate > 1.0 - 1e-4)).mean()
         )
+        if is_predicted_crossing:
+            active_mask = np.asarray(
+                learned["contact_active_contact"], dtype=bool
+            )
+            predicted_gap = np.asarray(
+                learned["contact_predicted_gap_free"], np.float64
+            )
+            raw_normal = np.asarray(
+                learned["contact_normal_impulse"], np.float64
+            )
+            raw_tangent = np.asarray(
+                learned["contact_tangent_impulse"], np.float64
+            )
+            inactive = ~active_mask
+            rep["contact_active_set_frac"] = float(active_mask.mean())
+            rep["contact_active_set_frac_per"] = [
+                round(float(v), 3) for v in active_mask.mean(axis=0)
+            ]
+            rep["contact_predicted_gap_min"] = float(predicted_gap.min())
+            rep["contact_positive_gap_crossing_frac"] = float(
+                (active_mask & (gap > 0.0)).mean()
+            )
+            rep["contact_inactive_normal_impulse_abs_max"] = (
+                0.0 if not inactive.any()
+                else float(np.abs(raw_normal[inactive]).max())
+            )
+            rep["contact_inactive_tangent_impulse_abs_max"] = (
+                0.0 if not inactive.any()
+                else float(np.abs(raw_tangent[inactive]).max())
+            )
         rep["contact_dt"] = float(learned["contact_dt"])
         rep["contact_iterations"] = int(learned["contact_iterations"])
         for parameter in ("e", "beta", "mu"):
@@ -811,6 +885,15 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
             rep[f"contact_{parameter}"] = [
                 round(float(v), 4) for v in values
             ]
+        rep["contact_beta_trainable"] = not is_predicted_crossing
+        if is_predicted_crossing:
+            fixed_beta = float(learned["contact_attenuation"])
+            beta_values = np.asarray(
+                learned["contact_beta"], np.float64
+            ).reshape(-1)
+            rep["contact_beta_fixed_consistency_abs_max"] = float(
+                np.abs(beta_values - fixed_beta).max()
+            )
 
         # Average generalized force over contact_dt and its corresponding
         # one-substep generalized impulse. Both share the global mass gauge.
@@ -879,6 +962,60 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
         rep["contact_regularization"] = float(
             np.asarray(learned["contact_regularization"], np.float64).mean()
         )
+        # The constitutive compliance, per contact point, when the gate-shaped
+        # law is active (None otherwise). c0 is the learnable softness knob, so
+        # its end-of-fit value is the evidence for or against the contact port
+        # having been softened away instead of fitted.
+        c0 = learned.get("contact_compliance_c0")
+        rep["contact_compliance_c0"] = (
+            None if c0 is None
+            else np.asarray(c0, np.float64).reshape(-1).tolist()
+        )
+        rep["contact_compliance_c0_mean"] = (
+            None if c0 is None
+            else float(np.asarray(c0, np.float64).mean())
+        )
+        stiffness = learned.get("contact_stiffness")
+        rep["contact_stiffness"] = (
+            None if stiffness is None
+            else np.asarray(stiffness, np.float64).reshape(-1).tolist()
+        )
+        rep["contact_stiffness_mean"] = (
+            None if stiffness is None
+            else float(np.asarray(stiffness, np.float64).mean())
+        )
+        rep["contact_stiffness_gauge_aligned"] = (
+            None if stiffness is None
+            else (c * np.asarray(stiffness, np.float64)).reshape(-1).tolist()
+        )
+        rep["contact_stiffness_gauge_aligned_mean"] = (
+            None if stiffness is None
+            else float(c * np.asarray(stiffness, np.float64).mean())
+        )
+        rep["contact_attenuation"] = learned.get("contact_attenuation")
+        compliance = learned.get("contact_physical_compliance")
+        rep["contact_physical_compliance"] = (
+            None if compliance is None
+            else np.asarray(compliance, np.float64).reshape(-1).tolist()
+        )
+        if compliance is not None and stiffness is not None:
+            fixed_beta = learned.get("contact_attenuation")
+            beta_values = (
+                np.full(
+                    np.asarray(compliance, np.float64).size,
+                    float(fixed_beta),
+                    dtype=np.float64,
+                )
+                if fixed_beta is not None
+                else np.asarray(
+                    learned["contact_beta"], np.float64
+                ).reshape(-1)
+            )
+            compliance_values = np.asarray(compliance, np.float64).reshape(-1)
+            recovered_k = beta_values / (
+                compliance_values * float(learned["contact_dt"]) ** 2
+            )
+            rep["contact_stiffness_from_compliance"] = recovered_k.tolist()
         rep["contact_normal_impulse_min"] = float(normal_impulse.min())
         rep["contact_tangent_impulse_abs_max"] = float(
             np.abs(tangent_impulse).max()
@@ -1242,9 +1379,52 @@ def sanity_check_truth(truth: dict, obs: np.ndarray, pos_width: int,
 # --------------------------- offline fit ---------------------------
 
 
+def _parse_contact_compliance(value):
+    """``--contact_compliance`` as the constructor wants it.
+
+    ``None``/blank/'false' disables the gate-shaped compliance (the historical
+    fixed Delassus regularizer), 'true' takes the model's own default initial
+    c0, and anything else is the initial c0 itself -- so '1' means c0 = 1, not
+    "enabled".
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in ("true", "yes"):
+        return True
+    if lowered in ("false", "no", "none"):
+        return None
+    return float(text)
+
+
+def _parse_contact_stiffness(value):
+    """``--contact_stiffness`` as the constructor wants it.
+
+    ``None``/blank/'false' disables the prototype, 'true' takes the model's
+    default initial stiffness, and a number is the initial k in N/m.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in ("true", "yes"):
+        return True
+    if lowered in ("false", "no", "none"):
+        return None
+    return float(text)
+
+
 def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
-              contact_force=0, contact_solver="constraint", contact_dt=None,
+              contact_force=0, contact_solver="constraint",
+              contact_geometry="learned", contact_gate_off=None, contact_dt=None,
               contact_iterations=12, contact_regularization=0.01,
+              contact_compliance=None, contact_stiffness=None,
+              contact_attenuation=None, freeze_c0=False,
               hidden=(128, 128), seed=1, log_every=1000, dof_layout=None,
               integration_step=None, mass_logdet_reg=0.0,
               mass_condition_reg=0.0, mass_condition_limit=1e3):
@@ -1256,9 +1436,14 @@ def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
                              structured_hidden=hidden,
                              contact_force=contact_force,
                              contact_solver=contact_solver,
+                             contact_geometry=contact_geometry,
+                             contact_gate_off=contact_gate_off,
                              contact_dt=contact_dt,
                              contact_iterations=contact_iterations,
                              contact_regularization=contact_regularization,
+                             contact_compliance=contact_compliance,
+                             contact_stiffness=contact_stiffness,
+                             contact_attenuation=contact_attenuation,
                              dof_layout=dof_layout,
                              mass_logdet_reg=mass_logdet_reg,
                              mass_condition_reg=mass_condition_reg,
@@ -1268,7 +1453,15 @@ def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
     for i in range(len(O)):
         buf.add(O[i:i+1], A[i:i+1], np.zeros(1, np.float32), DN[i:i+1],
                 NO[i:i+1], np.zeros(1, np.float32), DT[i:i+1])
-    opt = th.optim.Adam(m.parameters(), lr=lr)
+    if freeze_c0:
+        # Hold the constitutive compliance at its calibrated init, so an arm can
+        # separate "the compliance model is better" from "the extra parameter is
+        # being exploited". Withheld from the optimizer as well as detached, so a
+        # stale .grad cannot move it.
+        if m._contact_compliance_raw is None:
+            raise ValueError("freeze_c0 requires contact_compliance")
+        m._contact_compliance_raw.requires_grad_(False)
+    opt = th.optim.Adam([q for q in m.parameters() if q.requires_grad], lr=lr)
     if integration_step is None:
         integration_step = getattr(env, "physics_dt", None)
     for s in range(steps):
@@ -1406,10 +1599,15 @@ def _print_primary(axes: dict):
             print(f"  matched contact activity    : {rep['contact_match_corr']}")
         if "contact_impulse_rel_err" in rep:
             print(f"  impulse rel err             : {rep['contact_impulse_rel_err']:.3f}")
-    if rep.get("contact_formulation") == "constraint":
+    if rep.get("contact_formulation") in (
+        "constraint", "predicted_crossing_stiffness"
+    ):
         print(f"  active contact / gate mean  : {rep['contact_active_frac']:.2f}"
               f" / {rep['contact_gate_mean']:.2f}")
-        print(f"  constraint e / beta / mu    : {rep['contact_e']}"
+        beta_label = (
+            "fixed beta" if not rep["contact_beta_trainable"] else "learned beta"
+        )
+        print(f"  constraint e / {beta_label} / mu: {rep['contact_e']}"
               f" / {rep['contact_beta']} / {rep['contact_mu']}")
         print(f"  solver residual mean / p95  : "
               f"{rep['contact_solver_residual_mean']:.3e}"
@@ -1542,6 +1740,19 @@ def main():
              "action-conditioned constraint solve)",
     )
     p.add_argument(
+        "--contact_geometry", choices=("learned", "kinematic"),
+        default="learned",
+        help="contact geometry source: learned gap/tangent MLPs, or the exact "
+             "forward kinematics declared by the DOF layout's contact_points "
+             "(then --contact_force must equal the number of declared points)",
+    )
+    p.add_argument(
+        "--contact_gate_off", type=float, default=None,
+        help="upper edge of the contact-candidate gate band, in the units of "
+             "the gap; default 0.06 for the (unitless) learned gap and a few "
+             "millimetres for the metric kinematic gap",
+    )
+    p.add_argument(
         "--contact_dt", type=float, default=None,
         help="constraint-solve step; defaults to the environment physics step",
     )
@@ -1551,7 +1762,36 @@ def main():
     )
     p.add_argument(
         "--contact_regularization", type=float, default=0.01,
-        help="positive Delassus/QP regularization",
+        help="positive legacy Delassus/QP regularization (not part of the "
+             "physical-stiffness target QP)",
+    )
+    p.add_argument(
+        "--contact_compliance", default=None,
+        help="initial value of the learned constitutive contact compliance c0. "
+             "Omitted, the Delassus regularizer stays fixed at "
+             "--contact_regularization * scale * I, in which the gate cancels "
+             "out of every other term and the regularizer IS the contact "
+             "stiffness. 'true' takes the model default; a number sets c0. "
+             "Required to load a sidecar written by a run that used it.",
+    )
+    p.add_argument(
+        "--freeze_c0", action="store_true",
+        help="hold the learned c0 at its --contact_compliance init for the "
+             "whole fit (control arm for 'is the extra parameter being "
+             "exploited rather than helping?')",
+    )
+    p.add_argument(
+        "--contact_stiffness", default=None,
+        help="enable the predicted-crossing prototype and initialize its "
+             "learned per-point physical stiffness k. A number is N/m; 'true' "
+             "uses the model default (1e5 N/m). Requires --contact_geometry "
+             "kinematic and is mutually exclusive with --contact_compliance.",
+    )
+    p.add_argument(
+        "--contact_attenuation", type=float, default=None,
+        help="fixed fraction of existing penetration the stiffness prototype "
+             "requests to recover per contact response step (default 0.2); "
+             "this value is persisted and is not learned",
     )
     p.add_argument("--checkpoint", default=None,
                    help="RL checkpoint (*.pth): its policy collects the "
@@ -1570,6 +1810,12 @@ def main():
                    help="raw-state observations [qpos; qvel] (hinge/slide "
                         "domains, e.g. cartpole/acrobot; must match the run)")
     p.add_argument("--out", default=None, help="write the report as JSON here")
+    p.add_argument("--save_dynamics", default=None,
+                   help="persist the evaluated model's state_dict here. Only a "
+                        "freshly fitted model is worth saving (a loaded one is "
+                        "already on disk), and without this the fit is scored "
+                        "and then discarded -- which left the upper-bound sweep "
+                        "unable to be re-probed by any downstream analysis.")
     args = p.parse_args()
 
     th.manual_seed(args.seed); np.random.seed(args.seed)
@@ -1590,6 +1836,9 @@ def main():
     )
     max_step = getattr(env, "physics_dt", None)
     contact_dt = args.contact_dt if args.contact_dt is not None else max_step
+    contact_compliance = _parse_contact_compliance(args.contact_compliance)
+    contact_stiffness = _parse_contact_stiffness(args.contact_stiffness)
+    contact_attenuation = args.contact_attenuation
 
     def _load_policy(path):
         from common.utils import load_ct_hyperparams_from_table
@@ -1629,22 +1878,37 @@ def main():
                                  structured_hidden=(128, 128),
                                  contact_force=args.contact_force,
                                  contact_solver=args.contact_solver,
+                                 contact_geometry=args.contact_geometry,
+                                 contact_gate_off=args.contact_gate_off,
                                  contact_dt=contact_dt or 0.002,
                                  contact_iterations=args.contact_iterations,
                                  contact_regularization=args.contact_regularization,
+                                 contact_compliance=contact_compliance,
+                                 contact_stiffness=contact_stiffness,
+                                 contact_attenuation=contact_attenuation,
                                  dof_layout=layout,
                                  mass_logdet_reg=args.mass_logdet_reg,
                                  mass_condition_reg=args.mass_condition_reg,
                                  mass_condition_limit=args.mass_condition_limit)
         m.load_state_dict(dynamics_state)
-        print(f"loaded dynamics model from {args.dynamics_path}")
+        print(
+            f"loaded dynamics model from {args.dynamics_path} "
+            f"(contact_solver={getattr(m, 'contact_solver', 'n/a')}, "
+            f"contact_geometry={getattr(m, 'contact_geometry', 'n/a')})"
+        )
     else:
         m = fit_model(env, O, A, NO, DT, DN, args.fit_steps, args.fit_horizon,
                       contact_force=args.contact_force,
                       contact_solver=args.contact_solver,
+                      contact_geometry=args.contact_geometry,
+                      contact_gate_off=args.contact_gate_off,
                       contact_dt=contact_dt,
                       contact_iterations=args.contact_iterations,
                       contact_regularization=args.contact_regularization,
+                      contact_compliance=contact_compliance,
+                      contact_stiffness=contact_stiffness,
+                      contact_attenuation=contact_attenuation,
+                      freeze_c0=args.freeze_c0,
                       seed=args.seed + 1,
                       dof_layout=layout,
                       mass_logdet_reg=args.mass_logdet_reg,
@@ -1665,7 +1929,7 @@ def main():
     if policy is not None and value_policy is None:
         print("checkpoint has no V-head: control-relevant metrics skipped")
 
-    report = {"primary": primary, "datasets": {}}
+    report = {"primary": primary, "datasets": {}, "freeze_c0": bool(args.freeze_c0)}
     for name, data in datasets.items():
         report["datasets"][name] = evaluate_dataset(
             m, env, data, args.n_eval, policy=value_policy,
@@ -1684,6 +1948,15 @@ def main():
                 else f"{'—':>22s}" for k in keys
             )
             print(f"{name:<14s}" + cells)
+
+    if args.save_dynamics:
+        # Written in the same layout as a training sidecar, so every probe that
+        # takes a --dynamics_path can read a fresh fit without special-casing.
+        directory = os.path.dirname(args.save_dynamics)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        th.save(m.state_dict(), args.save_dynamics)
+        print(f"dynamics state_dict written to {args.save_dynamics}")
 
     if args.out:
         with open(args.out, "w") as f:

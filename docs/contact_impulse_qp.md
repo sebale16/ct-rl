@@ -7,16 +7,16 @@ robots: noindex
 # The Contact-Impulse Quadratic Program, from First Principles
 
 :::info
-**Purpose.** This note derives the contact optimization used by the structured dynamics model from one mechanical principle. A contact reaction does no work along any motion the contact permits, so the outgoing motion is the kinetic-metric projection of the freely predicted motion onto the admissible set — a minimum. The note builds that projection into the contact quadratic program the model solves, then adds the friction cone, the gated compliant form, and the fixed-budget solver.
+**Purpose.** This note derives the contact optimization used by the structured dynamics model from one mechanical principle. A contact reaction does no work along any motion the contact permits, so the outgoing motion is the kinetic-metric projection of the freely predicted motion onto the admissible set. The note builds that projection into the contact quadratic program, then adds the Coulomb cone, a hard predicted-crossing active set, a physical stiffness parameterization, and the fixed-budget solver.
 
-The short version: **the outgoing motion is the admissible motion closest to the free motion in the kinetic-energy metric.** The impulse is the multiplier of non-penetration, the friction cone is the admissible-impulse set, and a requested outgoing velocity encodes inelastic impact, restitution, and penetration recovery. The solution's location identifies zero impulse, sticking, or friction saturation; a saturated residual distinguishes incipient slip from sliding. A fixed-budget ADMM solves it, and a small latent-impulse penalty conditions the solve.
+The short version: **the outgoing motion is the admissible motion closest to the free motion in the kinetic-energy metric.** Exact forward kinematics supplies signed gaps. A point is eligible only when it is already penetrating or its action-aware contact-free prediction crosses the plane during the response step; every other normal–tangential impulse block is exactly zero. Active contacts are solved together in physical impulse, with learned stiffness \(k_i\) in N/m entering through \(C_i=\beta/(k_i h^2)\). The desired penetration-recovery fraction \(\beta\) is fixed configuration, not learned. There is no artificial positive-clearance force envelope in this prototype.
 
-This is a companion to [§2.7 and Appendix B.3 of the structured dynamics note](structured_dynamics_model.md#27-explicit-contact-port-k-learned-point-contacts). The implementation is `_constraint_contact_solve` in [`models/port_hamiltonian.py`](../models/port_hamiltonian.py), with focused tests in [`tests/test_model_based_generator.py`](../tests/test_model_based_generator.py).
+This is a companion to [§2.7 and Appendix B.3 of the structured dynamics note](structured_dynamics_model.md#27-explicit-contact-port-k-learned-point-contacts). The implementation is _constraint_contact_solve in [models/port_hamiltonian.py](../models/port_hamiltonian.py), with focused tests in [tests/test_predicted_crossing_contact.py](../tests/test_predicted_crossing_contact.py).
 :::
 
 [TOC]
 
-Sections 1–5 build the ideal contact problem from the least-constraint principle: the principle (§1), the impulse and the contact map (§2), the projection written as a quadratic program (§3), the friction cone (§4), and the complete ideal problem (§5). Section 6 reads off its optimality conditions, §7 gives the gated compliant form, §8 the solver, and §§9–11 its use, with §12 a summary. Worked numerical examples are collected in Appendix A and a minimal optimization vocabulary in Appendix B.
+Sections 1–5 build the ideal contact problem from the least-constraint principle: the principle (§1), the impulse and the contact map (§2), the projection written as a quadratic program (§3), the friction cone (§4), and the complete ideal problem (§5). Section 6 reads off its optimality conditions, §7 gives the predicted-crossing compliant form, §8 the solver, and §§9–11 its use, with §12 a summary. Worked numerical examples are collected in Appendix A and a minimal optimization vocabulary in Appendix B.
 
 ---
 
@@ -57,13 +57,13 @@ where $\mathcal A$ is the set of admissible outgoing motions. The outgoing motio
 - **a one-sided reaction** — the ground pushes and never pulls, so the normal impulse is nonnegative;
 - **a friction bound** — the tangential impulse a contact can carry is limited by the normal impulse through the Coulomb coefficient.
 
-The first condition defines $\mathcal A$ in velocity space; the second and third describe the impulses allowed to enforce it. The rest of the note turns the boxed projection into a quadratic program: §2 introduces the impulse and the map from impulse to contact velocity, §3 writes the projection as that program, §4 gives the friction cone, and §5 states the complete ideal problem. Sections 6–8 add the optimality conditions, the gated compliant form, and the solver.
+The first condition defines $\mathcal A$ in velocity space; the second and third describe the impulses allowed to enforce it. The rest of the note turns the boxed projection into a quadratic program: §2 introduces the impulse and the map from impulse to contact velocity, §3 writes the projection as that program, §4 gives the friction cone, and §5 states the complete ideal problem. Sections 6–8 add the optimality conditions, the predicted-crossing compliant form, and the solver.
 
 ---
 
 ## 2. The impulse and the contact map
 
-Computing the projection of §1 needs two things: the variable the contact chooses, and the linear map from that variable to the outgoing contact velocity. Let the robot have $n$ generalized velocities and $K$ learned planar contact points, each contributing a normal and a tangential coordinate.
+Computing the projection of §1 needs two things: the variable the contact chooses, and the linear map from that variable to the outgoing contact velocity. Let the robot have $n$ generalized velocities and $K$ declared planar contact points with exact kinematics, each contributing a normal and a tangential coordinate.
 
 | notation | meaning |
 |---|---|
@@ -222,7 +222,7 @@ $$
 v_{\mathrm{free}}=J\dot q_{\mathrm{free}}.
 $$
 
-The action is already inside $v_{\mathrm{free}}$. When the current tangential velocity is zero and the action predicts impending slip, $v_{\mathrm{free},t}$ becomes nonzero. An enabled contact with sufficient Coulomb budget then selects a static-friction impulse; cone saturation gives sliding, and the clear-flight gate gives zero impulse.
+The action is already inside $v_{\mathrm{free}}$. When the current tangential velocity is zero and the action predicts impending slip, $v_{\mathrm{free},t}$ becomes nonzero. An active contact with sufficient Coulomb budget then selects a static-friction impulse; cone saturation gives sliding, while the hard equality on every inactive block gives zero impulse.
 
 ### 2.4 From impulse to outgoing contact velocity
 
@@ -365,61 +365,52 @@ This QP is an **inner solve**, run afresh for every state and action; fitting th
 
 ### 3.2 The requested outgoing velocity
 
-The **requested outgoing velocity** $v^*$ is the outgoing contact velocity that an active contact response is asked to produce; exact attainment gives $v^+=v^*$. Its normal components combine inelastic contact, restitution, and penetration recovery. Its tangential components equal zero, requesting sticking. The request enters the QP through the linear term $b=v_{\mathrm{free}}-v^*$.
+The **requested outgoing velocity** \(v^*\) is the contact velocity that an active response is asked to produce. Its tangential component is zero, requesting sticking when the Coulomb cone permits it. Its normal component depends on why the point is active.
 
-The normal request is built from the penetration depth. For each contact define
+For an already engaged point, define the penetration-correction speed
 
-$$
-d_i
-=\min\!\left(\frac{[-g_i]_+}{h},v_{\max}\right),
-$$
+\[
+d_i=\frac{[-g_i]_+}{h}.
+\]
 
-where $[-g_i]_+=\max(-g_i,0)$ measures penetration. Before the cap, $[-g_i]_+/h$ is the outward speed that would traverse the entire penetration depth in one response horizon. The factor $\beta_i$ scales that correction. The requested outgoing normal velocity is
+The engaged request combines fractional penetration recovery and restitution:
 
-$$
-\boxed{
-v_{n,i}^*
-=\beta_i d_i+e_i[-v_{n,i}]_+,
-\qquad
-v_{n,i}=J_{n,i}\dot q.
-}
-$$
+\[
+v_{n,i}^*=\beta d_i+e_i[-v_{n,i}]_+,
+\qquad g_i\le0,
+\]
 
-Each term in this construction is nonnegative, so
+where \(v_{n,i}=J_{n,i}\dot q\) is the current normal velocity. For a point still above the plane whose contact-free prediction crosses it during this response interval, the request is instead
 
-$$
-0\le v_{n,i}^*
-\le \beta_i v_{\max}+e_i[-v_{n,i}]_+.
-$$
+\[
+v_{n,i}^*=-\frac{g_i}{h},
+\qquad g_i>0\ \text{and predicted crossing}.
+\]
 
-With upward velocity positive, $v_{n,i}^*=0$ requests rest in the normal direction and $v_{n,i}^*>0$ requests outward motion. The current normal velocity $v_{n,i}$ sets the restitution request. The free velocity $v_{\mathrm{free},i}$ includes smooth evolution and the current action across the response horizon, making friction and normal response aware of impending action-induced motion.
+This is a **landing target**: without compliance it advances the point exactly to \(g=0\) over one interval. Restitution is deliberately not requested while the point is still above the plane; otherwise the solver could reverse an approaching point before impact. Physical compliance can leave a velocity residual relative to this target, so an active soft contact may still deform after crossing.
 
-| term | requested behavior |
-|---|---|
-| $e_i[-v_{n,i}]_+$ | rebound speed equal to $e_i$ times the current inward speed |
-| $\beta_i d_i$ | fractional outward motion for penetration recovery |
-| $v_{t,i}^*=0$ | sticking, if the friction budget permits it |
+The restitution \(e_i\in(0,0.5)\) and friction \(\mu_i\in(0,2)\) are learned once per contact point. The recovery fraction \(\beta\in(0,1]\) is one fixed, state-independent configuration value shared by the contact points; the implemented default is \(0.2\), meaning “request removal of 20% of the existing penetration over one response horizon.” It is persisted in version-3 checkpoints and never appears in the optimizer. The implementation deliberately leaves this request uncapped in version 3, because capping it while retaining \(C_i=\beta/(k_i h^2)\) would destroy the claimed \(F=k\delta\) relation for deep penetration. Solver versions 1–2 retain their historical learned, capped recovery behavior.
 
-The cap $v_{\max}$ keeps the requested penetration-recovery speed in the bounded range $0\le d_i\le v_{\max}$ across gap values, and $e_i,\beta_i\in(0,0.5)$. Section 4 introduces the learned friction coefficient $\mu_i$, and §7.2 the learned compliance $c_{0,i}$.
+Stacking normal and zero tangential targets gives \(v^*\), and
 
-Stack these targets in the same interleaved ordering as the contact velocity:
+\[
+b=v_{\mathrm{free}}-v^*.
+\]
 
-$$
-v^*=(v_{n,1}^*,0,\ldots,v_{n,K}^*,0)^\top.
-$$
+Componentwise, the implementation uses
 
-Componentwise, the linear term reads
-
-$$
+\[
 b_{n,i}
-=v_{\mathrm{free},n,i}
--\beta_i d_i
-+e_i\min(v_{n,i},0),
+=
+v_{\mathrm{free},n,i}
++\frac{[g_i]_+}{h}
+-\beta d_i
++e_i\min(v_{n,i},0)\,\mathbf 1_{\{g_i\le0\}},
 \qquad
 b_{t,i}=v_{\mathrm{free},t,i}.
-$$
+\]
 
-The selected impulse produces $v^+=v_{\mathrm{free}}+W\Lambda$ and the residual $r=v^+-v^*$. Exact attainment gives $r=0$. Separation and sliding produce the mode-specific residuals developed in §5 and §6. Whether an admissible impulse can attain the request depends on the friction budget; §4 defines the feasible set and §4.1 states the exact-attainment test.
+Only active blocks use this bias; §7 defines the active set. The selected impulse produces \(v^+=v_{\mathrm{free}}+W_{\mathrm{full}}\Lambda\). In the ideal problem, exact attainment gives \(v^+=v^*\); the physical diagonal of §7.2 permits a constitutive residual.
 
 ### 3.3 The objective as a shifted energy ledger
 
@@ -535,7 +526,7 @@ $$
 
 Membership $\Lambda_{\mathrm{req}}\in\mathcal C_\mu$ gives exact attainment. The existence equation above supplies the corresponding test for a rank-deficient $W$.
 
-The equations above describe the ideal QP. The target problem in §7 has a unique minimizer; at a contact whose impulse lies in the strict cone interior, its component relation is $v_i^+-v_i^*=-\tilde R_{ii}\Lambda_i$, the compliance of §7.2 acting on that contact's impulse. A clear-flight gate value $s_i=0$ sets $\Lambda_i=0$ and makes that contact's $v_i^*$ inactive bookkeeping. Section 8 explains the residual from the finite numerical solve.
+The equations above describe the ideal QP. The target problem in §7 has a unique minimizer; at an active contact whose impulse lies in the strict cone interior, its component relation is $v_i^+-v_i^*=-C_i\Lambda_i$, the physical compliance of §7.2 acting on that contact's impulse. A point outside the predicted-crossing active set instead has both impulse components fixed to zero. Section 8 explains the residual from the finite numerical solve.
 
 ### 4.2 How $\mu$ controls exact sticking
 
@@ -630,7 +621,7 @@ The location of the optimum directly supplies zero impulse, sticking, or frictio
 
 In a robot, off-diagonal terms of $W$ couple the contacts: an impulse at one foot affects the velocity of another foot. The joint QP finds one mutually consistent set of impulses for all contacts. A diagonal $W$ is the separable special case.
 
-Duplicate or mechanically redundant contact points can make $W$ singular, meaning several impulse distributions produce the same generalized motion. The positive regularizer in §7 adds curvature along redundant directions, giving the implemented target problem a well-posed, unique optimum.
+Duplicate or mechanically redundant active contact points can make $W$ singular, meaning several impulse distributions produce the same generalized motion. The positive physical compliance in §7 adds curvature along redundant directions, giving the implemented target problem a well-posed, unique optimum.
 
 ### 5.4 The geometric picture: projection onto the cone
 
@@ -667,7 +658,7 @@ Where the tangency lands names the mode of §5.2:
 | sloped facet $\Lambda_t=\pm\mu\Lambda_n$ | boundary | sliding, friction saturated |
 | apex $\Lambda=0$ | vertex | separation or inactive contact |
 
-The regularized target of §7 keeps this picture with a shifted metric: $W$ becomes $H=\operatorname{sym}(SW_{\mathrm{full}}S)+R$ and the ellipsoid center moves accordingly, so the added curvature of $R$ rounds the level sets along redundant directions and fixes a unique tangency point.
+The physical target of §7 keeps this picture on the selected contact blocks with a shifted metric: the active Delassus matrix gains the positive compliance diagonal $C$. The added curvature rounds the level sets along redundant directions and fixes a unique tangency point, while inactive blocks are equality-constrained to zero.
 
 One caution about the solver. The ADMM cone projection $\Pi_{\mathcal C_\mu}$ of §8 is an ordinary Euclidean projection, but it is an inner step that only enforces feasibility at each iteration. The converged optimum is the $W$- or $H$-metric projection described here; the linear solve at each iteration reintroduces that stretched geometry.
 
@@ -752,420 +743,336 @@ Thus the ideal joint-cone QP satisfies the sliding relation $v_n^+-v_n^*=\mu|v_t
 
 ### 6.3 The minimizer is the unique physical state
 
-Every admissible impulse is feasible, so the feasible set holds many impulses, and the complementarity conditions select one of them. In exact arithmetic $W$ is positive-semidefinite and the cone is convex, so the objective is convex; the regularizer of §7 makes it strictly convex, giving a single minimizer, and a convex program's KKT conditions are sufficient as well as necessary. The impulse that satisfies the contact laws and the minimizer are therefore one point, determined uniquely — the determinacy of a passive rigid contact carried by convexity.
+Every admissible impulse is feasible, so the feasible set holds many impulses, and the complementarity conditions select one of them. In exact arithmetic $W$ is positive-semidefinite and the cone is convex, so the objective is convex; the positive physical compliance of §7 makes the active target strictly convex for finite $k_i$ and fixed $\beta>0$, giving a single minimizer, and a convex program's KKT conditions are sufficient as well as necessary. The impulse that satisfies the contact laws and the minimizer are therefore one point, determined uniquely — the determinacy of a passive rigid contact carried by convexity.
 
 The tangential reaction dissipates energy, and the maximum-dissipation reading of §3.3 selects it: among admissible tangential impulses the chosen one removes the most kinetic energy. Folding the normal projection and this tangential dissipation into the single cone objective gives the associated joint-cone problem, exact for the normal, inelastic, and restitution response, and extended by the cone objective to coupled Coulomb friction.
 
 ---
 
-## 7. The gated, compliant and regularized QP
+## 7. Predicted-crossing activation and physical compliance
 
-The formulation extends the ideal QP with three ingredients:
+The prototype extends the ideal QP with two ingredients:
 
-1. a location-dependent gate, so a point in clear flight is exactly inactive;
-2. a gate-shaped contact compliance carrying a learned stiffness;
-3. a small positive conditioning floor, so duplicate and weakly gated contacts remain numerically stable.
+1. a hard, action-aware active set that admits points already in contact or predicted to cross the plane during the response interval;
+2. a learned physical stiffness \(k_i\) whose corresponding impulse-to-velocity compliance is fixed algebraically.
 
-The following states the numerical target problem explicitly.
+There is no smooth force gate, no hand-chosen \(0\)–\(5\) mm transition region, and no latent impulse. The decision variable is the physical impulse \(\Lambda\).
 
-Throughout this section, write
+Write
 
-$$
+\[
 W_{\mathrm{full}}=JM^{-1}J^\top
-$$
+\]
 
-for the ungated matrix called $W$ in §§2–6, reserving the shorter name for its gated counterpart.
+for the Delassus matrix of all candidate points.
 
-### 7.1 Compact flight gate
+### 7.1 Hard predicted-crossing active set
 
-For thresholds $g_{\mathrm{on}}<g_{\mathrm{off}}$, define
+The contact-free generalized velocity at the end of the response interval is
 
-$$
-u_i
-=\operatorname{clip}\!\left(
-\frac{g_{\mathrm{off}}-g_i}
-{g_{\mathrm{off}}-g_{\mathrm{on}}},0,1
-\right),
-$$
+\[
+\dot q_{\mathrm{free}}=\dot q+h\ddot q_{\mathrm{free}},
+\]
 
-$$
-s_i=6u_i^5-15u_i^4+10u_i^3.
-$$
+where \(\ddot q_{\mathrm{free}}\) already includes the current action. The solver evaluates the contact velocity with the Jacobian at the current configuration,
 
-Then:
+\[
+v_{\mathrm{free}}=J(q)\dot q_{\mathrm{free}},
+\]
 
-- $s_i=1$ at and below $g_{\mathrm{on}}$: fully enabled;
-- $0<s_i<1$ in the transition band: smoothly relaxed candidate;
-- $s_i=0$ at and above $g_{\mathrm{off}}$: exactly disabled.
+and uses the first-order semi-implicit endpoint proxy
 
-The gap is a metric quantity, so the band is set in metres. The thresholds are $g_{\mathrm{on}}=0$ and a configurable $g_{\mathrm{off}}$, with a default of $5\times10^{-3}\,\mathrm{m}$ for the exact-geometry contact set.
+\[
+g_{i,\mathrm{free}}^+
+=g_i(q)+h\,v_{\mathrm{free},n,i}.
+\]
 
-![contact_gate](https://hackmd.io/_uploads/Hyds50oEMl.svg)
+The implemented active indicator is
 
+\[
+a_i
+=
+\mathbf 1\!\left\{
+g_i\le0
+\ \text{or}\
+g_{i,\mathrm{free}}^+\le0
+\right\}.
+\]
 
-The polynomial is the quintic smoothstep, the unique degree-5 polynomial with
+Thus a positive-gap point activates only if its contact-free prediction reaches the plane during this step. Large tangential speed alone cannot activate it. The acceleration and current action can change \(v_{\mathrm{free},n}\), so they can change the decision.
 
-$$
-s(0)=s'(0)=s''(0)=0,
-\qquad
-s(1)=1,
-\quad
-s'(1)=s''(1)=0.
-$$
+This is an endpoint proxy, not an exact time-of-impact search and not the minimum gap along the continuously integrated free trajectory. It is the actual prototype rule and should be audited as such. A curved path could cross and return between the endpoints, and a coupled impulse from one active contact could drive an initially inactive point into the plane after the one-shot selection. A production active-set method can add continuous collision detection or a small fixed number of closure passes if those cases appear in rollouts.
 
-The clip supplies the two flat regions, giving the exact clear-flight cutoff; the vanishing endpoint derivatives remove the kinks where the ramp meets them, making the assembled gate $C^2$ in the gap. The cubic smoothstep $3u^2-2u^3$ is $C^1$ but leaves $s''=\pm6$ at the joins, and $s_i$ scales an impulse that enters acceleration, so that jump would reach the drift. The derivative factors as $s'(u)=30u^2(u-1)^2\ge0$, so the gate is monotone and never overshoots $[0,1]$.
+Repeat each indicator over that point's normal and tangential slots:
 
-Repeat the same gate for the normal and tangential component of each contact:
+\[
+A=\operatorname{diag}(a_1,a_1,\ldots,a_K,a_K).
+\]
 
-$$
-S=\operatorname{diag}(s_1,s_1,\ldots,s_K,s_K).
-$$
+The admissible set is
 
-Introduce a latent cone impulse $y$ and define the physical impulse by
+\[
+\mathcal C_{\mu,A}
+=
+\left\{
+\Lambda:
+\begin{array}{ll}
+(\Lambda_{n,i},\Lambda_{t,i})\in\mathcal C_{\mu_i},
+& a_i=1,\\
+(\Lambda_{n,i},\Lambda_{t,i})=(0,0),
+& a_i=0.
+\end{array}
+\right\}.
+\]
 
-$$
-\Lambda=Sy.
-$$
+Both components of every inactive point are therefore exactly zero. In particular, a hovering foot cannot obtain a normal impulse merely to unlock tangential friction. All active contacts remain in one simultaneous solve, so their off-diagonal Delassus coupling and static-friction competition are preserved.
 
-Because normal and tangential components share the same nonnegative scale,
+The indicator is a hard hybrid decision. Within a fixed active set the QP and fixed-iteration solver are differentiable with respect to mechanics, action, \(k\), \(e\), and \(\mu\). The fixed \(\beta\) participates in the calculation but is not optimized. The derivative of the Boolean comparison itself is zero, and the model is not differentiable on the crossing boundary.
 
-$$
-y\in\mathcal C_\mu
+### 7.2 Stiffness in N/m
+
+Each point learns a positive stiffness through a log parameter,
+
+\[
+k_i=\exp(\hat k_i),
+\qquad [k_i]=\mathrm{N/m}.
+\]
+
+The position-level recovery request for a penetration \(\delta_i=[-g_i]_+\) is \(\beta\delta_i/h\), where \(\beta\) is the fixed desired recovery fraction from §3.2. An impulse \(\Lambda_{n,i}=F_{n,i}h\) acts through a velocity-level compliance \(c_{n,i}\). Requiring a resting, loaded contact to obey \(F_{n,i}=k_i\delta_i\) determines the compliance rather than leaving it as an unrelated learned diagonal:
+
+\[
+\frac{\beta\delta_i}{h}
+=c_{n,i}\Lambda_{n,i}
+=c_{n,i}F_{n,i}h
 \quad\Longrightarrow\quad
-Sy\in\mathcal C_\mu.
-$$
+\boxed{
+c_{n,i}=\frac{\beta}{k_i h^2}.
+}
+\]
 
-At $s_i=0$, the corresponding physical impulse is exactly zero.
+This is where the \(h^2\) comes from: converting position error to a target velocity contributes \(1/h\), while converting force to impulse contributes another \(h\). Including \(h^2\) therefore preserves the same position-level stiffness when the response step changes.
 
-The gate supplies smooth contact candidacy with an exact clear-flight cutoff. A point in the transition band $0<g_i<g_{\mathrm{off}}$ can transmit an attenuated impulse before its gap reaches zero.
+The prototype ties the tangential diagonal to the same value,
 
-Two properties of $s_i$ are used later. It is monotone in $u_i$ and confined to $[0,1]$, with $s_i=1$ attained exactly at $u_i=1$; and the derivative $\partial s_i/\partial g_i=-s'(u_i)/(g_{\mathrm{off}}-g_{\mathrm{on}})$ vanishes at both ends of the band, so the gate meets its flat regions smoothly. Evaluating the quintic just below $u_i=1$ rounds to within a few units in the last place of $1$, so quantities that depend on $1-s_i^2$ are formed with a nonnegative clamp and remain exactly in $[0,1]$ at any working precision.
-
-### 7.2 Gate-shaped compliance and the conditioning floor
-
-#### The contact-space scale
-
-Every diagonal term added to the QP acts in contact space, where the natural unit is an inverse mass. That unit is supplied by
-
-$$
-\sigma
-=\operatorname{stopgrad}\!\left[
-\max\!\left(
-\operatorname{mean}\operatorname{diag}(W_{\mathrm{full}}),
-10^{-6}
-\right)
-\right],
-$$
-
-with $W_{\mathrm{full}}=JM^{-1}J^\top$ evaluated before gating. `stopgrad` uses $\sigma$ in the forward calculation and treats it as constant during differentiation.
-
-Denominating diagonal terms in $\sigma$ makes them covariant with the mechanism: rescaling $M\mapsto\alpha M$ rescales $W_{\mathrm{full}}$ and $\sigma$ together, so the selected impulse scales as $\alpha$, exactly as a physical impulse does.
-
-#### The diagonal
-
-Let $c_{0,i}>0$ be a compliance coefficient for contact point $i$, shared by that point's normal and tangential slot, and let $\eta>0$ be a conditioning coefficient with a default of $10^{-2}$. The diagonal added to the gated Delassus matrix is
-
-$$
-R
-=\sigma\,
-\operatorname{diag}\!\left[
-c_0\odot(\mathbf 1-S^2)+\eta
-\right],
-$$
-
-with $c_0$ and the gate both repeated across each contact's two slots. Because $s_i\in[0,1]$, the shape factor $1-s_i^2$ lies in $[0,1]$ and $R$ is bounded on both sides:
-
-$$
-\eta\,\sigma I
-\ \preceq\ R\ \preceq\
-\sigma\operatorname{diag}(c_0+\eta).
-$$
-
-The lower bound makes $R$ positive-definite for every gate value, so $H$ is positive-definite and the target QP stays strictly convex. The upper bound keeps the matrix handed to the linear solve bounded, so its conditioning is uniform across the band.
-
-#### The physical compliance
-
-Undoing the latent scaling of §7.1 with $\Lambda=Sy$ expresses the same diagonal in physical contact coordinates:
-
-$$
-\tilde R
-=S^{-1}RS^{-1}
-=\sigma\left[
-c_0\odot\left(S^{-2}-\mathbf 1\right)+\eta S^{-2}
-\right],
-$$
-
-that is, $\tilde R_{ii}=\sigma\left[c_{0,i}(1/s_i^2-1)+\eta/s_i^2\right]$ for each slot.
-
-$\tilde R$ is the contact compliance. At an interior optimum the exact relation is
-
-$$
-v^+-v^*=-\tilde R\Lambda,
-$$
-
-so $\tilde R$ maps impulse to the residual by which the requested outgoing velocity is missed: a small $\tilde R$ enforces the request closely, and a large $\tilde R$ yields under load. Its inverse is the contact impedance.
-
-The two ends of the band read directly off the formula:
-
-- at $s_i=1$ the shape factor vanishes and $\tilde R_{ii}=\eta\sigma$, the conditioning floor alone, so a fully engaged contact enforces its requested velocity to within that floor;
-- as $s_i\to0$ the compliance grows without bound and $\Lambda_i\to0$, so the physical response fades smoothly to zero through the transition band.
-
-$c_{0,i}$ therefore sets how soft a partially engaged contact is, and $\eta$ sets the conditioning of the linear algebra. Writing the diagonal so that the compliance term vanishes at full engagement keeps those two roles separate: the force a contact transmits through the taper is selected by $c_{0,i}$, and the same force is insensitive to $\eta$ over several decades.
-
-#### The learned stiffness
-
-$c_{0,i}$ is a constitutive property of the contact, learned alongside restitution, penetration recovery and friction:
-
-$$
-c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i),
+\[
+C_i
+=
+\frac{\beta}{k_i h^2}
+\begin{bmatrix}
+1&0\\
+0&1
+\end{bmatrix},
 \qquad
-c_{\mathrm{floor}}=\kappa\,c_{0}^{\mathrm{init}},
-$$
+C=\operatorname{blockdiag}(C_1,\ldots,C_K).
+\]
 
-with one unconstrained parameter $\hat c_i$ per contact point and $\kappa=0.1$ by default. The offset keeps the compliance term present at every parameter value, so the separation of roles above holds throughout training.
+Only the normal entry has the literal \(F_n=k\delta\) interpretation. Reusing it tangentially is the smallest prototype that retains the existing cone solve; a later model may learn or specify a separate tangential compliance.
 
-Sharing one coefficient between a contact's normal and tangential slot is what preserves the cone implication of §7.1: the scaling applied inside a contact block stays uniform, so cone membership and the friction ratio are untouched.
+Calling this **Hunt–Crossley-parameterized** means that the elastic part is
+named by the physical penetration stiffness $k$. It does not evaluate the
+historical state-only penalty force $F=k\delta(1+\alpha\dot\delta)$ directly.
+Here $k$ softens the simultaneous impulse constraint, the cone still selects
+multi-contact normal and static-friction impulses, and impact loss is represented
+by the restitution target $e$. The older `contact_solver="compliant"` branch is
+the explicit Hunt–Crossley penalty implementation.
 
-An equivalent position-level stiffness follows from static equilibrium. A resting contact has zero outgoing normal velocity and zero current normal velocity, so its request reduces to the recovery term and the compliance relation $v^+-v^*=-\tilde R\Lambda$ balances that request against the load carried. With a resting penetration $-g_i$ recovered at fraction $\beta_i$ over the response interval $h$, stationarity gives
+At an interior active optimum,
 
-$$
-\beta_i\frac{-g_i}{h}=\tilde R_{ii}\Lambda_{n,i},
-\qquad
-k_i=\frac{\beta_i}{\tilde R_{ii}h^2},
-$$
+\[
+v^+-v^*=-C\Lambda.
+\]
 
-the second relation following from the sustained force $\Lambda_{n,i}/h$ acting through a deflection equal to the penetration. The penetration cancels, so a loaded contact carries force in proportion to how far it has sunk, with $k_i$ as its spring constant.
+For a resting loaded contact, \(v_n^+=0\) and \(v_n^*=\beta\delta_i/h\), so the normal row gives
 
-The gate value fixes which compliance enters that relation. A contact carrying load at rest has $g_i\le0=g_{\mathrm{on}}$, so $s_i=1$, the shape factor $1-s_i^2$ vanishes and $\tilde R_{ii}=\eta\sigma$:
+\[
+F_{n,i}=\frac{\Lambda_{n,i}}h=k_i\delta_i.
+\]
 
-$$
-k_i=\frac{\beta_i}{\eta\,\sigma\,h^2}.
-$$
+This is an equilibrium statement. A penetrated but otherwise unloaded free mass should accelerate out of the ground, so its one-step impulse is also limited by inertia and is not expected to equal \(k\delta h\) instantaneously.
 
-A resting contact therefore carries load at a penetration set by the conditioning floor $\eta$, the recovery fraction $\beta_i$, the contact-space scale $\sigma$ and the response interval, and $c_{0,i}$ sets the softness of the taper, where its shape factor is active. Raising $g_{\mathrm{on}}$ above zero would place a load-bearing contact inside the compliant region and bring $c_{0,i}$ into this relation as well.
+No inertia scale \(\sigma\), artificial envelope compliance, or active conditioning floor is added to \(C\). Adding a floor \(\eta\sigma\) to an active normal entry would change the realized stiffness to
+
+\[
+k_{\mathrm{eff},i}
+=
+\left(
+\frac1{k_i}
++\frac{\eta\sigma h^2}{\beta}
+\right)^{-1},
+\]
+
+so the learned \(k_i\) would no longer be the constitutive stiffness. The configuration option contact_regularization belongs to solver versions 1–2; version 3 reports zero target regularization. ADMM's \(\rho I\) appears only in its linear subproblem and does not alter the target QP.
+
+Two qualifications matter:
+
+- The current prototype does not bound \(\hat k_i\). Very large \(k_i\) makes \(C_i\) small and weakens uniform curvature, so production training may need bounds or a stiffness prior.
+- A freely learned \(k_i\) does not by itself anchor the structured model's global mechanical gauge: \(M\mapsto\alpha M\) and \(k\mapsto\alpha k\) can retain a scale freedom unless forces, masses, or stiffness are independently anchored. The parameter and equations have N/m semantics, but identifiability is a separate question.
 
 ### 7.3 The target optimization problem
 
-During one contact solve, $H$, $c$, and $\mu$ are known, and $y$ is the decision variable. Define
+Mask the virtual-work map and bias,
 
-$$
-\operatorname{sym}(A)=\frac12(A+A^\top).
-$$
-
-The explicit `sym` operation enforces numerical symmetry in floating point. The mathematical problem targeted by the finite solver is
-
-$$
-\boxed{
-\begin{aligned}
-\underset{y\in\mathbb R^{2K}}{\operatorname{minimize}}
-&\quad
-\frac12y^\top H y+c^\top y\\
-\operatorname{subject\ to}
-&\quad y\in\mathcal C_\mu,
-\end{aligned}
-}
-$$
-
-with
-
-$$
-H=\operatorname{sym}(SW_{\mathrm{full}}S)+R,
+\[
+J_A=AJ,
 \qquad
-c=Sb,
+W_A=\operatorname{sym}(A W_{\mathrm{full}} A),
 \qquad
-\Lambda=Sy.
-$$
+b_A=Ab,
+\]
 
-In exact arithmetic $SW_{\mathrm{full}}S$ is positive-semidefinite, and $R$ is positive-definite by the lower bound of §7.2, so $H$ is positive-definite. The target objective is therefore strictly convex and has a unique exact minimizer. The fixed-iteration ADMM output is an approximation to that minimizer.
+and define
 
-The ideal residual is $r=W_{\mathrm{full}}\Lambda+b=v^+-v^*$. After symmetrization, the target objective has the mathematical gradient
+\[
+H=W_A+C.
+\]
 
-$$
-Hy+c
-=S(v^+-v^*)+Ry.
-$$
+The implemented target is directly in physical impulse:
 
-Consequently, the exact KKT conditions of the target problem apply to the combined residual $S(v^+-v^*)+Ry$. The $Ry$ term permits a physical velocity residual and controls latent impulse magnitude. At an interior optimum the exact relation is $v^+-v^*=-\tilde R\Lambda$ with $\tilde R=S^{-1}RS^{-1}$, so the residual is the compliance of §7.2 acting on the selected impulse.
-
-#### The same problem in physical coordinates
-
-Each planar Coulomb cone is invariant under a positive scaling applied uniformly inside its own block, and $S$ scales contact $i$'s two slots by the common factor $s_i$. Hence
-
-$$
-y\in\mathcal C_\mu
-\quad\Longleftrightarrow\quad
-Sy\in\mathcal C_\mu,
-$$
-
-and the substitution $\Lambda=Sy$ carries the target problem to an equivalent statement in physical impulse:
-
-$$
+\[
 \boxed{
 \begin{aligned}
 \underset{\Lambda\in\mathbb R^{2K}}{\operatorname{minimize}}
 &\quad
-\frac12\Lambda^\top\!\left(W_{\mathrm{full}}+\tilde R\right)\Lambda+b^\top\Lambda\\
+\frac12\Lambda^\top H\Lambda+b_A^\top\Lambda\\
 \operatorname{subject\ to}
-&\quad \Lambda\in\mathcal C_\mu.
+&\quad
+\Lambda\in\mathcal C_{\mu,A}.
 \end{aligned}
 }
-$$
+\]
 
-This is the ideal QP of §5 with the compliance $\tilde R$ added to the Delassus matrix, which is the precise sense in which the formulation is a compliant contact: the outgoing motion is the projection of the free motion onto the friction cone in a metric softened by $\tilde R$.
+For an inactive block, the equality \(\Lambda_i=0\) makes its entries of \(C\) irrelevant to the physical solution. For active blocks, \(C_i>0\) at finite \(k_i\) and fixed \(\beta>0\), so the active objective is strictly convex. The dense masked statement is equivalent at convergence to forming a reduced QP from active blocks and scattering exact zeros back into the full contact vector.
 
-The two statements are exactly equivalent, and each is convenient for a different purpose. The latent form is bounded and uniformly conditioned across the band, which suits the finite iteration of §8. The physical form exhibits the contact law directly, and is the form in which $c_{0,i}$ and $\eta$ read as a stiffness and a conditioning floor.
-
----
+Because the solve remains simultaneous, adding or removing an inactive block cannot change the exact active solution. With a finite ADMM budget, enforcing the inactive equality at every projection is essential; merely zeroing the final returned impulse would allow inactive primal and dual coordinates to perturb convergence.
 
 ## 8. How the QP is solved: ADMM at a high level
 
 The alternating direction method of multipliers, or **ADMM**, separates two easy operations:
 
 1. minimize an unconstrained quadratic;
-2. project a trial impulse onto the feasible friction cone.
+2. project a trial physical impulse onto the active Coulomb set.
 
-### 8.1 From Lagrange multipliers to ADMM, geometrically
+### 8.1 Two copies of the physical impulse
 
-**The problem, restated.** The solver wants a single impulse: the point that minimizes the objective bowl and still lies in the friction cone,
+Restate the problem as
 
-$$
-\min_{y}\ \tfrac12 y^\top H y + c^\top y
+\[
+\min_{\Lambda,z}
+\frac12\Lambda^\top H\Lambda+b_A^\top\Lambda
++\iota_{\mathcal C_{\mu,A}}(z)
 \qquad\text{subject to}\qquad
-y\in\mathcal C_\mu .
-$$
+\Lambda=z.
+\]
 
-By §5.4 this is nested objective ellipsoids set against a wedge: find the lowest ellipsoid that still touches the cone. Each half is easy on its own — minimizing the bowl is the single linear solve $Hy=-c$, and projecting a point onto the cone has the closed form given below. The only difficulty is that the bowl's bottom usually lies outside the cone, so the two easy answers disagree. ADMM is a disciplined way to reconcile them.
+The primal copy \(\Lambda\) carries the quadratic bowl. The auxiliary copy \(z\) carries the friction-cone and inactive-block constraints. A scaled dual variable \(\xi\) accumulates their disagreement.
 
-**From an equation to a set.** Ordinary Lagrange multipliers price an *equation* $g(y)=0$ by adding a term $\xi^\top g(y)$ and seeking a saddle, where the objective gradient is balanced by a constraint force $\xi\,\nabla g$. Here the constraint is a *set*, $y\in\mathcal C_\mu$, with no equation to price. The fix is to introduce a second copy $z$ of the impulse and require the two copies to agree:
+This split is purely algorithmic. Both copies represent the same physical impulse at convergence; neither is the latent force-envelope variable used by solver version 2.
 
-$$
-\min_{y,z}\ \tfrac12 y^\top H y + c^\top y + \iota_{\mathcal C_\mu}(z)
-\qquad\text{subject to}\qquad
-y=z,
-$$
+### 8.2 The fixed iteration
 
-with $\iota_{\mathcal C_\mu}(z)=0$ on the cone and $+\infty$ off it. Now $y$ carries only the smooth bowl, $z$ carries only the cone, and they are joined by the single equation $y=z$ — exactly the kind of constraint a multiplier $\xi$ can price. (A frequent snag: in the textbook statement of duality the multiplier is often called $y$; in this note $y$ is the impulse and $\xi$ is the multiplier.)
+For a sample with at least one active slot, the implementation chooses an ADMM penalty from active target curvature,
 
-**Why we maximize over the multiplier.** Fix $\xi$ and minimize the priced objective over $(y,z)$; call the result $g(\xi)$. Dropping the hard agreement $y=z$ and only pricing it lets the minimization roam over more points, so $g(\xi)$ can never exceed the true constrained minimum: every $\xi$ furnishes a *lower bound* on the answer. The tightest bound is the largest one, so we **maximize** over $\xi$. Geometrically, each $\xi$ is a supporting plane resting beneath the true optimum; raising $g(\xi)$ tilts that plane upward until it just kisses the optimum, and at the touch the duality gap is zero and the copies agree, $y=z$. The optimal $\xi$ is precisely the force needed to hold the impulse against the cone — the same contact reaction the KKT residual of §6 describes.
-
-**Why the residual is the step.** At the inner minimum the priced objective is flat in $(y,z)$, so the dual value only still responds to the leftover disagreement, and the gradient of $g$ is exactly the consensus residual $y-z$. Hence
-
-$$
-\xi \leftarrow \xi + (y-z)
-$$
-
-is gradient ascent on the dual: accumulate the disagreement, and the growing $\xi$ draws the copies together. When they meet, the residual vanishes, the dual is maximized, and the impulse is at once optimal and feasible.
-
-**The penalty and the alternating sweep.** Pricing alone leaves the $y$-step poorly conditioned, so add a penalty $\tfrac\rho2\lVert y-z\rVert^2$ on the same disagreement: each subproblem becomes strictly convex and $\rho$ serves as a robust fixed ascent step (the classical "method of multipliers"). Minimizing this augmented objective over $y$ and $z$ *jointly* is as hard as the coupled original, so ADMM minimizes them **one block at a time**:
-
-- **update $y$** — minimize the bowl plus the penalty pull toward $z$: one linear solve, the $H$-metric projection of §5.4 that reintroduces the stretched geometry;
-- **update $z$** — project the pulled $y$ onto the cone: the Euclidean step;
-- **update $\xi$** — add the residual $y-z$, building up the reconciling reaction.
-
-Each sweep, $y$ slides toward the bowl's bottom, $z$ snaps back into the cone, and $\xi$ grows by whatever gap remains. The fixed point is the one place where the two copies coincide and each is optimal for its own half: the tangency point of §5.4, the constrained optimum.
-
-### 8.2 The iteration and its guarantees
-
-The penalty $\rho$ sets the step of the iteration, and it is drawn from the part of the diagonal that describes how the mechanism resists an impulse:
-
-$$
+\[
 \rho
-=\max\!\left(
-\operatorname{mean}\!\left[
-\operatorname{diag}\!\left(SW_{\mathrm{full}}S\right)+\eta\,\sigma
-\right],
+=
+\max\!\left(
+\frac{\sum_j A_{jj}H_{jj}}
+{\sum_j A_{jj}},
 10^{-6}
 \right),
-$$
+\]
 
-detached from differentiation. Matching $\rho$ to the gated Delassus diagonal and the conditioning floor keeps the step in proportion to the coordinates that carry load, so the fixed budget below converges on the contacts that matter.
+detached from differentiation. If every point is inactive, it uses the detached mean diagonal scale of \(W_{\mathrm{full}}\) as a harmless fallback. This \(\rho\) is not part of \(H\) and therefore is not physical compliance.
 
-Using a primal variable $y$, a feasible auxiliary variable $z$, a scaled dual bookkeeping variable $\xi$, and that penalty, one iteration has the form
+Starting from zero primal, auxiliary, and dual vectors, one iteration is
 
-$$
-y^{k+1}
+\[
+\Lambda^{k+1}
 =(H+\rho I)^{-1}
-\left[-c+\rho(z^k-\xi^k)\right],
-$$
+\left[-b_A+\rho(z^k-\xi^k)\right],
+\]
 
 followed by over-relaxation,
 
-$$
-\hat y^{k+1}=1.5y^{k+1}-0.5z^k,
-$$
+\[
+\widehat\Lambda^{k+1}
+=1.5\Lambda^{k+1}-0.5z^k,
+\]
 
-cone projection,
+active-set cone projection,
 
-$$
+\[
 z^{k+1}
-=\Pi_{\mathcal C_\mu}(\hat y^{k+1}+\xi^k),
-$$
+=
+\Pi_{\mathcal C_{\mu,A}}
+(\widehat\Lambda^{k+1}+\xi^k)
+=
+A\,\Pi_{\mathcal C_\mu}
+(\widehat\Lambda^{k+1}+\xi^k),
+\]
 
-and a dual update,
+and the dual update
 
-$$
+\[
 \xi^{k+1}
-=\xi^k+\hat y^{k+1}-z^{k+1}.
-$$
+=
+\xi^k+\widehat\Lambda^{k+1}-z^{k+1}.
+\]
 
-The exact target QP has one variable $y$. ADMM represents it with two copies: the unconstrained primal iterate $y^k$ and cone-feasible auxiliary iterate $z^k$. Exact convergence brings the two copies together. The default finite budget performs 12 iterations and returns the current feasible approximation $z^{12}$ as `latent_impulse`. The iteration budget is configurable and fixed during a model execution.
+The same binary indicator multiplies both slots of a point. Consequently, projection is the usual closed-form planar Coulomb projection for active blocks and exact zero for inactive blocks. The default finite budget performs 12 iterations and returns \(z^{12}\) as the physical impulse.
 
-For each planar contact, projection has three cases:
+For each active planar contact, ordinary cone projection has three cases:
 
 - a trial pair inside the cone maps to itself;
-- a trial pair whose nearest feasible point is zero maps to the cone apex;
-- each remaining pair maps to the nearest sloped cone boundary.
+- a trial pair in the polar region maps to the cone apex;
+- every remaining pair maps to the nearest sloped cone boundary.
 
-These operations provide two guarantees:
+These operations provide two structural guarantees at every returned iteration:
 
-- **Feasibility is structural:** the returned latent impulse is in the cone because it is the result of an exact cone projection.
-- **Optimality is measured:** the finite iteration budget returns an approximate minimizer. With $Q(z)=\tfrac12z^\top Hz+c^\top z$ and $L$ equal to the row-sum bound used in code, the solver reports the normalized projected-gradient fixed-point residual
+- \(\Lambda_{n,i}\ge0\) and \(|\Lambda_{t,i}|\le\mu_i\Lambda_{n,i}\) for active points;
+- \(\Lambda_{n,i}=\Lambda_{t,i}=0\) bit-for-bit for inactive points.
 
-  $$
-  \frac{\left\lVert z-\Pi_{\mathcal C_\mu}\!\left(z-\nabla Q(z)/L\right)\right\rVert}
-  {1+\lVert z\rVert}.
-  $$
+Finite-budget optimality is measured with the similarly masked projected-gradient residual. With \(Q(z)=\tfrac12z^\top Hz+b_A^\top z\) and \(L\) the row-sum bound used in code,
 
-  A value near zero means that one projected-gradient update leaves the returned impulse nearly unchanged, which is the QP optimality condition.
+\[
+\frac{
+\left\lVert
+z-\Pi_{\mathcal C_{\mu,A}}
+\left(z-\nabla Q(z)/L\right)
+\right\rVert
+}{
+1+\lVert z\rVert
+}
+\]
 
-The fixed iteration count also gives rollout backpropagation a fixed computation graph. The dense linear solve and the piecewise-differentiable cone projection allow gradients to pass through the contact response to the learned mass, geometry, material parameters, and actuator map.
-
----
+is zero at a projected-gradient fixed point. The fixed iteration count gives rollout backpropagation a fixed computation graph. Gradients pass through the dense solve and cone projection within the selected active set, but not through the crossing comparison itself.
 
 ## 9. Applying the solution
 
-Let $y_{\mathrm{ret}}=z^N$ denote the returned feasible auxiliary iterate after the configured $N$ ADMM iterations. Form the physical impulse
-
-$$
-\Lambda=Sy_{\mathrm{ret}}.
-$$
+Let \(\Lambda_{\mathrm{ret}}=z^N\) denote the returned feasible physical impulse after the configured \(N\) ADMM iterations. No gate conversion follows it.
 
 The generalized momentum change and outgoing velocity are
 
-$$
-\Delta p=J^\top\Lambda,
-$$
+\[
+\Delta p=J^\top\Lambda_{\mathrm{ret}},
+\]
 
-$$
+\[
 \dot q^+
-=\dot q_{\mathrm{free}}+M^{-1}J^\top\Lambda.
-$$
+=
+\dot q_{\mathrm{free}}
++M^{-1}J^\top\Lambda_{\mathrm{ret}}.
+\]
 
-For use in the model drift, the equivalent average generalized force is
+For use in the model drift, the equivalent average generalized force and acceleration contribution are
 
-$$
-F_c=\frac{J^\top\Lambda}{h},
-$$
-
-and the corresponding acceleration contribution is
-
-$$
+\[
+F_c=\frac{J^\top\Lambda_{\mathrm{ret}}}{h},
+\qquad
 \ddot q_c=M^{-1}F_c.
-$$
+\]
 
-The internal response horizon defaults to $h=0.002\ \mathrm{s}$. The displayed $\dot q^+$ is the full-$h$ hypothetical response used by the contact solve and diagnostics. A surrounding Euler step of duration $\delta<h$ applies the equivalent force for $\delta$, producing the fraction $\delta/h$ of that impulse response, and then recomputes contact. Longer transition durations use repeated small steps with a fresh contact calculation at each step.
-
----
+The internal response horizon defaults to \(h=0.002\ \mathrm{s}\) and is persisted in version-3 sidecars. The displayed \(\dot q^+\) is the full-\(h\) hypothetical response used by the contact solve and diagnostics. A surrounding Euler step of duration \(\delta<h\) applies the equivalent force for \(\delta\), producing the fraction \(\delta/h\) of that response, and then recomputes contact. Longer transitions use repeated small steps with a fresh active-set decision and contact calculation at each step.
 
 ## 10. Discrete energy accounting
 
@@ -1194,7 +1101,7 @@ For the ideal unbiased QP, this expression is the objective itself. With restitu
 In the ideal unbiased problem, maximum-dissipation friction gives $\Delta T_c\le0$. In a scalar or decoupled impact, restitution with a consistent current/free velocity baseline and $0\le e_i\le1$ also gives $\Delta T_c\le0$. The displayed ledger supplies the energy sign for a coupled multi-contact response and its actual velocity baselines. Penetration recovery requests outward motion and permits positive contact work. The audit reports the nonnegative recovery attribution
 
 $$
-\sum_i\beta_i d_i\Lambda_{n,i}
+\sum_i\beta d_i\Lambda_{n,i}
 $$
 
 as `stabilization_work`. The full-$h$ response quantity `discrete_work` is the total contact-work ledger, combining impact, friction, restitution, and recovery.
@@ -1203,42 +1110,74 @@ as `stabilization_work`. The full-$h$ response quantity `discrete_work` is the t
 
 ## 11. End-to-end recipe
 
-At each internal step, the constraint contact path performs the following calculation:
+At each internal step, solver version 3 performs the following calculation:
 
-1. Evaluate the contact-point positions $p_i(q)$ from the kinematic tree, giving the gaps $g_i(q)$ and horizontal coordinates.
-2. Form $J_n$ and $J_t$ from the revolute-joint lever arms, then stack $J$.
-3. Evaluate $M(q)$ and the contact-free acceleration, including the current action.
-4. Predict $\dot q_{\mathrm{free}}=\dot q+h\ddot q_{\mathrm{free}}$.
-5. Compute $v_{\mathrm{free}}=J\dot q_{\mathrm{free}}$.
-6. Build the restitution/recovery target $v^*$ and bias $b=v_{\mathrm{free}}-v^*$.
-7. Compute $W_{\mathrm{full}}=JM^{-1}J^\top$ and the contact-space scale $\sigma$.
-8. Evaluate the compact gate $S$, the compliance coefficients $c_0$, and the diagonal $R$.
-9. Approximate the latent cone-QP minimizer with the fixed ADMM budget (12 iterations by default), returning the feasible auxiliary iterate $y_{\mathrm{ret}}$.
-10. Form the physical impulse $\Lambda=Sy_{\mathrm{ret}}$.
-11. Apply $J^\top\Lambda$ to generalized momentum, or $J^\top\Lambda/h$ as its average-force equivalent.
-12. Report cone feasibility, optimality residual, outgoing velocities, and the discrete energy ledger.
+1. Evaluate the exact contact-point kinematics, giving metric gaps \(g_i(q)\), \(J_n\), and \(J_t\).
+2. Evaluate \(M(q)\) and the contact-free acceleration, including the current action.
+3. Predict \(\dot q_{\mathrm{free}}=\dot q+h\ddot q_{\mathrm{free}}\) and \(v_{\mathrm{free}}=J\dot q_{\mathrm{free}}\).
+4. Form \(g_{i,\mathrm{free}}^+=g_i+h v_{\mathrm{free},n,i}\).
+5. Activate points with \(g_i\le0\) or \(g_{i,\mathrm{free}}^+\le0\); repeat the mask across each normal–tangential block.
+6. Use \(v_{n,i}^*=-g_i/h\) for positive-gap crossings, or the restitution/recovery request for already engaged points; set \(v_{t,i}^*=0\).
+7. Read the fixed persisted \(\beta\), evaluate \(k_i=\exp(\hat k_i)\), and set \(C_i=\beta/(k_i h^2)I_2\).
+8. Build \(H=\operatorname{sym}(A W_{\mathrm{full}}A)+C\) and \(b_A=Ab\).
+9. Approximate the physical-impulse QP with the fixed ADMM budget, applying the inactive equality after every cone projection.
+10. Apply \(J^\top\Lambda\) to generalized momentum, or \(J^\top\Lambda/h\) as its average-force equivalent.
+11. Report the active mask, predicted free gap, stiffness, compliance, cone feasibility, optimality residual, outgoing velocities, and discrete energy ledger.
 
----
+### 11.1 Selecting the prototype
+
+The model constructor selects version 3 explicitly:
+
+```python
+PortHamiltonianModel(
+    17,
+    6,
+    mode="structured",
+    contact_force=6,
+    contact_solver="constraint",
+    contact_geometry="kinematic",
+    contact_stiffness=100_000.0,
+    contact_attenuation=0.2,
+    contact_dt=0.002,
+)
+```
+
+The benchmark table exposes the same configuration as
+`mbq_structured_quad_stiffness_roll`. The recovery evaluator accepts
+`--contact_geometry kinematic --contact_stiffness 100000 --contact_attenuation 0.2`.
+
+`contact_stiffness` is mutually exclusive with the legacy gate-shaped
+`contact_compliance` option. Passing `contact_gate_off` with version 3 is an
+error, because a gate width would falsely imply that a force envelope still
+exists.
+
+`contact_attenuation` is the fixed desired penetration-recovery fraction. It
+defaults to `0.2`, is required to lie in `(0, 1]`, and is rejected unless the
+version-3 `contact_stiffness` law is selected. The name denotes the fraction of
+penetration removed, not the fraction left: `0.2` requests an outgoing gap of
+approximately `0.8` times the incoming penetration over one uncoupled response.
 
 ## 12. Key properties
 
 | property | role in the contact solve |
 |---|---|
-| least-constraint projection | the outgoing motion is the admissible motion closest to the free motion in the kinetic metric; the impulse is the multiplier of non-penetration |
-| objective | combines contact-induced kinetic-energy change, requested outgoing velocity, and a small conditioning penalty |
-| requested velocity | $v^*$ encodes inelastic normal response, rebound, penetration recovery, and the tangential sticking request; exact attainment means $v^*\in v_{\mathrm{free}}+W\mathcal C_\mu$ |
-| selected regime | the cone apex represents zero impulse; a strict-interior optimum represents sticking; a sloped-boundary optimum represents friction saturation; its tangential residual distinguishes incipient slip from sliding |
-| impulse variable | $\Lambda$ transfers momentum; $J^\top\Lambda/h$ is its equivalent average generalized force |
-| coupled contacts | off-diagonal entries of $W_{\mathrm{full}}$ coordinate the impulses across contact points |
-| contact geometry | gaps and contact Jacobians are the plane's forward kinematics in closed form, with $J_n$ and $J_t$ the two rows of the point Jacobian |
-| compact gate | supplies smooth contact candidacy and an exact clear-flight cutoff |
-| compliance $\tilde R$ | maps impulse to the velocity residual $v^+-v^*=-\tilde R\Lambda$; gate-shaped, so the response fades to zero across the band and a fully engaged contact tracks its requested velocity |
-| learned stiffness $c_{0,i}$ | a constitutive parameter, trained with restitution, recovery and friction, that selects the force a partially engaged contact transmits |
-| conditioning floor $\eta$ | supplies scale-aware curvature at every gate value, bounds the latent impulse, and selects a unique target minimizer |
-| bounded diagonal | $\eta\sigma I\preceq R\preceq\sigma\operatorname{diag}(c_0+\eta)$, so positive-definiteness and conditioning hold uniformly across the band |
-| cone projection | gives a feasible returned impulse at every ADMM iteration |
-| solver residual | measures finite-budget optimality |
-| Jacobian duality | $J$ maps generalized motion to contact motion; $J^\top$ maps contact impulse to generalized momentum and preserves virtual work |
+| least-constraint projection | the outgoing motion is the admissible motion closest to the free motion in the kinetic metric |
+| exact geometry | signed gaps and both Jacobian rows come from the declared kinematic tree |
+| predicted crossing | a point is eligible only if it is engaged now or its action-aware free endpoint reaches the plane |
+| hard inactive equality | both impulse slots of every inactive point are exactly zero, eliminating positive-clearance normal force and friction |
+| requested velocity | positive-gap crossings target the plane; engaged contacts request restitution and the fixed desired penetration-recovery fraction \(\beta\); tangential velocity targets zero |
+| physical impulse | \(\Lambda\) transfers momentum directly; there is no latent-to-physical gate transformation |
+| physical stiffness | \(k_i=\exp(\hat k_i)\) enters through \(C_i=\beta/(k_i h^2)I_2\); the normal static equilibrium is \(F_n=k_i\delta_i\) |
+| fixed recovery | \(\beta=0.2\) by default is persisted configuration, shared across points, and not a learned model parameter |
+| timestep semantics | \(h^2\) preserves position-level stiffness because target speed scales as \(1/h\) and impulse as \(h\) |
+| simultaneous contacts | \(A W_{\mathrm{full}}A\) retains all coupling among active points |
+| static friction | the joint normal–tangential cone solve can cancel action-induced tangential motion when the required impulse fits the cone |
+| cone projection | every returned active block is feasible, and every inactive block is bitwise zero |
+| algorithmic penalty | ADMM \(\rho\) conditions the iteration but is absent from the target QP |
+| hybrid gradient | differentiation works within a fixed active set; the crossing boundary is discontinuous |
+| checkpoint semantics | solver version 3 persists log-stiffness, fixed recovery fraction, response horizon, and exact kinematic buffers; versions 0–2 are not reinterpreted |
+| identifiability caveat | a learned dimensional \(k\) does not alone eliminate the joint mass/stiffness scale gauge |
+| known prototype limits | endpoint crossing can miss within-step or contact-coupled secondary impacts; activation closure is a future extension |
 
 ---
 
@@ -1427,41 +1366,33 @@ At an unconstrained bowl minimum this gradient is zero; constraints can place th
 
 | symbol | meaning |
 |---|---|
-| $q,\dot q$ | generalized configuration and velocity |
-| $M(q)$ | symmetric positive-definite mass matrix |
-| $p_i(q)$ | planar position of contact point $i$ from the kinematic tree |
-| $\varrho_i$ | capsule radius of contact point $i$ |
-| $g_i(q)=p_{i,z}-\varrho_i$ | signed gap of contact point $i$ to the ground plane |
-| $\Theta_{i,k}$ | cumulative hinge angle placing the $k$-th link on the chain to point $i$ |
-| $J_{v,i}$ | point Jacobian of contact $i$; its rows are $J_{n,i}$ and $J_{t,i}$ |
-| $J$ | stacked normal/tangential contact Jacobian |
-| $v_{\mathrm{free}}$ | contact-free predicted velocity |
-| $v^*$ | requested outgoing contact velocity |
-| $b=v_{\mathrm{free}}-v^*$ | linear term of the ideal QP |
-| $W_{\mathrm{full}}=JM^{-1}J^\top$ | Delassus matrix; impulse-to-contact-velocity map |
-| $\mu_i$ | dimensionless Coulomb friction coefficient; $\mu_i\Lambda_{n,i}$ is the tangential impulse budget |
-| $\hat\mu_i$ | unconstrained raw parameter learning $\mu_i=2\,\operatorname{sigmoid}(\hat\mu_i)$ |
-| $e_i$ | restitution speed ratio |
-| $\beta_i$ | penetration-recovery fraction |
-| $v_{\max}$ | cap on requested penetration-correction speed |
-| $\mathcal C_\mu$ | product of the planar Coulomb cones |
-| $\mathcal C_\mu^*$ | dual cone containing ideal velocity residuals at an optimum |
-| $s_i,S$ | scalar contact gates and their diagonal matrix |
-| $y$ | exact latent decision variable of the target QP |
-| $y_{\mathrm{ret}}=z^N$ | feasible finite-ADMM approximation returned by the implementation |
-| $\Lambda$ | physical impulse; $Sy$ in the exact target problem and $Sy_{\mathrm{ret}}$ in the finite implementation |
-| $\sigma$ | contact-space inverse-mass scale, the mean gated-free Delassus diagonal |
-| $c_{0,i}$ | learned compliance coefficient of contact point $i$, shared by its two slots |
-| $\hat c_i$ | unconstrained raw parameter learning $c_{0,i}=c_{\mathrm{floor}}+\operatorname{softplus}(\hat c_i)$ |
-| $c_{\mathrm{floor}}=\kappa c_0^{\mathrm{init}}$ | lower bound keeping the compliance term present at every parameter value |
-| $\eta$ | conditioning coefficient of the positive floor |
-| $R=\sigma\operatorname{diag}[c_0\odot(\mathbf 1-S^2)+\eta]$ | latent diagonal: gate-shaped compliance plus conditioning floor |
-| $\tilde R=S^{-1}RS^{-1}$ | physical contact compliance; $v^+-v^*=-\tilde R\Lambda$ at an interior optimum |
-| $k_i=\beta_i/(\tilde R_{ii}h^2)$ | equivalent position-level normal stiffness at rest |
-| $H=\operatorname{sym}(SW_{\mathrm{full}}S)+R$ | target QP Hessian |
-| $\rho$ | ADMM penalty, from the gated Delassus diagonal and the conditioning floor |
-| $I$ | identity matrix |
-| $h$ | fixed contact response interval |
+| \(q,\dot q\) | generalized configuration and velocity |
+| \(M(q)\) | symmetric positive-definite mass matrix |
+| \(p_i(q)\) | planar position of contact point \(i\) from the kinematic tree |
+| \(\varrho_i\) | capsule radius of contact point \(i\) |
+| \(g_i(q)=p_{i,z}-\varrho_i\) | signed gap to the ground plane |
+| \(J\) | stacked normal–tangential contact Jacobian |
+| \(v_{\mathrm{free}}\) | action-aware contact-free predicted contact velocity |
+| \(g_{i,\mathrm{free}}^+=g_i+h v_{\mathrm{free},n,i}\) | implemented semi-implicit free endpoint gap proxy |
+| \(a_i\) | binary engaged-or-predicted-crossing indicator |
+| \(A\) | diagonal active mask, with \(a_i\) repeated over the point's two slots |
+| \(v^*\) | requested outgoing contact velocity |
+| \(b=v_{\mathrm{free}}-v^*\) | ideal QP linear term |
+| \(b_A=Ab\) | active-set linear term |
+| \(W_{\mathrm{full}}=JM^{-1}J^\top\) | full Delassus matrix |
+| \(W_A=\operatorname{sym}(A W_{\mathrm{full}}A)\) | active masked Delassus matrix |
+| \(\Lambda\) | physical normal–tangential impulse |
+| \(\mu_i\) | Coulomb friction coefficient |
+| \(e_i\) | state-independent learned restitution ratio |
+| \(\beta\) | fixed desired penetration-recovery fraction, shared across points and persisted by version 3 |
+| \(k_i=\exp(\hat k_i)\) | learned contact stiffness in N/m |
+| \(c_i=\beta/(k_i h^2)\) | physical impulse-to-velocity compliance in \(1/\mathrm{kg}\) |
+| \(C=\operatorname{blockdiag}(c_i I_2)\) | tied normal/tangential physical compliance |
+| \(H=W_A+C\) | version-3 target QP Hessian |
+| \(\mathcal C_{\mu,A}\) | Coulomb cones on active blocks and exact zeros on inactive blocks |
+| \(z^N\) | feasible physical impulse returned after \(N\) ADMM iterations |
+| \(\rho\) | algorithmic ADMM penalty, absent from the target QP |
+| \(h\) | fixed contact response interval, persisted by version 3 |
 
 ---
 
@@ -1470,5 +1401,5 @@ At an unconstrained bowl minimum this gradient is zero; constraints can place th
 - [Structured dynamics model](structured_dynamics_model.md), especially §2.7 and Appendix B.3.
 - [Cheetah instantiation](structured_dynamics_cheetah.md), which explains why locomotion needs the explicit ground-reaction route.
 - [Hamiltonian recovery report](hamiltonian_recovery_report.md), which defines the contact solver, cone, work, and recovery diagnostics.
-- [`PortHamiltonianModel._constraint_contact_solve`](../models/port_hamiltonian.py), the implementation of the gated regularized QP and fixed ADMM solve.
-- [`TestConstraintContactForcePort`](../tests/test_model_based_generator.py), focused tests for action-aware static friction, exact clear flight, cone feasibility, differentiability, and duplicate contacts.
+- [PortHamiltonianModel._constraint_contact_solve](../models/port_hamiltonian.py), the predicted-crossing physical-stiffness implementation.
+- [tests/test_predicted_crossing_contact.py](../tests/test_predicted_crossing_contact.py), focused activation, no-precontact-force, stiffness, timestep, gradient, and checkpoint tests.

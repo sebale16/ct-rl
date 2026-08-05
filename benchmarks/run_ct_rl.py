@@ -236,11 +236,49 @@ def _pop_structured_model_kwargs(
     contact_solver = str(
         algo_kwargs.pop("dynamics_contact_solver", "") or ""
     ).strip()
+    contact_geometry = str(
+        algo_kwargs.pop("dynamics_contact_geometry", "") or ""
+    ).strip()
+    if contact_geometry:
+        model_kwargs["contact_geometry"] = contact_geometry
+    contact_gate_off = algo_kwargs.pop("dynamics_contact_gate_off", None)
     contact_dt = algo_kwargs.pop("dynamics_contact_dt", None)
     contact_iterations = algo_kwargs.pop("dynamics_contact_iterations", None)
     contact_regularization = algo_kwargs.pop(
         "dynamics_contact_regularization", None
     )
+    if contact_gate_off is not None and str(contact_gate_off).strip():
+        model_kwargs["contact_gate_off"] = float(contact_gate_off)
+
+    def _optional_contact_parameter(name: str):
+        value = str(algo_kwargs.pop(name, "") or "").strip()
+        if not value:
+            return None, False
+        lowered = value.lower()
+        if lowered in ("true", "yes"):
+            return True, True
+        if lowered in ("false", "no", "none"):
+            return None, True
+        return float(value), True
+
+    # Legacy gate-shaped c0 and the predicted-crossing physical k law are
+    # separate, mutually exclusive experiments.  A numeric stiffness is N/m;
+    # 'true' selects the model's 1e5 N/m default.
+    contact_compliance, has_compliance = _optional_contact_parameter(
+        "dynamics_contact_compliance"
+    )
+    contact_stiffness, has_stiffness = _optional_contact_parameter(
+        "dynamics_contact_stiffness"
+    )
+    contact_attenuation = str(
+        algo_kwargs.pop("dynamics_contact_attenuation", "") or ""
+    ).strip()
+    if has_compliance:
+        model_kwargs["contact_compliance"] = contact_compliance
+    if has_stiffness:
+        model_kwargs["contact_stiffness"] = contact_stiffness
+    if contact_attenuation:
+        model_kwargs["contact_attenuation"] = float(contact_attenuation)
 
     if contact_solver:
         model_kwargs["contact_solver"] = contact_solver
@@ -529,10 +567,10 @@ def run_algorithm(
         elif source == "structured":
             # Structured port-Hamiltonian (DeLaN core): learned SPD mass M(q) and
             # potential V(q) generate the Coriolis terms; canonicalizer p = M(q)qd;
-            # constant diagonal damping on momentum; optional learned contact
-            # geometry (dynamics_contact_force = number of contact points) with
-            # either the historical compliant law or the action-responsive
-            # constraint solve selected by dynamics_contact_solver. Raw
+            # constant diagonal damping on momentum; optional learned or exact
+            # contact geometry (dynamics_contact_force = number of points), with
+            # a historical penalty law, the smooth-gate constraint law, or the
+            # predicted-crossing physical-stiffness constraint prototype. Raw
             # cartpole uses its mechanics-aware layout; other raw-state envs
             # use the generic layout, and the non-raw default remains cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(

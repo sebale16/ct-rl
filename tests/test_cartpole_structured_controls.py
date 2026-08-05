@@ -195,6 +195,45 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
         self.assertEqual(dynamics_kwargs["contact_regularization"], 0.02)
         self.assertEqual(algo, {})
 
+    def test_predicted_crossing_stiffness_controls_parse_in_physical_units(self):
+        algo = {
+            "dynamics_contact_solver": "constraint",
+            "dynamics_contact_geometry": "kinematic",
+            "dynamics_contact_stiffness": "125000",
+            "dynamics_contact_attenuation": "0.3",
+            "dynamics_contact_compliance": "none",
+        }
+        dynamics_kwargs = _pop_structured_model_kwargs(
+            algo, contact_dt_default=0.002
+        )
+        self.assertEqual(
+            dynamics_kwargs,
+            {
+                "mass_logdet_reg": 0.0,
+                "mass_condition_reg": 0.0,
+                "mass_condition_limit": 1000.0,
+                "contact_geometry": "kinematic",
+                "contact_compliance": None,
+                "contact_stiffness": 125000.0,
+                "contact_attenuation": 0.3,
+                "contact_solver": "constraint",
+                "contact_dt": 0.002,
+            },
+        )
+        self.assertEqual(algo, {})
+
+        _, env, _, row, _ = load_ct_hyperparams_from_table(
+            "ct_sac", "cheetah-run", "mbq_structured_quad_stiffness_roll"
+        )
+        self.assertEqual(row["dynamics_contact_force"], 6)
+        from_row = _pop_structured_model_kwargs(
+            row, contact_dt_default=env["physics_dt"]
+        )
+        self.assertEqual(from_row["contact_geometry"], "kinematic")
+        self.assertEqual(from_row["contact_stiffness"], 100000.0)
+        self.assertEqual(from_row["contact_attenuation"], 0.2)
+        self.assertEqual(from_row["contact_dt"], 0.002)
+
     def test_recovery_uses_new_layout_but_can_load_legacy_sidecars(self):
         fresh = _select_recovery_dof_layout("cartpole", True, 4)
         legacy = _select_recovery_dof_layout(
