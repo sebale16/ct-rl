@@ -1,0 +1,115 @@
+{
+  "mujoco_reference": {
+    "steps": 3000,
+    "z0": 0.6,
+    "rest_root_z_m": -0.12678761007129613,
+    "rest_qpos": [
+      -0.013731028379186948,
+      -0.12678761007129613,
+      0.050877114752695914,
+      0.030414066446694005,
+      0.06480590343799328,
+      -0.017035430208890156,
+      -0.05390984067103142,
+      -0.13534153104403604,
+      -0.1262269673827875
+    ],
+    "rest_max_abs_qvel": 0.0005077685203241467,
+    "model_gap_at_mujoco_rest_m": [
+      -0.0005009390911663303,
+      0.1858452733989847,
+      -0.0005579719716763964,
+      0.09099388589829271,
+      0.19617142399701926,
+      0.10232514129540748
+    ],
+    "model_min_gap_at_mujoco_rest_m": -0.0005579719716763964
+  },
+  "body_weight_N": 137.34000000000003,
+  "dependency_md5": {
+    "models/port_hamiltonian.py": "359931712565a359f2f666ca9c6fea1f",
+    "evaluations/contact_compliance_probe.py": "f58589439d680abd1fc45afb545eecc7"
+  },
+  "arms": [
+    {
+      "arm": "fixed_regularizer_v1",
+      "kwargs": {},
+      "rest_min_gap_m": -5.4920349255027645e-06,
+      "rest_total_normal_force_over_weight": 0.9999994371487192,
+      "rest_max_abs_qvel": 0.00019392447936315214,
+      "steps_to_settle": 2468,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": 0.0005524799367508937
+    },
+    {
+      "arm": "predicted_crossing_k5e+04",
+      "kwargs": {
+        "contact_stiffness": 50000.0
+      },
+      "rest_min_gap_m": -0.0014460711356067968,
+      "rest_total_normal_force_over_weight": 1.0000070851542544,
+      "rest_max_abs_qvel": 0.0003095241977382064,
+      "steps_to_settle": 3159,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": -0.0008880991639304003,
+      "k_N_per_m": 50000.0,
+      "k_times_abs_gap_N": 72.30355678033985
+    },
+    {
+      "arm": "predicted_crossing_k1e+05",
+      "kwargs": {
+        "contact_stiffness": 100000.0
+      },
+      "rest_min_gap_m": -0.0007230683620468303,
+      "rest_total_normal_force_over_weight": 1.0000241477560574,
+      "rest_max_abs_qvel": 0.0022079603042717074,
+      "steps_to_settle": -1,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": -0.0001650963903704339,
+      "k_N_per_m": 100000.0,
+      "k_times_abs_gap_N": 72.30683620468304
+    },
+    {
+      "arm": "predicted_crossing_k1e+05",
+      "kwargs": {
+        "contact_stiffness": 130000.0
+      },
+      "rest_min_gap_m": -0.0005562513035950456,
+      "rest_total_normal_force_over_weight": 1.0000248251061061,
+      "rest_max_abs_qvel": 0.0031043376783154307,
+      "steps_to_settle": -1,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": 1.7206680813508513e-06,
+      "k_N_per_m": 130000.0,
+      "k_times_abs_gap_N": 72.31266946735593
+    },
+    {
+      "arm": "predicted_crossing_k2e+05",
+      "kwargs": {
+        "contact_stiffness": 200000.0
+      },
+      "rest_min_gap_m": -0.0003616796046566062,
+      "rest_total_normal_force_over_weight": 1.0000183486771708,
+      "rest_max_abs_qvel": 0.003989246087937021,
+      "steps_to_settle": -1,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": 0.00019629236701979025,
+      "k_N_per_m": 200000.0,
+      "k_times_abs_gap_N": 72.33592093132124
+    },
+    {
+      "arm": "predicted_crossing_k4e+05",
+      "kwargs": {
+        "contact_stiffness": 400000.0
+      },
+      "rest_min_gap_m": -0.00018107826677826733,
+      "rest_total_normal_force_over_weight": 1.0000068824849355,
+      "rest_max_abs_qvel": 0.0036167438887849223,
+      "steps_to_settle": -1,
+      "diverged": false,
+      "gap_error_vs_mujoco_m": 0.0003768937048981291,
+      "k_N_per_m": 400000.0,
+      "k_times_abs_gap_N": 72.43130671130693
+    }
+  ]
+}
