@@ -823,6 +823,8 @@ class PortHamiltonianModel(nn.Module):
         contact_compliance: Optional[float | bool] = None,
         contact_stiffness: Optional[float | bool] = None,
         contact_attenuation: Optional[float] = None,
+        contact_stiffness_ratio: Optional[float] = None,
+        contact_tangent_compliance: Optional[float] = None,
         device: str | th.device = "cpu",
         dof_layout: Optional[DOFLayout] = None,
         structured_hidden: Sequence[int] = (128, 128),
@@ -876,15 +878,20 @@ class PortHamiltonianModel(nn.Module):
             if self.contact_compliance is None
             else self._CONTACT_COMPLIANCE_FLOOR_FRACTION * self.contact_compliance
         )
-        # Prototype physical-compliance law.  The optimized parameter is log(k)
-        # for useful relative gradients, while the exposed constitutive quantity
-        # is k = exp(log(k)) in N/m.  Unlike ``contact_compliance``, this mode has
-        # no smooth force envelope: an exact predicted-crossing active set fixes
-        # inactive impulse blocks to zero and the active QP uses
-        # C_k = beta / (k h^2) directly.  beta is a fixed desired recovery
-        # fraction in this prototype, not another parameter for the learner to
-        # trade against k.
+        # Predicted-crossing physical-compliance laws.  The optimized per-point
+        # parameter is log(k_low) in N/m.  With no stiffness ratio this is the
+        # version-3 constant law C = beta/(k h^2).  Supplying a ratio selects the
+        # version-4 depth profile: k_sec(delta) rises monotonically from k_low to
+        # ratio*k_low through a fixed 1 mm reflected-quadratic transition.  Its
+        # normal compliance remains beta/(k_sec h^2), while a separate learned
+        # tangential velocity-level compliance avoids assigning the normal
+        # material curve to a direction with no stored deformation coordinate.
+        # Both versions retain the exact predicted-crossing active set, and beta
+        # remains fixed configuration rather than a parameter the learner can
+        # trade against stiffness.
         self._contact_stiffness_log: Optional[nn.Parameter] = None
+        self._contact_stiffness_ratio_raw: Optional[nn.Parameter] = None
+        self._contact_tangent_compliance_log: Optional[nn.Parameter] = None
         if contact_stiffness is True:
             self.contact_stiffness: Optional[float] = (
                 self._DEFAULT_CONTACT_STIFFNESS
@@ -902,6 +909,28 @@ class PortHamiltonianModel(nn.Module):
                 else float(contact_attenuation)
             )
         )
+        self.contact_stiffness_ratio: Optional[float] = (
+            None
+            if contact_stiffness_ratio is None
+            else float(contact_stiffness_ratio)
+        )
+        if (
+            contact_tangent_compliance is None
+            and self.contact_stiffness is not None
+            and self.contact_stiffness_ratio is not None
+            and np.isfinite(self.contact_stiffness)
+            and self.contact_stiffness > 0.0
+            and np.isfinite(self.contact_dt)
+            and self.contact_dt > 0.0
+        ):
+            self.contact_tangent_compliance: Optional[float] = (
+                self.contact_attenuation
+                / (self.contact_stiffness * self.contact_dt**2)
+            )
+        elif contact_tangent_compliance is not None:
+            self.contact_tangent_compliance = float(contact_tangent_compliance)
+        else:
+            self.contact_tangent_compliance = None
         self.device = th.device(device)
         self._drift_fn = drift_fn
         self.last_fit_accepted: bool = False
@@ -952,8 +981,8 @@ class PortHamiltonianModel(nn.Module):
         # of the impulse except through the ungated regularization term. A 6 cm
         # band therefore rests the model 2.6 cm above the floor no matter what
         # the constitutive parameters do. A few millimetres is the physically
-        # meaningful band for a metric gap. Version 3 does not evaluate this
-        # gate and rejects an explicitly supplied width below.
+        # meaningful band for a metric gap. Versions 3--4 do not evaluate this
+        # gate and reject an explicitly supplied width below.
         if contact_gate_off is None:
             self._contact_gate_off = (
                 self._KINEMATIC_GATE_OFF
@@ -1058,10 +1087,47 @@ class PortHamiltonianModel(nn.Module):
                     "penetration recovered per response step and must lie in "
                     f"(0, 1], got {contact_attenuation!r}"
                 )
+            if self.contact_stiffness_ratio is not None and (
+                not np.isfinite(self.contact_stiffness_ratio)
+                or self.contact_stiffness_ratio <= 1.0
+            ):
+                raise ValueError(
+                    "contact_stiffness_ratio initializes the shared high/low "
+                    "normal-stiffness ratio and must be finite and > 1, got "
+                    f"{contact_stiffness_ratio!r}"
+                )
+            if self.contact_stiffness_ratio is not None and (
+                not np.isfinite(self._CONTACT_STIFFNESS_TRANSITION_WIDTH)
+                or self._CONTACT_STIFFNESS_TRANSITION_WIDTH <= 0.0
+            ):
+                raise ValueError(
+                    "_CONTACT_STIFFNESS_TRANSITION_WIDTH must be finite and > 0"
+                )
+            if self.contact_tangent_compliance is not None and (
+                not np.isfinite(self.contact_tangent_compliance)
+                or self.contact_tangent_compliance <= 0.0
+            ):
+                raise ValueError(
+                    "contact_tangent_compliance initializes the positive "
+                    "tangential impulse-to-velocity compliance in 1/kg and must "
+                    f"be finite and > 0, got {contact_tangent_compliance!r}"
+                )
         elif contact_attenuation is not None:
             raise ValueError(
                 "contact_attenuation only applies to the predicted-crossing "
                 "contact_stiffness law"
+            )
+        elif contact_stiffness_ratio is not None:
+            raise ValueError(
+                "contact_stiffness_ratio requires contact_stiffness"
+            )
+        if (
+            contact_tangent_compliance is not None
+            and self.contact_stiffness_ratio is None
+        ):
+            raise ValueError(
+                "contact_tangent_compliance applies to the depth-dependent "
+                "contact_stiffness_ratio law"
             )
 
         if self.mode == "mujoco":
@@ -1243,11 +1309,13 @@ class PortHamiltonianModel(nn.Module):
             # Version 0 is the historical compliant penalty law. Version 1 is
             # the action-conditioned constraint solve below. Version 2 is that
             # same solve with the gate-shaped compliance. Version 3 is the
-            # predicted-crossing active set with physical stiffness in N/m.
+            # predicted-crossing active set with constant physical stiffness in
+            # N/m. Version 4 adds the two-plateau normal stiffness curve and an
+            # independent learned tangential compliance.
             # These are force laws, not orthogonal flags, so one marker records
             # the complete QP semantics a sidecar was trained with.
             solver_version = (
-                3
+                (4 if self.contact_stiffness_ratio is not None else 3)
                 if self.contact_stiffness is not None
                 else (
                     2
@@ -1260,20 +1328,30 @@ class PortHamiltonianModel(nn.Module):
                 th.tensor(solver_version, dtype=th.int64),
             )
             if self.contact_stiffness is not None:
-                # C_k contains h^-2, so a version-3 sidecar must carry the
+                # C_k contains h^-2, so a physical-stiffness sidecar carries the
                 # response horizon that defined its discrete constitutive law.
                 # Loading restores the Python attribute from this buffer below.
                 self.register_buffer(
                     "_contact_response_dt",
                     th.tensor(self.contact_dt, dtype=th.float64),
                 )
-                # beta is a fixed design choice for version 3. Persist it beside
+                # beta is a fixed design choice for versions 3--4. Persist it beside
                 # h so a checkpoint cannot silently acquire different recovery
                 # dynamics when reconstructed from another configuration row.
                 self.register_buffer(
                     "_contact_attenuation",
                     th.tensor(self.contact_attenuation, dtype=th.float64),
                 )
+                if self.contact_stiffness_ratio is not None:
+                    # The transition width defines the depth coordinate of the
+                    # version-4 constitutive curve and is checkpoint identity.
+                    self.register_buffer(
+                        "_contact_transition_width",
+                        th.tensor(
+                            self._CONTACT_STIFFNESS_TRANSITION_WIDTH,
+                            dtype=th.float64,
+                        ),
+                    )
             if self.contact_solver == "compliant":
                 # Historical semantics and initialization, kept bit-for-bit:
                 # positive stiffness k, compression damping c, and friction mu
@@ -1292,7 +1370,7 @@ class PortHamiltonianModel(nn.Module):
                     ]
                 )
             else:
-                # Version 3 learns restitution and friction, but not beta.  A
+                # Versions 3--4 learn restitution and friction, with fixed beta. A
                 # two-row tensor prevents the fixed recovery fraction from
                 # appearing as an unused trainable parameter in the optimizer.
                 raw = th.stack(
@@ -1329,6 +1407,18 @@ class PortHamiltonianModel(nn.Module):
                         float(np.log(self.contact_stiffness)),
                     )
                 )
+                if self.contact_stiffness_ratio is not None:
+                    self._contact_stiffness_ratio_raw = nn.Parameter(
+                        th.tensor(
+                            _inverse_softplus(self.contact_stiffness_ratio - 1.0)
+                        )
+                    )
+                    self._contact_tangent_compliance_log = nn.Parameter(
+                        th.full(
+                            (self.contact_force,),
+                            float(np.log(self.contact_tangent_compliance)),
+                        )
+                    )
             onehot = th.zeros(nv)
             onehot[layout.contact_tangent_cfg] = 1.0
             self.register_buffer("_tangent_onehot", onehot)
@@ -1373,7 +1463,8 @@ class PortHamiltonianModel(nn.Module):
         Legacy versions keep these buffers non-persistent because they are a
         restatement of ``layout.contact_points``.  The physical-stiffness
         prototype persists them: its metre/N semantics would otherwise permit a
-        version-3 sidecar to load against changed radii or offsets silently.
+        version-3 or version-4 sidecar to load against changed radii or offsets
+        silently.
 
         Chains of different depth are right-padded to the deepest chain L with a
         zero offset, which contributes nothing to either the point position or
@@ -1811,8 +1902,13 @@ class PortHamiltonianModel(nn.Module):
     # point it gives 0.7 mm static deformation; callers can provide another
     # positive N/m value without changing the law.
     _DEFAULT_CONTACT_STIFFNESS: float = 1.0e5
+    # Version-4 normal stiffness rises through the same one-millimetre depth
+    # scale as MuJoCo's default contact impedance. The reflected quadratic used
+    # below is monotone, reaches both plateaus with zero endpoint slope, and is
+    # fixed configuration rather than a learned shape parameter.
+    _CONTACT_STIFFNESS_TRANSITION_WIDTH: float = 1.0e-3
     # Fixed desired fraction of existing penetration removed over one contact
-    # response horizon in solver version 3. This is configuration, not a fit
+    # response horizon in solver versions 3--4. This is configuration, not a fit
     # parameter; callers may override it explicitly in (0, 1].
     _DEFAULT_CONTACT_ATTENUATION: float = 0.2
 
@@ -1917,6 +2013,45 @@ class PortHamiltonianModel(nn.Module):
         # quiet enough not to perturb the fresh model while still trainable.
         return u.pow(3) * (10.0 - 15.0 * u + 6.0 * u.square())
 
+    def _normal_stiffness_curve(
+        self, penetration: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """Version-4 two-plateau normal secant stiffness in N/m.
+
+        ``penetration`` is the incoming geometric depth in metres. The reflected
+        quadratic is MuJoCo-shaped: it rises monotonically through the persisted
+        one-millimetre width, has zero slope where it meets each plateau, and is
+        evaluated before the QP so the solve remains quadratic. Returns the
+        per-point shallow stiffness, shared ratio, transition coordinate, and
+        batch-dependent effective stiffness.
+        """
+        assert self._contact_stiffness_log is not None
+        assert self._contact_stiffness_ratio_raw is not None
+        width = self._contact_transition_width.to(
+            dtype=penetration.dtype, device=penetration.device
+        )
+        u = (penetration / width).clamp(0.0, 1.0)
+        transition = th.where(
+            u <= 0.5,
+            2.0 * u.square(),
+            1.0 - 2.0 * (1.0 - u).square(),
+        )
+        shallow_stiffness = th.exp(self._contact_stiffness_log).to(
+            dtype=penetration.dtype, device=penetration.device
+        )
+        stiffness_ratio = 1.0 + th.nn.functional.softplus(
+            self._contact_stiffness_ratio_raw
+        ).to(dtype=penetration.dtype, device=penetration.device)
+        effective_stiffness = shallow_stiffness * (
+            1.0 + (stiffness_ratio - 1.0) * transition
+        )
+        return (
+            shallow_stiffness,
+            stiffness_ratio,
+            transition,
+            effective_stiffness,
+        )
+
     @staticmethod
     def _project_contact_cones(
         impulse: th.Tensor, mu: th.Tensor
@@ -1988,6 +2123,10 @@ class PortHamiltonianModel(nn.Module):
         contact_v_free = th.einsum("ncv,nv->nc", J, qd_free).reshape(B, K, 2)
 
         physical_stiffness = None
+        shallow_stiffness = None
+        stiffness_ratio = None
+        stiffness_transition = None
+        tangent_compliance = None
         predicted_gap_free = g + dt * contact_v_free[..., 0]
         if self._contact_stiffness_log is None:
             gate = self._contact_gate(g)
@@ -2000,12 +2139,23 @@ class PortHamiltonianModel(nn.Module):
             # to exact zero, so a hovering foot cannot manufacture friction.
             active_contact = (g <= 0.0) | (predicted_gap_free <= 0.0)
             gate = active_contact.to(dtype=qd.dtype)
-            physical_stiffness = th.exp(self._contact_stiffness_log).to(
-                dtype=qd.dtype, device=qd.device
-            )
+            if self._contact_stiffness_ratio_raw is None:
+                physical_stiffness = th.exp(self._contact_stiffness_log).to(
+                    dtype=qd.dtype, device=qd.device
+                )
+            else:
+                (
+                    shallow_stiffness,
+                    stiffness_ratio,
+                    stiffness_transition,
+                    physical_stiffness,
+                ) = self._normal_stiffness_curve(th.relu(-g))
+                tangent_compliance = th.exp(
+                    self._contact_tangent_compliance_log
+                ).to(dtype=qd.dtype, device=qd.device)
 
         # Legacy penetration recovery is velocity-capped so a bad learned-gap
-        # state cannot request an unbounded kick.  Version 3 deliberately does
+        # state cannot request an unbounded kick. Versions 3--4 deliberately do
         # not cap it: capping beta*delta/h while retaining
         # C=beta/(k*h^2) would break the advertised F=k*delta law for deep
         # penetration.  The physical-stiffness prototype also puts positive
@@ -2039,7 +2189,7 @@ class PortHamiltonianModel(nn.Module):
         physical_bias = th.stack((normal_bias, tangent_bias), dim=-1)
 
         # Versions 1--2 use z as a latent impulse and gate*z as the physical
-        # impulse.  In version 3 ``gate`` is the binary active-set indicator,
+        # impulse. In versions 3--4 ``gate`` is the binary active-set indicator,
         # z is already physical, and the same multiplication is the inactive
         # equality A Lambda = Lambda.  In both cases the repeated pair scale
         # preserves each contact's normal/tangential block.
@@ -2051,7 +2201,7 @@ class PortHamiltonianModel(nn.Module):
         W = 0.5 * (W + W.transpose(1, 2))
 
         # Legacy versions scale their numerical diagonal with the ungated
-        # Delassus matrix.  Version 3 uses ``scale`` only as the all-inactive
+        # Delassus matrix. Versions 3--4 use ``scale`` only as the all-inactive
         # ADMM fallback; its target curvature is the physical C_k diagonal.
         W_full = th.bmm(J, M_inv_Jt_full)
         scale = (
@@ -2072,16 +2222,27 @@ class PortHamiltonianModel(nn.Module):
             #   Lambda_i in K_mu for active blocks, Lambda_i = 0 otherwise.
             #
             # A is the binary predicted-crossing mask, repeated over a point's
-            # normal/tangent slots.  The constitutive diagonal is not a learned
-            # latent number and has no mechanical scale factor:
-            # C_k = beta/(k h^2) follows algebraically from requiring the static
-            # force to be F=k*delta under the position target
-            # v*_n=beta*delta/h. ``contact_regularization`` is absent from this
-            # physical objective; ADMM's rho below is algorithmic only.
+            # normal/tangent slots. The normal diagonal
+            # C_n = beta/(K_sec(delta) h^2) follows algebraically from requiring
+            # F_n=K_sec(delta)*delta under v*_n=beta*delta/h. Version 3 uses a
+            # constant K_sec and ties the tangent slot to C_n. Version 4 evaluates
+            # the two-plateau K_sec from incoming penetration and supplies an
+            # independent learned tangent compliance. ``contact_regularization``
+            # is absent from this physical objective; ADMM's rho is algorithmic.
             physical_compliance = beta / (physical_stiffness * dt.square())
-            compliance_pair = physical_compliance.unsqueeze(-1).expand(K, 2).reshape(
-                2 * K
+            normal_compliance_batch = (
+                physical_compliance.unsqueeze(0).expand(B, -1)
+                if physical_compliance.ndim == 1
+                else physical_compliance
             )
+            tangent_compliance_batch = (
+                normal_compliance_batch
+                if tangent_compliance is None
+                else tangent_compliance.unsqueeze(0).expand(B, -1)
+            )
+            compliance_pair = th.stack(
+                (normal_compliance_batch, tangent_compliance_batch), dim=-1
+            ).reshape(B, 2 * K)
             H = W + th.diag_embed(compliance_pair)
             rho_diag = H.diagonal(dim1=-2, dim2=-1)
             hard_active_pair = gate_pair
@@ -2243,19 +2404,25 @@ class PortHamiltonianModel(nn.Module):
             # exactly the keys it always did.
             extra["compliance_c0"] = c0_pair.reshape(K, 2)[:, 0]
         if physical_stiffness is not None:
-            extra.update(
-                {
-                    "active_contact": active_contact,
-                    "predicted_gap_free": predicted_gap_free,
-                    "contact_stiffness": physical_stiffness,
-                    "physical_compliance": physical_compliance,
-                    "normal_velocity_target": (
-                        -clearance_bias
-                        - stabilization_bias
-                        - restitution_bias
+            extra.update({
+                "active_contact": active_contact,
+                "predicted_gap_free": predicted_gap_free,
+                "contact_stiffness": physical_stiffness,
+                "physical_compliance": physical_compliance,
+                "normal_velocity_target": (
+                    -clearance_bias - stabilization_bias - restitution_bias
+                ),
+            })
+            if shallow_stiffness is not None:
+                extra.update({
+                    "contact_stiffness_low": shallow_stiffness,
+                    "contact_stiffness_high": (
+                        shallow_stiffness * stiffness_ratio
                     ),
-                }
-            )
+                    "contact_stiffness_ratio": stiffness_ratio,
+                    "contact_stiffness_transition": stiffness_transition,
+                    "tangent_compliance": tangent_compliance,
+                })
         return {
             **extra,
             "gap": g,
@@ -2509,9 +2676,10 @@ class PortHamiltonianModel(nn.Module):
         gap/tangent pair, which is exactly what a learned-configured model
         wants and what a kinematic-configured model is refused.
 
-        Solver versions 2 (gate-shaped compliance) and 3 (predicted crossing
-        with physical stiffness) add different learned parameters and different
-        QP semantics.  Neither can be silently converted to another version.
+        Solver versions 2 (gate-shaped compliance), 3 (predicted crossing with
+        constant physical stiffness), and 4 (two-plateau normal stiffness with
+        separate tangential compliance) carry distinct learned parameters and
+        QP semantics. They require matching model construction.
         """
         incoming = state_dict
         if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
@@ -2529,20 +2697,38 @@ class PortHamiltonianModel(nn.Module):
                         "contact solver version marker must contain one scalar"
                     )
                 version = int(marker.detach().cpu().item())
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError(f"unsupported contact solver version {version}")
-            if version == 3:
+            if version in (3, 4):
+                response_dt_name = "_contact_response_dt"
+                if response_dt_name not in state_dict:
+                    raise RuntimeError(
+                        f"version-{version} contact sidecar is missing its fixed "
+                        "contact response interval"
+                    )
+                response_dt = th.as_tensor(state_dict[response_dt_name])
+                if response_dt.numel() != 1:
+                    raise RuntimeError(
+                        f"version-{version} contact response interval must "
+                        "contain one scalar"
+                    )
+                response_dt_value = float(response_dt.detach().cpu().item())
+                if not np.isfinite(response_dt_value) or response_dt_value <= 0.0:
+                    raise RuntimeError(
+                        f"version-{version} contact response interval must be "
+                        f"finite and > 0, got {response_dt_value!r}"
+                    )
                 attenuation_name = "_contact_attenuation"
                 if attenuation_name not in state_dict:
                     raise RuntimeError(
-                        "version-3 contact sidecar is missing its fixed "
+                        f"version-{version} contact sidecar is missing its fixed "
                         "penetration-recovery fraction; provisional sidecars "
                         "with learned beta cannot be reinterpreted"
                     )
                 attenuation = th.as_tensor(state_dict[attenuation_name])
                 if attenuation.numel() != 1:
                     raise RuntimeError(
-                        "version-3 contact attenuation must contain one scalar"
+                        f"version-{version} contact attenuation must contain one scalar"
                     )
                 attenuation_value = float(attenuation.detach().cpu().item())
                 if (
@@ -2550,20 +2736,38 @@ class PortHamiltonianModel(nn.Module):
                     or not 0.0 < attenuation_value <= 1.0
                 ):
                     raise RuntimeError(
-                        "version-3 contact attenuation must lie in (0, 1], got "
+                        f"version-{version} contact attenuation must lie in (0, 1], got "
                         f"{attenuation_value!r}"
+                    )
+            if version == 4:
+                width_name = "_contact_transition_width"
+                if width_name not in state_dict:
+                    raise RuntimeError(
+                        "version-4 contact sidecar is missing its fixed normal-"
+                        "stiffness transition width"
+                    )
+                width = th.as_tensor(state_dict[width_name])
+                if width.numel() != 1:
+                    raise RuntimeError(
+                        "version-4 contact transition width must contain one scalar"
+                    )
+                width_value = float(width.detach().cpu().item())
+                if not np.isfinite(width_value) or width_value <= 0.0:
+                    raise RuntimeError(
+                        "version-4 contact transition width must be finite and > 0, "
+                        f"got {width_value!r}"
                     )
             # Versions 0 and 1 read the same parameters and only differ in how
             # they are used, so a disagreement is still flipped silently.
-            # Versions 2 and 3 respectively add ``_contact_compliance_raw`` and
-            # ``_contact_stiffness_log``.  A mismatch would leave an optimizer
-            # tracking the wrong tensor set even if strict loading were relaxed.
+            # Versions 2--4 add distinct parameter inventories. A mismatch would
+            # leave an optimizer tracking the wrong tensor set even if strict
+            # loading were relaxed.
             constructed_version = (
-                3
+                (4 if self.contact_stiffness_ratio is not None else 3)
                 if self.contact_stiffness is not None
                 else (2 if self.contact_compliance is not None else None)
             )
-            if version in (2, 3) or constructed_version in (2, 3):
+            if version in (2, 3, 4) or constructed_version in (2, 3, 4):
                 expected = constructed_version
                 if version != expected:
                     written = {
@@ -2571,10 +2775,16 @@ class PortHamiltonianModel(nn.Module):
                         1: "a fixed-regularizer constraint",
                         2: "a gate-shaped-compliance",
                         3: "a predicted-crossing physical-stiffness",
+                        4: "a predicted-crossing two-plateau-stiffness",
                     }[version]
                     want = {
                         2: "contact_compliance=<c0>, contact_stiffness=None",
                         3: "contact_stiffness=<N/m>, contact_compliance=None",
+                        4: (
+                            "contact_stiffness=<N/m>, "
+                            "contact_stiffness_ratio=<ratio>, "
+                            "contact_compliance=None"
+                        ),
                     }.get(expected, "contact_compliance=None, contact_stiffness=None")
                     raise RuntimeError(
                         "contact law mismatch: this model was constructed with "
@@ -2638,9 +2848,25 @@ class PortHamiltonianModel(nn.Module):
             self.contact_attenuation = float(
                 self._contact_attenuation.detach().cpu().item()
             )
+        if self._contact_stiffness_ratio_raw is not None:
+            self.contact_stiffness_ratio = float(
+                (
+                    1.0
+                    + th.nn.functional.softplus(
+                        self._contact_stiffness_ratio_raw.detach()
+                    )
+                ).cpu().item()
+            )
+        if self._contact_tangent_compliance_log is not None:
+            self.contact_tangent_compliance = float(
+                th.exp(self._contact_tangent_compliance_log.detach())
+                .mean()
+                .cpu()
+                .item()
+            )
         if self.contact_force > 0 and hasattr(self, "_contact_solver_version"):
             self._contact_solver_version.fill_(
-                3
+                (4 if self.contact_stiffness_ratio is not None else 3)
                 if self.contact_stiffness is not None
                 else (
                     2

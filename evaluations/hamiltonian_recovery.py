@@ -17,10 +17,11 @@ accurate on the strength of one alone:
 Physical recovery fixes two gauge freedoms first:
 
   * global scale: M -> cM, V -> cV, D -> cD, G_a -> cG_a leaves the flow
-    invariant (the Coriolis force scales with M automatically). The version-3
-    contact law adds k -> ck to the same gauge. One scalar c* is fit on the mass
-    matrices and applied to every learned term. No per-term scales are fit:
-    that would hide inconsistent attribution.
+    invariant (the Coriolis force scales with M automatically). Contact solver
+    versions 3--4 add K -> cK and C -> C/c to the same gauge, with the stiffness
+    ratio unchanged. One scalar c* is fit on the mass matrices and applied to
+    every learned term. No per-term scales are fit: that would hide inconsistent
+    attribution.
   * potential offset: V and V + const generate the same flow.
 
 After c* is fixed, only the potential (and total energy) retain an offset
@@ -60,7 +61,9 @@ Usage (model trained by an RL run, saved by the CTSAC checkpoint sidecar):
         --dynamics_path saved_models/.../best_model.dynamics.pth --contact_force 6 \
         --contact_solver constraint --contact_geometry kinematic \
         --contact_stiffness 100000 --contact_attenuation 0.2 \
-        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_stiffness_roll] \
+        --contact_stiffness_ratio 2.228395061728395 \
+        --contact_tangent_compliance 0.5 \
+        [--checkpoint saved_models/.../best_model.pth --mode mbq_structured_quad_stiffness_curve_roll] \
         [--best_checkpoint saved_models/.../peak_model.pth]
 
 ``--checkpoint`` rolls the saved policy to collect the evaluation states (the
@@ -409,6 +412,32 @@ def learned_terms(
             out["contact_stiffness"] = (
                 None if log_k is None else th.exp(log_k.detach()).numpy()
             )
+            ratio_raw = getattr(m, "_contact_stiffness_ratio_raw", None)
+            out["contact_stiffness_ratio"] = (
+                None
+                if ratio_raw is None
+                else float(
+                    (1.0 + th.nn.functional.softplus(ratio_raw.detach()))
+                    .cpu()
+                    .item()
+                )
+            )
+            out["contact_stiffness_high"] = (
+                None
+                if out["contact_stiffness_ratio"] is None
+                else out["contact_stiffness"] * out["contact_stiffness_ratio"]
+            )
+            tangent_log = getattr(m, "_contact_tangent_compliance_log", None)
+            out["contact_tangent_compliance"] = (
+                None
+                if tangent_log is None
+                else th.exp(tangent_log.detach()).numpy()
+            )
+            out["contact_transition_width"] = (
+                None
+                if not hasattr(m, "_contact_transition_width")
+                else float(m._contact_transition_width.detach().cpu().item())
+            )
             out["contact_attenuation"] = (
                 None
                 if log_k is None
@@ -467,6 +496,14 @@ def learned_terms(
                 ):
                     if key in diagnostics:
                         out[f"contact_{key}"] = as_numpy(diagnostics[key])
+                if "contact_stiffness" in diagnostics:
+                    out["contact_effective_stiffness"] = as_numpy(
+                        diagnostics["contact_stiffness"]
+                    )
+                if "contact_stiffness_transition" in diagnostics:
+                    out["contact_stiffness_transition"] = as_numpy(
+                        diagnostics["contact_stiffness_transition"]
+                    )
 
                 J_n = diagnostics["J_n"]
                 J_t = diagnostics["J_t"]
@@ -818,9 +855,14 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
     if learned.get("contact_solver") == "constraint":
         is_predicted_crossing = "contact_active_contact" in learned
         rep["contact_formulation"] = (
-            "predicted_crossing_stiffness"
-            if is_predicted_crossing
-            else "constraint"
+            "predicted_crossing_stiffness_curve"
+            if "contact_effective_stiffness" in learned
+            and learned.get("contact_stiffness_ratio") is not None
+            else (
+                "predicted_crossing_stiffness"
+                if is_predicted_crossing
+                else "constraint"
+            )
         )
         gap = np.asarray(learned["contact_gap"], np.float64)
         gate = np.asarray(learned["contact_gate"], np.float64)
@@ -992,11 +1034,61 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
             None if stiffness is None
             else float(c * np.asarray(stiffness, np.float64).mean())
         )
+        stiffness_high = learned.get("contact_stiffness_high")
+        rep["contact_stiffness_high"] = (
+            None
+            if stiffness_high is None
+            else np.asarray(stiffness_high, np.float64).reshape(-1).tolist()
+        )
+        rep["contact_stiffness_high_gauge_aligned"] = (
+            None
+            if stiffness_high is None
+            else (c * np.asarray(stiffness_high, np.float64)).reshape(-1).tolist()
+        )
+        rep["contact_stiffness_ratio"] = learned.get("contact_stiffness_ratio")
+        rep["contact_transition_width"] = learned.get("contact_transition_width")
+        effective_stiffness = learned.get("contact_effective_stiffness")
+        rep["contact_effective_stiffness_mean"] = (
+            None
+            if effective_stiffness is None
+            else float(np.asarray(effective_stiffness, np.float64).mean())
+        )
+        rep["contact_effective_stiffness_gauge_aligned_mean"] = (
+            None
+            if effective_stiffness is None
+            else float(c * np.asarray(effective_stiffness, np.float64).mean())
+        )
+        transition = learned.get("contact_stiffness_transition")
+        rep["contact_stiffness_transition_mean"] = (
+            None
+            if transition is None
+            else float(np.asarray(transition, np.float64).mean())
+        )
+        tangent_compliance = learned.get("contact_tangent_compliance")
+        rep["contact_tangent_compliance"] = (
+            None
+            if tangent_compliance is None
+            else np.asarray(tangent_compliance, np.float64).reshape(-1).tolist()
+        )
+        rep["contact_tangent_compliance_gauge_aligned"] = (
+            None
+            if tangent_compliance is None
+            else (
+                np.asarray(tangent_compliance, np.float64) / c
+            ).reshape(-1).tolist()
+        )
         rep["contact_attenuation"] = learned.get("contact_attenuation")
         compliance = learned.get("contact_physical_compliance")
         rep["contact_physical_compliance"] = (
             None if compliance is None
             else np.asarray(compliance, np.float64).reshape(-1).tolist()
+        )
+        rep["contact_physical_compliance_gauge_aligned"] = (
+            None
+            if compliance is None
+            else (
+                np.asarray(compliance, np.float64) / c
+            ).reshape(-1).tolist()
         )
         if compliance is not None and stiffness is not None:
             fixed_beta = learned.get("contact_attenuation")
@@ -1015,6 +1107,11 @@ def recovery_report(truth: dict, learned: dict, actions=None, dt=None,
             recovered_k = beta_values / (
                 compliance_values * float(learned["contact_dt"]) ** 2
             )
+            rep["contact_effective_stiffness_from_normal_compliance"] = (
+                recovered_k.tolist()
+            )
+            # Preserve the version-3 audit schema while exposing the more precise
+            # name needed when version 4 varies the effective stiffness by state.
             rep["contact_stiffness_from_compliance"] = recovered_k.tolist()
         rep["contact_normal_impulse_min"] = float(normal_impulse.min())
         rep["contact_tangent_impulse_abs_max"] = float(
@@ -1424,7 +1521,8 @@ def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
               contact_geometry="learned", contact_gate_off=None, contact_dt=None,
               contact_iterations=12, contact_regularization=0.01,
               contact_compliance=None, contact_stiffness=None,
-              contact_attenuation=None, freeze_c0=False,
+              contact_attenuation=None, contact_stiffness_ratio=None,
+              contact_tangent_compliance=None, freeze_c0=False,
               hidden=(128, 128), seed=1, log_every=1000, dof_layout=None,
               integration_step=None, mass_logdet_reg=0.0,
               mass_condition_reg=0.0, mass_condition_limit=1e3):
@@ -1444,6 +1542,8 @@ def fit_model(env, O, A, NO, DT, DN, steps, horizon, batch=128, lr=1e-3,
                              contact_compliance=contact_compliance,
                              contact_stiffness=contact_stiffness,
                              contact_attenuation=contact_attenuation,
+                             contact_stiffness_ratio=contact_stiffness_ratio,
+                             contact_tangent_compliance=contact_tangent_compliance,
                              dof_layout=dof_layout,
                              mass_logdet_reg=mass_logdet_reg,
                              mass_condition_reg=mass_condition_reg,
@@ -1600,7 +1700,9 @@ def _print_primary(axes: dict):
         if "contact_impulse_rel_err" in rep:
             print(f"  impulse rel err             : {rep['contact_impulse_rel_err']:.3f}")
     if rep.get("contact_formulation") in (
-        "constraint", "predicted_crossing_stiffness"
+        "constraint",
+        "predicted_crossing_stiffness",
+        "predicted_crossing_stiffness_curve",
     ):
         print(f"  active contact / gate mean  : {rep['contact_active_frac']:.2f}"
               f" / {rep['contact_gate_mean']:.2f}")
@@ -1629,6 +1731,17 @@ def _print_primary(axes: dict):
         if "contact_impulse_rel_err" in rep:
             print(f"  transition impulse rel err  : "
                   f"{rep['contact_impulse_rel_err']:.3f}")
+        if rep.get("contact_stiffness_ratio") is not None:
+            print(f"  stiffness low / high        : "
+                  f"{rep['contact_stiffness_gauge_aligned']}"
+                  f" / {rep['contact_stiffness_high_gauge_aligned']}")
+            print(f"  stiffness ratio / width     : "
+                  f"{rep['contact_stiffness_ratio']:.6g}"
+                  f" / {rep['contact_transition_width']:.6g} m")
+            print(f"  effective stiffness c*.mean : "
+                  f"{rep['contact_effective_stiffness_gauge_aligned_mean']:.6g}")
+            print(f"  tangent compliance / c*     : "
+                  f"{rep['contact_tangent_compliance_gauge_aligned']}")
     print(f"damping rel err / locked R^2  : {rep['damping_rel_err']:.3f}"
           f" / {rep['damping_locked_R2']:.3f}")
     print(f"  learned c*.softplus(log_d)  : {rep['damping_learned']}")
@@ -1793,6 +1906,17 @@ def main():
              "requests to recover per contact response step (default 0.2); "
              "this value is persisted and is not learned",
     )
+    p.add_argument(
+        "--contact_stiffness_ratio", type=float, default=None,
+        help="initial shared high/low normal-stiffness ratio; supplying it "
+             "selects the version-4 fixed-width depth curve",
+    )
+    p.add_argument(
+        "--contact_tangent_compliance", type=float, default=None,
+        help="initial per-point tangential impulse-to-velocity compliance in "
+             "1/kg for the version-4 depth curve; the default matches the "
+             "initial shallow normal compliance",
+    )
     p.add_argument("--checkpoint", default=None,
                    help="RL checkpoint (*.pth): its policy collects the "
                         "on-policy data and its V-head enables the "
@@ -1839,6 +1963,8 @@ def main():
     contact_compliance = _parse_contact_compliance(args.contact_compliance)
     contact_stiffness = _parse_contact_stiffness(args.contact_stiffness)
     contact_attenuation = args.contact_attenuation
+    contact_stiffness_ratio = args.contact_stiffness_ratio
+    contact_tangent_compliance = args.contact_tangent_compliance
 
     def _load_policy(path):
         from common.utils import load_ct_hyperparams_from_table
@@ -1886,6 +2012,8 @@ def main():
                                  contact_compliance=contact_compliance,
                                  contact_stiffness=contact_stiffness,
                                  contact_attenuation=contact_attenuation,
+                                 contact_stiffness_ratio=contact_stiffness_ratio,
+                                 contact_tangent_compliance=contact_tangent_compliance,
                                  dof_layout=layout,
                                  mass_logdet_reg=args.mass_logdet_reg,
                                  mass_condition_reg=args.mass_condition_reg,
@@ -1908,6 +2036,8 @@ def main():
                       contact_compliance=contact_compliance,
                       contact_stiffness=contact_stiffness,
                       contact_attenuation=contact_attenuation,
+                      contact_stiffness_ratio=contact_stiffness_ratio,
+                      contact_tangent_compliance=contact_tangent_compliance,
                       freeze_c0=args.freeze_c0,
                       seed=args.seed + 1,
                       dof_layout=layout,

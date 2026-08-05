@@ -261,9 +261,11 @@ def _pop_structured_model_kwargs(
             return None, True
         return float(value), True
 
-    # Legacy gate-shaped c0 and the predicted-crossing physical k law are
-    # separate, mutually exclusive experiments.  A numeric stiffness is N/m;
-    # 'true' selects the model's 1e5 N/m default.
+    # Legacy gate-shaped c0 and the predicted-crossing physical k laws are
+    # separate, mutually exclusive experiments. A numeric stiffness is N/m;
+    # 'true' selects the model's 1e5 N/m default. A numeric stiffness ratio
+    # selects the version-4 depth curve; tangent compliance is its independent
+    # positive velocity-level QP softness in 1/kg.
     contact_compliance, has_compliance = _optional_contact_parameter(
         "dynamics_contact_compliance"
     )
@@ -273,12 +275,42 @@ def _pop_structured_model_kwargs(
     contact_attenuation = str(
         algo_kwargs.pop("dynamics_contact_attenuation", "") or ""
     ).strip()
+    contact_stiffness_ratio_value = algo_kwargs.pop(
+        "dynamics_contact_stiffness_ratio", ""
+    )
+    contact_stiffness_ratio = (
+        ""
+        if contact_stiffness_ratio_value is None
+        else str(contact_stiffness_ratio_value).strip()
+    )
+    contact_tangent_compliance_value = algo_kwargs.pop(
+        "dynamics_contact_tangent_compliance", ""
+    )
+    contact_tangent_compliance = (
+        ""
+        if contact_tangent_compliance_value is None
+        else str(contact_tangent_compliance_value).strip()
+    )
     if has_compliance:
         model_kwargs["contact_compliance"] = contact_compliance
     if has_stiffness:
         model_kwargs["contact_stiffness"] = contact_stiffness
     if contact_attenuation:
         model_kwargs["contact_attenuation"] = float(contact_attenuation)
+    if contact_stiffness_ratio:
+        if contact_stiffness_ratio.lower() in (
+            "true", "yes", "false", "no", "none"
+        ):
+            raise ValueError("dynamics_contact_stiffness_ratio must be numeric")
+        model_kwargs["contact_stiffness_ratio"] = float(contact_stiffness_ratio)
+    if contact_tangent_compliance:
+        if contact_tangent_compliance.lower() in (
+            "true", "yes", "false", "no", "none"
+        ):
+            raise ValueError("dynamics_contact_tangent_compliance must be numeric")
+        model_kwargs["contact_tangent_compliance"] = float(
+            contact_tangent_compliance
+        )
 
     if contact_solver:
         model_kwargs["contact_solver"] = contact_solver
@@ -570,7 +602,7 @@ def run_algorithm(
             # constant diagonal damping on momentum; optional learned or exact
             # contact geometry (dynamics_contact_force = number of points), with
             # a historical penalty law, the smooth-gate constraint law, or the
-            # predicted-crossing physical-stiffness constraint prototype. Raw
+            # predicted-crossing physical-stiffness constraint prototypes. Raw
             # cartpole uses its mechanics-aware layout; other raw-state envs
             # use the generic layout, and the non-raw default remains cheetah's.
             algo_kwargs["dynamics_model"] = PortHamiltonianModel(

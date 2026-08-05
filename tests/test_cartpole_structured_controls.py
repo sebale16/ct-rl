@@ -201,6 +201,8 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
             "dynamics_contact_geometry": "kinematic",
             "dynamics_contact_stiffness": "125000",
             "dynamics_contact_attenuation": "0.3",
+            "dynamics_contact_stiffness_ratio": "2.25",
+            "dynamics_contact_tangent_compliance": "0.4",
             "dynamics_contact_compliance": "none",
         }
         dynamics_kwargs = _pop_structured_model_kwargs(
@@ -216,6 +218,8 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
                 "contact_compliance": None,
                 "contact_stiffness": 125000.0,
                 "contact_attenuation": 0.3,
+                "contact_stiffness_ratio": 2.25,
+                "contact_tangent_compliance": 0.4,
                 "contact_solver": "constraint",
                 "contact_dt": 0.002,
             },
@@ -233,6 +237,36 @@ class TestCartpoleLayoutSelection(unittest.TestCase):
         self.assertEqual(from_row["contact_stiffness"], 100000.0)
         self.assertEqual(from_row["contact_attenuation"], 0.2)
         self.assertEqual(from_row["contact_dt"], 0.002)
+
+        _, env, _, curve_row, _ = load_ct_hyperparams_from_table(
+            "ct_sac", "cheetah-run", "mbq_structured_quad_stiffness_curve_roll"
+        )
+        curve = _pop_structured_model_kwargs(
+            curve_row, contact_dt_default=env["physics_dt"]
+        )
+        self.assertAlmostEqual(curve["contact_stiffness_ratio"], 2.228395061728395)
+        self.assertEqual(curve["contact_tangent_compliance"], 0.5)
+
+        for field in (
+            "dynamics_contact_stiffness_ratio",
+            "dynamics_contact_tangent_compliance",
+        ):
+            with self.subTest(field=field):
+                invalid = {field: "true"}
+                with self.assertRaisesRegex(ValueError, "must be numeric"):
+                    _pop_structured_model_kwargs(
+                        invalid, contact_dt_default=0.002
+                    )
+
+        numeric_zero = _pop_structured_model_kwargs(
+            {
+                "dynamics_contact_stiffness_ratio": 0,
+                "dynamics_contact_tangent_compliance": 0,
+            },
+            contact_dt_default=0.002,
+        )
+        self.assertEqual(numeric_zero["contact_stiffness_ratio"], 0.0)
+        self.assertEqual(numeric_zero["contact_tangent_compliance"], 0.0)
 
     def test_recovery_uses_new_layout_but_can_load_legacy_sidecars(self):
         fresh = _select_recovery_dof_layout("cartpole", True, 4)

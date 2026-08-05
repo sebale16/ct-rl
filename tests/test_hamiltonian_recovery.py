@@ -435,6 +435,47 @@ class TestRecoveryEndToEnd(unittest.TestCase):
         self.assertEqual(m.contact_iterations, 5)
         self.assertEqual(m.contact_regularization, 0.02)
 
+        curve = fit_model(
+            env, O, A, NO, DT, DN, steps=0, horizon=1,
+            contact_force=6, contact_solver="constraint",
+            contact_geometry="kinematic", contact_dt=0.002,
+            contact_stiffness=100_000.0, contact_attenuation=0.2,
+            contact_stiffness_ratio=2.228395061728395,
+            contact_tangent_compliance=0.5,
+            hidden=(16,), log_every=0,
+        )
+        self.assertEqual(int(curve._contact_solver_version), 4)
+        self.assertEqual(curve.contact_stiffness_ratio, 2.228395061728395)
+        self.assertEqual(curve.contact_tangent_compliance, 0.5)
+
+        learned = learned_terms(curve, O, A)
+        for key in (
+            "contact_stiffness", "contact_stiffness_high",
+            "contact_stiffness_ratio", "contact_transition_width",
+            "contact_effective_stiffness", "contact_stiffness_transition",
+            "contact_physical_compliance", "contact_tangent_compliance",
+        ):
+            self.assertIn(key, learned)
+        self.assertEqual(np.asarray(learned["contact_stiffness"]).shape, (6,))
+        self.assertEqual(
+            np.asarray(learned["contact_effective_stiffness"]).shape, (8, 6)
+        )
+
+        rep = recovery_report(ground_truth(env, O, A), learned, actions=A)
+        _assert_finite(self, rep)
+        self.assertEqual(
+            rep["contact_formulation"], "predicted_crossing_stiffness_curve"
+        )
+        self.assertAlmostEqual(rep["contact_transition_width"], 0.001)
+        self.assertEqual(len(rep["contact_tangent_compliance"]), 6)
+        self.assertEqual(
+            rep["contact_effective_stiffness_from_normal_compliance"],
+            rep["contact_stiffness_from_compliance"],
+        )
+        self.assertEqual(
+            len(rep["contact_physical_compliance_gauge_aligned"]), 8 * 6
+        )
+
 
 class TestRawStateRecovery(unittest.TestCase):
     """The generalized extraction on a raw-state env (cartpole): ground truth
