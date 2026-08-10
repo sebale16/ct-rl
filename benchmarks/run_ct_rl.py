@@ -131,6 +131,15 @@ def make_ct_env(
 # stalled run is diagnosable from the pair — no energy going in is a collapsed
 # policy, energy going in at coordination_loss near 1 is flailing.
 ROLLOUT_INFO_KEYS = {
+    "acrobot-swingup-xk": (
+        "acrobot_xk_energy_error_norm",
+        "acrobot_xk_elbow_norm",
+        "acrobot_xk_elbow_rate_norm",
+        "acrobot_xk_homoclinic_capture",
+        "acrobot_xk_lyapunov",
+        "acrobot_xk_lyapunov_rate",
+        "acrobot_xk_applied_torque",
+    ),
     "acrobot-swingup-v6": (
         "acrobot_energy_norm",
         "acrobot_kinetic_norm",
@@ -146,10 +155,37 @@ ROLLOUT_INFO_KEYS["acrobot-swingup-v6.1"] = ROLLOUT_INFO_KEYS[
     "acrobot-swingup-v6"
 ]
 
+ACROBOT_XK_ENV_ID = "acrobot-swingup-xk"
+ACROBOT_XK_EVAL_MODE = "xk_eval"
+ACROBOT_XK_EVAL_SEEDS = tuple(range(20000, 20032))
+
 
 def rollout_info_keys(env_id: str) -> tuple[str, ...]:
     """Per-step info scalars the Monitor should log for this task."""
     return ROLLOUT_INFO_KEYS.get(env_id, ())
+
+
+def _resolved_eval_mode(env_id: str, eval_mode: str | None) -> str | None:
+    """Make the documented XK comparison protocol impossible to omit."""
+    if env_id != ACROBOT_XK_ENV_ID:
+        return eval_mode
+    if eval_mode not in (None, ACROBOT_XK_EVAL_MODE):
+        raise ValueError(
+            f"{ACROBOT_XK_ENV_ID} requires --eval_mode "
+            f"{ACROBOT_XK_EVAL_MODE!s}; got {eval_mode!r}"
+        )
+    return ACROBOT_XK_EVAL_MODE
+
+
+def _primary_eval_schedule(
+    env_id: str,
+    training_seed: int,
+    requested_episodes: int,
+) -> tuple[int | None, int, tuple[int, ...] | None]:
+    """Return callback reset seed, episode count, and exact episode seeds."""
+    if env_id == ACROBOT_XK_ENV_ID:
+        return None, len(ACROBOT_XK_EVAL_SEEDS), ACROBOT_XK_EVAL_SEEDS
+    return int(training_seed) + 1000, int(requested_episodes), None
 
 
 # Fraction of the training budget over which the reset curriculum widens from
@@ -365,6 +401,7 @@ def run_algorithm(
     # before the algorithm -- in the requested seed.  BaseAlgorithm separately
     # restarts the policy/runtime stream after model construction.
     set_seed(int(seed))
+    eval_mode = _resolved_eval_mode(env_id, eval_mode)
 
     print(
         f"\n{'='*50}\nRunning: {algo} on {env_id} (mode: {mode}, eval_mode: {eval_mode or mode}, seed: {seed})\n{'='*50}"
@@ -658,8 +695,9 @@ def run_algorithm(
     )
     if capture_spec is not None:
         print(
-            "[selection] best_model uses strict capture: distance<0.2, "
-            "speed<0.2, sustained for >=1 physical second",
+            "[selection] best_model uses sustained capture: "
+            f"info[{capture_spec.info_key!r}] for "
+            f">={capture_spec.duration_seconds:g} physical second(s)",
             flush=True,
         )
 
@@ -688,12 +726,23 @@ def run_algorithm(
             flush=True,
         )
 
+    eval_reset_seed, n_eval_episodes, eval_episode_seeds = (
+        _primary_eval_schedule(env_id, seed, n_eval_episodes)
+    )
+    if eval_episode_seeds is not None:
+        print(
+            "[evaluation] fixed protocol seeds "
+            f"{eval_episode_seeds[0]}–{eval_episode_seeds[-1]} "
+            f"({n_eval_episodes} episodes)",
+            flush=True,
+        )
     eval_callback = EvalCallback(
         eval_env=eval_env,
         eval_freq=max(eval_freq // n_envs, 1),
         n_eval_episodes=n_eval_episodes,
         deterministic=True,
-        reset_seed=seed + 1000,
+        reset_seed=eval_reset_seed,
+        episode_seeds=eval_episode_seeds,
         best_model_save_path=str(save_dir / "best_model"),
         log_path=str(log_dir / "eval"),
         verbose=1,
@@ -776,10 +825,16 @@ def run_algorithm(
             "last_capture_duration": callback.last_capture_duration,
             "last_eval_timesteps": int(callback._last_eval_timesteps),
             "evaluations_timesteps": callback.evaluations_timesteps,
+            "evaluations_simulated_seconds": (
+                callback.evaluations_simulated_seconds
+            ),
             "evaluations_results": callback.evaluations_results,
             "evaluations_lengths": callback.evaluations_lengths,
             "evaluations_capture_timesteps": (
                 callback.evaluations_capture_timesteps
+            ),
+            "evaluations_capture_simulated_seconds": (
+                callback.evaluations_capture_simulated_seconds
             ),
             "evaluations_capture_successes": (
                 callback.evaluations_capture_successes
@@ -817,10 +872,18 @@ def run_algorithm(
         callback.evaluations_timesteps = state.get(
             "evaluations_timesteps", []
         )
+        callback.evaluations_simulated_seconds = state.get(
+            "evaluations_simulated_seconds",
+            [float("nan")] * len(callback.evaluations_timesteps),
+        )
         callback.evaluations_results = state.get("evaluations_results", [])
         callback.evaluations_lengths = state.get("evaluations_lengths", [])
         callback.evaluations_capture_timesteps = state.get(
             "evaluations_capture_timesteps", []
+        )
+        callback.evaluations_capture_simulated_seconds = state.get(
+            "evaluations_capture_simulated_seconds",
+            [float("nan")] * len(callback.evaluations_capture_timesteps),
         )
         callback.evaluations_capture_successes = state.get(
             "evaluations_capture_successes", []
@@ -1132,7 +1195,8 @@ def parse_args():
         "--eval_mode",
         type=str,
         default=None,
-        help="Evaluation mode key for EvalCallback. Defaults to --mode if not set.",
+        help="Evaluation mode key for EvalCallback. Defaults to --mode; "
+        "Acrobot-XK always uses its fixed xk_eval protocol.",
     )
     parser.add_argument(
         "--eval_hanging",
@@ -1201,7 +1265,8 @@ def parse_args():
         "--n_eval_episodes",
         type=int,
         default=10,
-        help="Number of episodes to evaluate during EvalCallback.",
+        help="Number of episodes to evaluate during EvalCallback. "
+        "Acrobot-XK always uses its fixed 32 protocol seeds.",
     )
     parser.add_argument(
         "--eval_range",

@@ -28,7 +28,7 @@ class BaseAlgorithm(ABC):
     Handles:
       - device & seeding
       - LR schedule based on progress_remaining in [1, 0]
-      - global timestep counter
+      - global decision-step and simulated-interaction-time counters
 
     Concrete algorithms only need to:
       - set up their models, optimizers
@@ -105,6 +105,10 @@ class BaseAlgorithm(ABC):
 
         # Training progress
         self.num_timesteps: int = 0
+        # Sum of the physical durations represented by collected transitions.
+        # For vector environments this is summed over all environment slots,
+        # matching ``num_timesteps``'s convention of counting every slot.
+        self.num_simulated_seconds: float = 0.0
         self._total_timesteps: int = 0
         self._progress_remaining: float = 1.0
 
@@ -155,6 +159,7 @@ class BaseAlgorithm(ABC):
         # start a fresh run from zero.
         if not getattr(self, "_resumed_from_checkpoint", False):
             self.num_timesteps = 0
+            self.num_simulated_seconds = 0.0
         self.start_time = time.time()
         if callback:
             callback.init_callback(self)

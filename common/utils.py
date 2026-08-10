@@ -134,7 +134,11 @@ def _parse_net_arch(arch_str: str):
 def _parse_dict_from_string(value: str) -> Optional[Dict[str, Any]]:
     """
     Convert a string like "key1=val1;key2=val2" into a dictionary.
-    Values are parsed into floats or strings.
+    Values are parsed into booleans, numbers, strings, or ``None``.
+
+    Boolean parsing is intentionally local to dictionary-valued CSV cells.
+    Other scalar hyperparameters retain the historical ``_parse_scalar``
+    behavior.
     """
     if not value or not isinstance(value, str):
         return None
@@ -143,7 +147,14 @@ def _parse_dict_from_string(value: str) -> Optional[Dict[str, Any]]:
     for part in parts:
         if "=" in part:
             key, val_str = part.split("=", 1)
-            result[key.strip()] = _parse_scalar(val_str.strip())
+            val_str = val_str.strip()
+            if val_str.lower() == "true":
+                parsed_value: Any = True
+            elif val_str.lower() == "false":
+                parsed_value = False
+            else:
+                parsed_value = _parse_scalar(val_str)
+            result[key.strip()] = parsed_value
     return result if result else None
 
 
@@ -204,7 +215,7 @@ def load_sb3_hyperparams_from_table(
     for key, val in row.items():
         if key.startswith("env_"):
             env_key = key[len("env_") :]
-            if env_key == "time_sampling_kwargs":
+            if env_key in {"time_sampling_kwargs", "task_kwargs"}:
                 env_meta[env_key] = _parse_dict_from_string(val)
             else:
                 env_meta[env_key] = _parse_scalar(val)
@@ -319,7 +330,7 @@ def load_ct_hyperparams_from_table(
 
         if key.startswith("env_"):
             env_key = key[len("env_") :]
-            if env_key == "time_sampling_kwargs":
+            if env_key in {"time_sampling_kwargs", "task_kwargs"}:
                 env_kwargs[env_key] = _parse_dict_from_string(val)
             else:
                 env_kwargs[env_key] = _parse_scalar(val)

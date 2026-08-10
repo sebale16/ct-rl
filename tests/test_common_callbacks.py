@@ -31,6 +31,7 @@ class DummyModel:
 class MockAlgorithm:
     def __init__(self):
         self.num_timesteps = 0
+        self.num_simulated_seconds = 0.0
         self.save = MagicMock()
         self.logger = MagicMock()
         self.model = MagicMock()
@@ -248,17 +249,20 @@ class TestCallbacks(unittest.TestCase):
         cb.init_callback(algo)
 
         algo.num_timesteps = 10
+        algo.num_simulated_seconds = 0.125
         cb.on_step()
         self.assertEqual(algo.save.call_count, 1)
 
         # Reward improves dramatically, but strict capture gets worse.
         algo.num_timesteps = 20
+        algo.num_simulated_seconds = 0.275
         cb.on_step()
         self.assertEqual(algo.save.call_count, 1)
         self.assertEqual(cb.best_mean_reward, 10.0)
 
         # A higher strict success rate wins even with a lower reward.
         algo.num_timesteps = 30
+        algo.num_simulated_seconds = 0.4
         cb.on_step()
         self.assertEqual(algo.save.call_count, 2)
         self.assertEqual(cb.best_capture_success_rate, 0.5)
@@ -277,6 +281,10 @@ class TestCallbacks(unittest.TestCase):
             allow_pickle=True,
         )
         np.testing.assert_array_equal(saved["capture_timesteps"], [10, 20, 30])
+        np.testing.assert_allclose(saved["simulated_seconds"], [0.125, 0.275, 0.4])
+        np.testing.assert_allclose(
+            saved["capture_simulated_seconds"], [0.125, 0.275, 0.4]
+        )
         np.testing.assert_array_equal(
             np.asarray(saved["capture_successes"].tolist(), dtype=bool),
             [[False, False], [False, False], [True, False]],

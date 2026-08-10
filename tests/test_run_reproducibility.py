@@ -125,6 +125,19 @@ class TestFreshRunReproducibility(unittest.TestCase):
             actual = agent._dynamics_sample_rng.random(5)
         np.testing.assert_array_equal(actual, expected)
 
+    def test_checkpoint_restores_simulated_interaction_seconds(self):
+        agent = _agent(37)
+        agent.num_timesteps = 17
+        agent.num_simulated_seconds = 0.314
+        with tempfile.TemporaryDirectory() as tmp:
+            save_checkpoint(agent, tmp)
+            agent.num_timesteps = 0
+            agent.num_simulated_seconds = 0.0
+            load_checkpoint(agent, tmp)
+
+        self.assertEqual(agent.num_timesteps, 17)
+        self.assertAlmostEqual(agent.num_simulated_seconds, 0.314)
+
     def test_fixed_evaluation_seed_replays_the_same_episode_stream(self):
         agent = _agent(41)
         first = evaluate_policy_per_episode(

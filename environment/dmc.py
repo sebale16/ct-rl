@@ -591,6 +591,41 @@ class DMCContinuousEnv(ContinuousEnv):
     def _acrobot_reward_info(self, *, update: bool) -> Dict[str, Any]:
         """Expose reward-independent diagnostics for local Acrobot tasks."""
         task = self._env.task
+        xk_terms_fn = getattr(task, "xk_diagnostic_terms", None)
+        if callable(xk_terms_fn):
+            # The Xin-Kaneda task targets a homoclinic set rather than the
+            # Cartesian tip target used by the v2--v6 task family.  Keep its
+            # schema separate: trying to route it through ``reward_terms``
+            # would either couple checkpoint selection to the configured
+            # reward or require fake tip-distance fields.
+            diagnostic_terms = xk_terms_fn(self._env.physics)
+            info = self._acrobot_xk_scalar_info(diagnostic_terms)
+            if "in_homoclinic_tube" not in diagnostic_terms:
+                raise KeyError(
+                    "xk_diagnostic_terms must provide "
+                    "'in_homoclinic_tube'"
+                )
+            info["acrobot_xk_homoclinic_capture"] = float(
+                diagnostic_terms["in_homoclinic_tube"]
+            )
+
+            # dm_control calls get_reward at a transition endpoint before the
+            # wrapper builds ``info``.  If the task records that decomposition,
+            # expose its numeric pieces for debugging while retaining the
+            # independently recomputed diagnostic terms above.  Do not publish
+            # it on reset: it may describe the final endpoint of the preceding
+            # episode rather than the newly reset state.
+            if update:
+                reward_terms = getattr(task, "last_reward_terms", None)
+                if callable(reward_terms):
+                    reward_terms = reward_terms()
+                if reward_terms is not None:
+                    for key, value in self._acrobot_xk_scalar_info(
+                        reward_terms
+                    ).items():
+                        info.setdefault(key, value)
+            return info
+
         if not hasattr(task, "reward_terms"):
             return {}
         terms = task.reward_terms(self._env.physics)
@@ -639,6 +674,26 @@ class DMCContinuousEnv(ContinuousEnv):
         for term_name, info_name in optional_terms.items():
             if term_name in terms:
                 info[info_name] = float(terms[term_name])
+        return info
+
+    @staticmethod
+    def _acrobot_xk_scalar_info(terms) -> Dict[str, float]:
+        """Prefix the numeric scalar fields in one XK term mapping.
+
+        Reward decompositions may also carry non-numeric metadata such as the
+        selected reward name.  Gym ``info`` diagnostics are deliberately kept
+        scalar so monitor/vector wrappers can aggregate them safely.
+        """
+
+        if not hasattr(terms, "items"):
+            raise TypeError("Acrobot XK diagnostic terms must be a mapping")
+        info: Dict[str, float] = {}
+        for name, value in terms.items():
+            array = np.asarray(value)
+            if array.ndim != 0 or array.dtype.kind not in "biuf":
+                continue
+            scalar = float(array)
+            info[f"acrobot_xk_{name}"] = scalar
         return info
 
     def _curriculum_task_info(self) -> Dict[str, Any]:

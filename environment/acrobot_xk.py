@@ -31,14 +31,17 @@ Two further properties of their setting are carried over:
   the plant applies ``tau2 = gear * ctrl`` with ``ctrl`` in ``[-1, 1]``, so the
   gear multiplies exploration noise and the meaning of the entropy target.
 
-The task carries no shaping.  Its reward is the ``r0`` baseline of
-``docs/reward_shaping_for_acrobot_swingup.md``,
+The task selects one of the three reward rates in
+``docs/reward_shaping_for_acrobot_swingup.md`` with ``reward_kind``:
 
     r0(x) = -[(Etil / E_s)^2 + (q2 / q_s)^2 + (qdot2 / omega_s)^2]
+    r1(x) = -V(x)
+    r2(x, u) = -V(x) - eta Vdot(x, u)
 
-which exists so the environment is well formed; the analytical controller
-ignores it, and the evaluation metrics are recomputed from raw state so they
-stay reward-independent.
+``eta`` is an explicit, non-negative parameter required by ``r2`` so it can be
+swept without changing code.  These rewards are training signals only: the
+analytical controller ignores them, and comparisons are made with the seven
+reward-independent metrics recomputed from state, physical time, and torque.
 """
 
 from __future__ import annotations
@@ -76,6 +79,19 @@ DEFAULT_TORQUE_LIMIT = 64.0
 # initial condition, which sits a small angle off the downward equilibrium.
 DEFAULT_ANGLE_NOISE = 0.05
 DEFAULT_VELOCITY_NOISE = 0.01
+
+# Xin & Kaneda's Section-7 gains used by the Lyapunov rewards.  k_V belongs to
+# the analytical controller, not to V itself, so the reward needs only k_D and
+# k_P.  Keep these configurable so reward studies can vary the candidate
+# Lyapunov function without changing the plant.
+DEFAULT_LYAPUNOV_K_D = 35.8
+DEFAULT_LYAPUNOV_K_P = 61.2
+REWARD_KINDS = frozenset(("r0", "r1", "r2"))
+
+# The reward-independent homoclinic tube from the experiment protocol.
+HOMOCLINIC_ENERGY_TOLERANCE = 0.05
+HOMOCLINIC_ANGLE_TOLERANCE = 0.025
+HOMOCLINIC_RATE_TOLERANCE = 0.05
 
 # The "release" reset: the chain held straight and released from rest with the
 # shoulder displaced from hanging.  This is the family the paper's own initial
@@ -187,7 +203,7 @@ def _model_xml(damping: float, torque_limit: float) -> bytes:
 
 
 class BalanceXK(suite_base.Task):
-    """Swing-up task on the conservative plant, with the ``r0`` baseline reward.
+    """Swing-up task with selectable ``r0``, ``r1`` and ``r2`` reward rates.
 
     Deliberately standalone: it shares no code with the ``v2 ... v6.1`` reward
     line, so its numbers cannot drift when those tasks are edited.
@@ -203,6 +219,10 @@ class BalanceXK(suite_base.Task):
         paper_start: bool = False,
         release_start: bool = False,
         release_angle_range: tuple = RELEASE_ANGLE_RANGE,
+        reward_kind: str = "r0",
+        k_d: float = DEFAULT_LYAPUNOV_K_D,
+        k_p: float = DEFAULT_LYAPUNOV_K_P,
+        eta: Optional[float] = None,
     ) -> None:
         super().__init__(random=random)
         self.angle_noise = float(angle_noise)
@@ -228,9 +248,31 @@ class BalanceXK(suite_base.Task):
                 f"release_angle_range must satisfy 0 < low < high, got {low}, {high}"
             )
         self.release_angle_range = (low, high)
+        self.reward_kind = str(reward_kind).strip().lower()
+        if self.reward_kind not in REWARD_KINDS:
+            choices = ", ".join(sorted(REWARD_KINDS))
+            raise ValueError(
+                f"reward_kind must be one of {{{choices}}}, got {reward_kind!r}"
+            )
+        self.k_d = float(k_d)
+        self.k_p = float(k_p)
+        for name, value in (("k_d", self.k_d), ("k_p", self.k_p)):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and > 0, got {value}")
+        if eta is None:
+            self.eta = None
+        else:
+            self.eta = float(eta)
+            if not np.isfinite(self.eta) or self.eta < 0.0:
+                raise ValueError(f"eta must be finite and >= 0, got {eta}")
+        if self.reward_kind == "r2" and self.eta is None:
+            raise ValueError("reward_kind='r2' requires an explicit eta")
+        if self.reward_kind != "r2" and self.eta is not None:
+            raise ValueError("eta is only valid when reward_kind='r2'")
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
         self._rate_scale: Optional[float] = None
+        self._last_reward_terms: Optional[Dict[str, float]] = None
 
     # --- Mechanical energy ------------------------------------------------
 
@@ -299,6 +341,7 @@ class BalanceXK(suite_base.Task):
 
     def initialize_episode(self, physics) -> None:
         self._calibrate_energy(physics)
+        self._last_reward_terms = None
         if self.uniform_start:
             physics.named.data.qpos[["shoulder", "elbow"]] = self.random.uniform(
                 -np.pi, np.pi, 2
@@ -349,7 +392,16 @@ class BalanceXK(suite_base.Task):
     # --- Reward -----------------------------------------------------------
 
     def get_reward(self, physics) -> float:
-        return float(self.baseline_terms(physics)["reward"])
+        terms = self.xk_reward_terms(physics)
+        self._last_reward_terms = terms
+        return float(terms["reward"])
+
+    @property
+    def last_reward_terms(self) -> Optional[Dict[str, float]]:
+        """Terms used for the most recently emitted transition reward."""
+        if self._last_reward_terms is None:
+            return None
+        return dict(self._last_reward_terms)
 
     def baseline_terms(self, physics) -> Dict[str, float]:
         """The ``r0`` baseline and its three normalized parts.
@@ -376,8 +428,95 @@ class BalanceXK(suite_base.Task):
             "energy_error": float(energy_error),
             "energy_error_norm": float(energy_error / self.energy_span),
             "elbow": elbow,
+            "elbow_norm": float(elbow / np.pi),
             "elbow_rate": float(qvel[1]),
+            "elbow_rate_norm": float(qvel[1] / omega_scale),
             "shoulder_rate": float(qvel[0]),
+        }
+
+    def xk_diagnostic_terms(self, physics) -> Dict[str, float]:
+        """Reward-independent endpoint diagnostics for checkpoint selection."""
+        baseline = self.baseline_terms(physics)
+        inside = (
+            abs(baseline["energy_error_norm"])
+            <= HOMOCLINIC_ENERGY_TOLERANCE
+            and abs(baseline["elbow_norm"])
+            <= HOMOCLINIC_ANGLE_TOLERANCE
+            and abs(baseline["elbow_rate_norm"])
+            <= HOMOCLINIC_RATE_TOLERANCE
+        )
+        return {
+            "energy_error_norm": baseline["energy_error_norm"],
+            "elbow_norm": baseline["elbow_norm"],
+            "elbow_rate_norm": baseline["elbow_rate_norm"],
+            "in_homoclinic_tube": float(inside),
+        }
+
+    def xk_reward_terms(self, physics) -> Dict[str, float]:
+        """Return all three reward rates at the live endpoint state.
+
+        ``r0`` is the normalized, periodic distance already shipped with this
+        task. ``r1`` and ``r2`` use Xin--Kaneda's unwrapped shape coordinate,
+        because their Lyapunov function penalizes elbow winding on ``R``.  The
+        derivative uses the generalized force the plant actually applies, so
+        the normalized policy action is never mistaken for physical torque.
+        """
+        baseline = self.baseline_terms(physics)
+        qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
+        qvel = np.asarray(physics.data.qvel, dtype=np.float64).reshape(-1)
+        energy_error = baseline["energy_error"]
+
+        mass = self._mass_matrix(physics)
+        actuator_force = np.asarray(
+            physics.data.qfrc_actuator, dtype=np.float64
+        ).reshape(-1)
+        passive_force = np.asarray(
+            physics.data.qfrc_passive, dtype=np.float64
+        ).reshape(-1)
+        external_force = np.asarray(
+            physics.data.qfrc_applied, dtype=np.float64
+        ).reshape(-1)
+        constraint_force = np.asarray(
+            physics.data.qfrc_constraint, dtype=np.float64
+        ).reshape(-1)
+        bias_force = np.asarray(
+            physics.data.qfrc_bias, dtype=np.float64
+        ).reshape(-1)
+        applied_force = (
+            actuator_force
+            + passive_force
+            + external_force
+            + constraint_force
+        )
+        qacc = np.linalg.solve(mass, applied_force - bias_force)
+        energy_rate = float(qvel @ applied_force)
+
+        elbow_unwrapped = float(qpos[1])
+        elbow_rate = float(qvel[1])
+        lyapunov = float(
+            0.5 * energy_error**2
+            + 0.5 * self.k_d * elbow_rate**2
+            + 0.5 * self.k_p * elbow_unwrapped**2
+        )
+        lyapunov_rate = float(
+            energy_error * energy_rate
+            + self.k_d * elbow_rate * float(qacc[1])
+            + self.k_p * elbow_unwrapped * elbow_rate
+        )
+        r0 = float(baseline["reward"])
+        r1 = -lyapunov
+        r2 = -lyapunov - float(self.eta or 0.0) * lyapunov_rate
+        selected = {"r0": r0, "r1": r1, "r2": r2}[self.reward_kind]
+        return {
+            "reward": float(selected),
+            "r0": r0,
+            "r1": r1,
+            "r2": r2,
+            "lyapunov": lyapunov,
+            "lyapunov_rate": lyapunov_rate,
+            "energy_rate": energy_rate,
+            "elbow_acceleration": float(qacc[1]),
+            "applied_torque": float(actuator_force[1]),
         }
 
 
@@ -394,12 +533,19 @@ def swingup_xk(
     paper_start: bool = False,
     release_start: bool = False,
     release_angle_range: tuple = RELEASE_ANGLE_RANGE,
+    reward_kind: str = "r0",
+    k_d: float = DEFAULT_LYAPUNOV_K_D,
+    k_p: float = DEFAULT_LYAPUNOV_K_P,
+    eta: Optional[float] = None,
 ):
     """Construct ``acrobot-swingup-xk``.
 
     ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
     from the stock model; both are recoverable from the built model, so a caller
-    can always confirm which plant it is holding.
+    can always confirm which plant it is holding.  ``reward_kind`` chooses the
+    training reward.  ``r2`` additionally requires an explicit ``eta`` shaping
+    time scale; ``eta`` is rejected for the other modes to catch mislabeled
+    sweep arms.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -412,6 +558,10 @@ def swingup_xk(
         paper_start=paper_start,
         release_start=release_start,
         release_angle_range=release_angle_range,
+        reward_kind=reward_kind,
+        k_d=k_d,
+        k_p=k_p,
+        eta=eta,
     )
     return control.Environment(
         physics,

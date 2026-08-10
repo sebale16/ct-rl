@@ -6,10 +6,10 @@ Full training-state checkpointing for off-policy continuous-time algorithms
 The built-in ``algorithm.save`` only persists the actor-critic weights (plus a
 learned-dynamics sidecar). That is enough to *evaluate* a trained model but not
 to *resume* training: the replay buffer, optimizer moments, entropy temperature,
-global timestep counter and RNG state are all lost. On a queue with a hard wall
-time (e.g. LS6 ``development`` at 2 h) a >2 h run must therefore checkpoint the
-*entire* trainer state near the wall and pick up exactly where it left off in
-the next job of a resubmission chain.
+decision-step/simulated-time counters and RNG state are all lost. On a queue
+with a hard wall time (e.g. LS6 ``development`` at 2 h) a >2 h run must
+therefore checkpoint the *entire* trainer state near the wall and pick up
+exactly where it left off in the next job of a resubmission chain.
 
 A checkpoint is a directory with three parts:
 
@@ -47,6 +47,7 @@ _OPTIMIZER_ATTRS = (
 
 _COUNTER_ATTRS = (
     "num_timesteps",
+    "num_simulated_seconds",
     "_n_updates",
     "_value_updates",
     "_dynamics_updates",

@@ -18,6 +18,56 @@ from models.noise import ActionNoise, VectorizedActionNoise
 from common.callbacks import BaseCallback
 
 
+def _realized_simulated_seconds(
+    t: Union[float, np.ndarray],
+    next_t: Union[float, np.ndarray],
+    done: Union[bool, np.ndarray],
+    infos: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]],
+) -> float:
+    """Return the physical duration represented by one vector rollout step.
+
+    ``VecContinuousEnv`` auto-resets completed slots, so its returned
+    ``next_t`` is zero for those slots.  The actual terminal episode time is
+    preserved in ``info["terminal_next_t"]`` and must be restored before
+    subtracting the local episode start time.  Durations are summed across
+    environment slots, just as ``num_timesteps`` counts every slot.
+    """
+    start = np.asarray(t, dtype=np.float64).reshape(-1)
+    end = np.asarray(next_t, dtype=np.float64).reshape(-1).copy()
+    dones = np.asarray(done, dtype=bool).reshape(-1)
+    if start.size != end.size or start.size != dones.size:
+        raise ValueError(
+            "t, next_t, and done must contain one value per environment slot, "
+            f"got {start.size}, {end.size}, and {dones.size}"
+        )
+
+    if isinstance(infos, (list, tuple)):
+        info_items = infos
+    elif isinstance(infos, dict):
+        info_items = (infos,)
+    else:
+        info_items = ()
+    for index, info in enumerate(info_items):
+        if index >= end.size:
+            break
+        if dones[index] and isinstance(info, dict) and "terminal_next_t" in info:
+            end[index] = float(info["terminal_next_t"])
+
+    durations = end - start
+    if not np.all(np.isfinite(durations)):
+        raise ValueError("environment timestamps must produce finite durations")
+    # Tolerate only roundoff-scale negative values. A materially negative
+    # duration indicates a broken timestamp/auto-reset contract and must not
+    # silently corrupt the training-time metric.
+    tolerance = 1e-9
+    if np.any(durations < -tolerance):
+        raise ValueError(
+            "environment timestamps must be non-decreasing within each episode; "
+            f"got durations {durations.tolist()}"
+        )
+    return float(np.maximum(durations, 0.0).sum())
+
+
 class OffPolicyAlgorithm(BaseAlgorithm, ABC):
     """
     Base class for off-policy CT algorithms using a ReplayBuffer.
@@ -230,6 +280,12 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 self.env.step_dt(action)
             )
             done = np.logical_or(terminated, truncated)
+            simulated_seconds = _realized_simulated_seconds(
+                t=t,
+                next_t=next_t,
+                done=done,
+                infos=infos,
+            )
 
             self._store_transition(
                 obs=obs_t,
@@ -241,6 +297,7 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 next_t=next_t,
                 infos=infos,
             )
+            self.num_simulated_seconds += simulated_seconds
 
             if self.action_noise is not None:
                 if isinstance(self.action_noise, ActionNoise):

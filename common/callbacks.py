@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping, Optional, List, Union, TYPE_CHECKING
+from typing import (
+    Any,
+    Callable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    TYPE_CHECKING,
+    Union,
+)
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -623,6 +632,7 @@ class EvalCallback(EventCallback):
         n_eval_episodes: int = 5,
         deterministic: bool = True,
         reset_seed: Optional[int] = None,
+        episode_seeds: Optional[Sequence[int]] = None,
         log_path: Optional[str] = None,
         best_model_save_path: Optional[str] = None,
         verbose: int = 1,
@@ -645,6 +655,11 @@ class EvalCallback(EventCallback):
         self.n_eval_episodes = int(n_eval_episodes)
         self.deterministic = bool(deterministic)
         self.reset_seed = None if reset_seed is None else int(reset_seed)
+        self.episode_seeds = (
+            None
+            if episode_seeds is None
+            else tuple(int(seed) for seed in episode_seeds)
+        )
 
         # Optional best-model gate: only update best_model on an eval whose mean
         # reward exceeds ``gate_min_reward`` AND whose dt-weighted mean of
@@ -672,9 +687,11 @@ class EvalCallback(EventCallback):
         self._last_eval_timesteps = 0
 
         self.evaluations_timesteps: List[int] = []
+        self.evaluations_simulated_seconds: List[float] = []
         self.evaluations_results: List[np.ndarray] = []
         self.evaluations_lengths: List[np.ndarray] = []
         self.evaluations_capture_timesteps: List[int] = []
+        self.evaluations_capture_simulated_seconds: List[float] = []
         self.evaluations_capture_successes: List[np.ndarray] = []
         self.evaluations_capture_durations: List[np.ndarray] = []
 
@@ -706,12 +723,17 @@ class EvalCallback(EventCallback):
     ) -> None:
         if self.log_path is None:
             return
+        simulated_seconds = float(
+            getattr(self.algorithm, "num_simulated_seconds", np.nan)
+        )
         self.evaluations_timesteps.append(int(self.num_timesteps))
+        self.evaluations_simulated_seconds.append(simulated_seconds)
         self.evaluations_results.append(np.asarray(rewards, dtype=float))
         self.evaluations_lengths.append(np.asarray(lengths, dtype=int))
         extra = {}
         if capture_successes is not None and capture_durations is not None:
             self.evaluations_capture_timesteps.append(int(self.num_timesteps))
+            self.evaluations_capture_simulated_seconds.append(simulated_seconds)
             self.evaluations_capture_successes.append(
                 np.asarray(capture_successes, dtype=bool)
             )
@@ -721,6 +743,9 @@ class EvalCallback(EventCallback):
             extra = {
                 "capture_timesteps": np.asarray(
                     self.evaluations_capture_timesteps, dtype=int
+                ),
+                "capture_simulated_seconds": np.asarray(
+                    self.evaluations_capture_simulated_seconds, dtype=float
                 ),
                 "capture_successes": np.asarray(
                     self.evaluations_capture_successes, dtype=object
@@ -732,6 +757,9 @@ class EvalCallback(EventCallback):
         np.savez(
             os.path.join(self.log_path, "evaluations.npz"),
             timesteps=np.asarray(self.evaluations_timesteps, dtype=int),
+            simulated_seconds=np.asarray(
+                self.evaluations_simulated_seconds, dtype=float
+            ),
             results=np.asarray(self.evaluations_results, dtype=object),
             ep_lengths=np.asarray(self.evaluations_lengths, dtype=object),
             **extra,
@@ -753,6 +781,7 @@ class EvalCallback(EventCallback):
                 n_eval_episodes=self.n_eval_episodes,
                 deterministic=self.deterministic,
                 reset_seed=self.reset_seed,
+                episode_seeds=self.episode_seeds,
                 occupancy_key=self.gate_occupancy_key,
                 capture_spec=self.capture_spec,
                 return_metrics=True,
@@ -777,6 +806,7 @@ class EvalCallback(EventCallback):
                 n_eval_episodes=self.n_eval_episodes,
                 deterministic=self.deterministic,
                 reset_seed=self.reset_seed,
+                episode_seeds=self.episode_seeds,
                 occupancy_key=self.gate_occupancy_key,
             )
             if self.gate_occupancy_key is not None:

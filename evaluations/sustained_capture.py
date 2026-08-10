@@ -15,13 +15,14 @@ import numpy as np
 
 
 STRICT_CAPTURE_INFO_KEY = "acrobot_strict_capture"
+ACROBOT_XK_CAPTURE_INFO_KEY = "acrobot_xk_homoclinic_capture"
 CARTPOLE_STRICT_CAPTURE_INFO_KEY = "cartpole_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
 CURRICULUM_CAPTURE_DURATION_SECONDS = 5.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
-# The Acrobot capture-oriented tasks share one physical checkpoint rule even
-# when their rewards differ; CartPole v2 uses the same distance/speed/duration
-# thresholds with its task-specific info key.  For v6 this is load-bearing
+# The legacy Acrobot capture-oriented tasks share one physical checkpoint rule
+# even when their rewards differ; Acrobot XK and CartPole v2 each publish their
+# own reward-independent endpoint predicates.  For v6 this is load-bearing
 # rather than cosmetic: its reward is a cost, so reward-only selection can
 # prefer a policy merely because it spends less time swinging.
 STRICT_CAPTURE_ENV_IDS = frozenset(
@@ -32,6 +33,7 @@ STRICT_CAPTURE_ENV_IDS = frozenset(
         "acrobot-swingup-v6",
         "acrobot-swingup-v6-uniform",
         "acrobot-swingup-v6.1",
+        "acrobot-swingup-xk",
         "cartpole-two_poles-v2",
     }
 )
@@ -217,11 +219,12 @@ def strict_capture_spec_for(
         return None
     if algorithm.lower() not in STRICT_CAPTURE_ALGORITHMS:
         return None
-    info_key = (
-        CARTPOLE_STRICT_CAPTURE_INFO_KEY
-        if env_id == "cartpole-two_poles-v2"
-        else STRICT_CAPTURE_INFO_KEY
-    )
+    if env_id == "cartpole-two_poles-v2":
+        info_key = CARTPOLE_STRICT_CAPTURE_INFO_KEY
+    elif env_id == "acrobot-swingup-xk":
+        info_key = ACROBOT_XK_CAPTURE_INFO_KEY
+    else:
+        info_key = STRICT_CAPTURE_INFO_KEY
     return SustainedCaptureSpec(info_key=info_key)
 
 

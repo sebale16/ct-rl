@@ -1,6 +1,7 @@
 import unittest
 
 from evaluations.sustained_capture import (
+    ACROBOT_XK_CAPTURE_INFO_KEY,
     SustainedCaptureSpec,
     SustainedCaptureTracker,
     capture_selection_rank,
@@ -180,6 +181,24 @@ class TestSustainedCaptureTracker(unittest.TestCase):
                         algorithm=algorithm, env_id=env_id
                     )
                 )
+
+    def test_xk_uses_reward_independent_homoclinic_capture_signal(self):
+        for algorithm in ("ct_sac", "ct_td3", "ppo", "sac", "td3"):
+            with self.subTest(algorithm=algorithm):
+                spec = strict_capture_spec_for(
+                    algorithm=algorithm,
+                    env_id="acrobot-swingup-xk",
+                )
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec.info_key, ACROBOT_XK_CAPTURE_INFO_KEY)
+                self.assertEqual(spec.duration_seconds, 1.0)
+                self.assertFalse(spec.require_terminal_hold)
+
+        legacy = strict_capture_spec_for(
+            algorithm="ct_sac",
+            env_id="acrobot-swingup-v4.1",
+        )
+        self.assertEqual(legacy.info_key, "acrobot_strict_capture")
 
     def test_curriculum_mastery_requires_terminal_five_second_hold(self):
         for env_id in (

@@ -2,7 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+)
 import os
 from pathlib import Path
 
@@ -74,6 +84,7 @@ def evaluate_policy_per_episode(
     n_eval_episodes: int = 10,
     deterministic: bool = True,
     reset_seed: Optional[int] = None,
+    episode_seeds: Optional[Sequence[int]] = None,
     occupancy_key: Optional[str] = None,
     capture_spec: Optional[SustainedCaptureSpec] = None,
     return_metrics: bool = False,
@@ -102,10 +113,31 @@ def evaluate_policy_per_episode(
     is_vec_env = _is_vec_env(env)
     n_envs = int(getattr(env, "num_envs", 1)) if is_vec_env else 1
 
+    exact_episode_seeds: Optional[tuple[int, ...]] = None
+    if episode_seeds is not None:
+        exact_episode_seeds = tuple(int(seed) for seed in episode_seeds)
+        if reset_seed is not None:
+            raise ValueError("reset_seed and episode_seeds are mutually exclusive")
+        if is_vec_env:
+            raise ValueError(
+                "explicit episode_seeds require a single non-vector evaluation env"
+            )
+        if len(exact_episode_seeds) != int(n_eval_episodes):
+            raise ValueError(
+                "episode_seeds must contain exactly one seed per evaluation "
+                f"episode, got {len(exact_episode_seeds)} for {n_eval_episodes}"
+            )
+
     # A fixed initial reset makes every callback invocation evaluate the same
     # episode/reset and irregular-time streams.  Subsequent episode resets
-    # advance those freshly rooted local streams deterministically.
-    obs, reset_infos = env.reset(seed=reset_seed)
+    # advance those freshly rooted local streams deterministically unless an
+    # exact per-episode protocol seed list is supplied.
+    initial_seed = (
+        exact_episode_seeds[0]
+        if exact_episode_seeds is not None
+        else reset_seed
+    )
+    obs, reset_infos = env.reset(seed=initial_seed)
     if not is_vec_env:
         obs = np.asarray(obs, dtype=np.float32)
         reset_info_list = [reset_infos]
@@ -291,11 +323,19 @@ def evaluate_policy_per_episode(
                 running_occ_w[0] = 0.0
                 running_dt[0] = 0.0
 
-                # single env must reset explicitly
-                obs, reset_info = env.reset()
-                obs = np.asarray(obs, dtype=np.float32)
-                if capture_tracker is not None:
-                    capture_tracker.reset_slot(0, reset_info)
+                # A single env must reset explicitly. Do not reset after the
+                # final requested episode, and reseed every episode when the
+                # evaluation protocol supplies an exact seed list.
+                if len(episode_returns) < n_eval_episodes:
+                    next_seed = (
+                        exact_episode_seeds[len(episode_returns)]
+                        if exact_episode_seeds is not None
+                        else None
+                    )
+                    obs, reset_info = env.reset(seed=next_seed)
+                    obs = np.asarray(obs, dtype=np.float32)
+                    if capture_tracker is not None:
+                        capture_tracker.reset_slot(0, reset_info)
             else:
                 obs = np.asarray(next_obs, dtype=np.float32)
 
