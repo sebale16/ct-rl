@@ -38,6 +38,7 @@ from .acrobot_v2 import (
     swingup_v61,
     swingup_v6_uniform,
 )
+from .acrobot_xk import swingup_xk
 from .double_cartpole_v2 import two_poles_curriculum, two_poles_v2
 from .base import ContinuousEnv
 
@@ -234,6 +235,7 @@ class DMCContinuousEnv(ContinuousEnv):
             "swingup-v6": swingup_v6,
             "swingup-v6.1": swingup_v61,
             "swingup-v6-uniform": swingup_v6_uniform,
+            "swingup-xk": swingup_xk,
         }
         local_cartpole_tasks = {
             "two_poles-curriculum": two_poles_curriculum,
