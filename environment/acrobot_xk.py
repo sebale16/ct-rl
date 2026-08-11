@@ -88,6 +88,17 @@ DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
 REWARD_KINDS = frozenset(("r0", "r1", "r2"))
 
+# ``reward_squash`` scale for the bounded ``r1``, exact rather than rounded.
+# At hanging the links are aligned and at rest, so the rate and angle terms of
+# V vanish and V is pure energy error: V_hang = 1/2 (E_hang - E_top)^2 =
+# 1/2 span^2 = 1/2 (49)^2 = 1200.5.  That is the largest V the task legitimately
+# starts from -- ``release_start`` begins near hanging, spanning V = 1062-1197
+# over the 32 protocol seeds -- so it places every episode's start at the top of
+# the squash's near-linear region with the whole swing-up inside it.
+# Note ``q = 0`` is the HORIZONTAL configuration in this model's coordinates
+# (links along +x), where V = 1/2 (span/2)^2 = 300.125; hanging is q1 = -pi/2.
+DEFAULT_REWARD_SQUASH_V0 = 1200.5
+
 # The reward-independent homoclinic tube from the experiment protocol.
 HOMOCLINIC_ENERGY_TOLERANCE = 0.05
 HOMOCLINIC_ANGLE_TOLERANCE = 0.025
@@ -223,6 +234,10 @@ class BalanceXK(suite_base.Task):
         k_d: float = DEFAULT_LYAPUNOV_K_D,
         k_p: float = DEFAULT_LYAPUNOV_K_P,
         eta: Optional[float] = None,
+        reward_squash: Optional[float] = None,
+        spin_limit: Optional[float] = None,
+        spin_penalty: float = 0.0,
+        reward_offset: float = 0.0,
     ) -> None:
         super().__init__(random=random)
         self.angle_noise = float(angle_noise)
@@ -269,6 +284,62 @@ class BalanceXK(suite_base.Task):
             raise ValueError("reward_kind='r2' requires an explicit eta")
         if self.reward_kind != "r2" and self.eta is not None:
             raise ValueError("eta is only valid when reward_kind='r2'")
+        if reward_squash is None:
+            self.reward_squash = None
+        else:
+            self.reward_squash = float(reward_squash)
+            if not np.isfinite(self.reward_squash) or self.reward_squash <= 0.0:
+                raise ValueError(
+                    f"reward_squash must be finite and > 0, got {reward_squash}"
+                )
+        # ``r2`` carries a second unbounded term, ``eta * Vdot``, that this
+        # squash does not touch: Vdot contains qddot2 and is signed, so the
+        # scale V0 is calibrated on -- the positive range of V -- does not
+        # transfer to it.  Squashing V alone would leave r2 unbounded while
+        # implying otherwise, so refuse the combination rather than ship a
+        # half-measure.
+        if self.reward_squash is not None and self.reward_kind != "r1":
+            raise ValueError(
+                "reward_squash is only valid when reward_kind='r1'; "
+                f"got reward_kind={self.reward_kind!r}"
+            )
+        # Terminating on elbow spin.  ``V`` cannot see a spinning elbow as
+        # distinct from a merely bad pose once the reward saturates, so this
+        # ends the episode outright at |q2| >= spin_limit.
+        if spin_limit is None:
+            self.spin_limit = None
+        else:
+            self.spin_limit = float(spin_limit)
+            if not np.isfinite(self.spin_limit) or self.spin_limit <= 0.0:
+                raise ValueError(
+                    f"spin_limit must be finite and > 0, got {spin_limit}"
+                )
+        self.spin_penalty = float(spin_penalty)
+        if not np.isfinite(self.spin_penalty) or self.spin_penalty < 0.0:
+            raise ValueError(
+                f"spin_penalty must be finite and >= 0, got {spin_penalty}"
+            )
+        if self.spin_penalty > 0.0 and self.spin_limit is None:
+            raise ValueError("spin_penalty requires an explicit spin_limit")
+        # A per-step constant added to r1.  This is NOT cosmetic once episodes
+        # can terminate: with r1 = -s(V) <= 0 everywhere, ending an episode
+        # early *avoids* future negative reward, so terminating is itself a
+        # reward and a spin limit would be an incentive to spin rather than a
+        # deterrent.  Lifting the reward to >= 0 (offset = V0) makes survival
+        # the payoff, so forfeiting the remaining episode is the cost and the
+        # deterrent does not depend on tuning spin_penalty against the value
+        # scale.  With fixed-length episodes an offset is a no-op; here it is
+        # the whole difference between a deterrent and an exploit.
+        self.reward_offset = float(reward_offset)
+        if not np.isfinite(self.reward_offset):
+            raise ValueError(
+                f"reward_offset must be finite, got {reward_offset}"
+            )
+        if self.reward_offset != 0.0 and self.reward_kind != "r1":
+            raise ValueError(
+                "reward_offset is only valid when reward_kind='r1'; "
+                f"got reward_kind={self.reward_kind!r}"
+            )
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
         self._rate_scale: Optional[float] = None
@@ -391,10 +462,34 @@ class BalanceXK(suite_base.Task):
 
     # --- Reward -----------------------------------------------------------
 
+    def _spinning(self, physics) -> bool:
+        """Has the elbow wound past ``spin_limit`` on the unwrapped coordinate?"""
+        if self.spin_limit is None:
+            return False
+        q2 = float(np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)[1])
+        return abs(q2) >= self.spin_limit
+
     def get_reward(self, physics) -> float:
         terms = self.xk_reward_terms(physics)
         self._last_reward_terms = terms
+        if self._spinning(physics):
+            # Charged once, on the transition that ends the episode.
+            return float(terms["reward"]) - self.spin_penalty
         return float(terms["reward"])
+
+    def get_termination(self, physics):
+        """End the episode when the elbow winds past ``spin_limit``.
+
+        Returning ``0.0`` is dm_control's genuine-termination discount, which
+        the wrapper maps to a Gym ``terminated`` (as opposed to its internal
+        step limit, which is a truncation that keeps bootstrapping).  So the
+        critic stops bootstrapping here and the terminal cost is the whole
+        remaining value -- see ``reward_offset`` on why that only deters
+        spinning if the per-step reward is non-negative.
+        """
+        if self._spinning(physics):
+            return 0.0
+        return None
 
     @property
     def last_reward_terms(self) -> Optional[Dict[str, float]]:
@@ -433,6 +528,48 @@ class BalanceXK(suite_base.Task):
             "elbow_rate_norm": float(qvel[1] / omega_scale),
             "shoulder_rate": float(qvel[0]),
         }
+
+    def _squash(self, v: float) -> float:
+        """Bounded, order-preserving image of ``V``.
+
+        ``V`` is a sum of squares, so it is non-negative and
+        ``V -> V / (1 + V/V0)`` is strictly increasing on ``[0, inf)``, so the
+        ordering of states by ``V`` is preserved.
+
+        WARNING: order preservation is NOT incentive preservation.  A learner
+        follows gradients, not orderings, and ``s'(V) = 1/(1 + V/V0)^2`` decays
+        polynomially, so far outside ``V0`` the marginal cost of getting worse
+        is ~0.  Measured on job 7895458 at an 11 s horizon: the squashed arms
+        park at ``V ~ 4e9`` with the elbow wound 649 revolutions and reward
+        pinned at the ``-V0`` floor, whereas the unsquashed arms never exceeded
+        half a turn.  Bounding the reward removed the pressure that had been
+        holding the winding penalty up.  Do not read this squash as retaining
+        the ``R``-valued shape coordinate's anti-spin property.
+
+        The map is tangent to the identity at ``V = 0``, so the near-goal
+        gradient -- the part stabilization has to sharpen, and the part that
+        was never the problem -- is exactly the unsquashed one.  It saturates
+        at ``V0``, which is what bounds the return: with ``V`` reaching 7.8e9
+        on diverged cells the auto-tuned temperature ran to 1e6 on every
+        Lyapunov arm, because ``alpha`` tunes against the critic's scale.
+
+        ``V0`` is calibrated on the plant rather than chosen.  At rest with the
+        links aligned the rate and angle terms vanish and ``V`` is pure energy
+        error, so hanging (``q1 = -pi/2``, the potential minimum in this
+        model's coordinates, which put ``q = 0`` at the horizontal) gives
+        ``V = 1/2 span^2 = 1200.5``, the target gives 0, and the homoclinic
+        tube boundary gives 4.13.  The release-start distribution spans
+        1062-1197 because it begins near hanging.  ``V0 = V_hang`` therefore
+        places the start of every episode at the top of the near-linear region
+        and the whole swing-up inside it (compression <= 2x, and <0.4% at the
+        tube boundary), while everything beyond saturates.  Use
+        ``DEFAULT_REWARD_SQUASH_V0`` (1200.5) for new arms; the ``xk_r1_g*_sq``
+        rows carry 1200 because job 7895458 was launched with that value, and
+        editing them would stop the table describing what actually ran.
+        """
+        if self.reward_squash is None:
+            return float(v)
+        return float(v / (1.0 + v / self.reward_squash))
 
     def xk_diagnostic_terms(self, physics) -> Dict[str, float]:
         """Reward-independent endpoint diagnostics for checkpoint selection."""
@@ -504,7 +641,7 @@ class BalanceXK(suite_base.Task):
             + self.k_p * elbow_unwrapped * elbow_rate
         )
         r0 = float(baseline["reward"])
-        r1 = -lyapunov
+        r1 = self.reward_offset - self._squash(lyapunov)
         r2 = -lyapunov - float(self.eta or 0.0) * lyapunov_rate
         selected = {"r0": r0, "r1": r1, "r2": r2}[self.reward_kind]
         return {
@@ -537,6 +674,10 @@ def swingup_xk(
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     eta: Optional[float] = None,
+    reward_squash: Optional[float] = None,
+    spin_limit: Optional[float] = None,
+    spin_penalty: float = 0.0,
+    reward_offset: float = 0.0,
 ):
     """Construct ``acrobot-swingup-xk``.
 
@@ -545,7 +686,9 @@ def swingup_xk(
     can always confirm which plant it is holding.  ``reward_kind`` chooses the
     training reward.  ``r2`` additionally requires an explicit ``eta`` shaping
     time scale; ``eta`` is rejected for the other modes to catch mislabeled
-    sweep arms.
+    sweep arms.  ``reward_squash`` bounds ``r1`` at that value and is rejected
+    for the other modes, since ``r2``'s ``eta Vdot`` term stays unbounded under
+    it.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -562,6 +705,10 @@ def swingup_xk(
         k_d=k_d,
         k_p=k_p,
         eta=eta,
+        reward_squash=reward_squash,
+        spin_limit=spin_limit,
+        spin_penalty=spin_penalty,
+        reward_offset=reward_offset,
     )
     return control.Environment(
         physics,
