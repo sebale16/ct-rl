@@ -112,8 +112,11 @@ class TestAcrobotXKTermination(unittest.TestCase):
             info["acrobot_xk_termination_reason"], TERMINATION_ELBOW_ANGLE
         )
         self.assertEqual(info["absorbing_failure"], 1.0)
-        self.assertEqual(info["absorbing_failure_reward_rate"], -1.0)
-        self.assertEqual(reward, -1.0)
+        expected_failure_rate = env._env.task.failure_reward_rate
+        self.assertAlmostEqual(
+            info["absorbing_failure_reward_rate"], expected_failure_rate
+        )
+        self.assertAlmostEqual(reward, expected_failure_rate)
         self.assertIn("acrobot_xk_reward", info)
         self.assertEqual(
             info["acrobot_xk_unpenalized_reward"], info["acrobot_xk_reward"]

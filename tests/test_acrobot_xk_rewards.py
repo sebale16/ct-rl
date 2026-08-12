@@ -12,9 +12,13 @@ from environment.acrobot_xk import (
     DEFAULT_FAILURE_REWARD_RATE,
     DEFAULT_LYAPUNOV_K_D,
     DEFAULT_LYAPUNOV_K_P,
+    ELBOW_ANGLE_LIMIT,
+    ELBOW_RATE_LIMIT,
     HANGING_SHOULDER,
     HOMOCLINIC_ANGLE_TOLERANCE,
+    SHOULDER_RATE_SCALE_LIMIT,
     UPRIGHT_SHOULDER,
+    reward_rate_lower_bound,
     swingup_xk,
 )
 from environment.dmc import DMCContinuousEnv
@@ -176,14 +180,72 @@ class TestAcrobotXKRewards(unittest.TestCase):
         zero_terms = eta_zero.task.xk_reward_terms(eta_zero.physics)
         self.assertAlmostEqual(zero_terms["r3"], zero_terms["r1"], places=12)
 
-    def test_failure_reward_rate_is_configurable_negative_metadata(self):
+    def test_failure_reward_rate_defaults_to_each_rewards_lower_bound(self):
+        cases = (
+            ("r0", None, None, -55.8061730307),
+            ("r1", None, None, -54.5226469607),
+            ("r2", 0.1, None, -67.0111054085),
+            ("r3", 0.1, 0.1, -66.4658789389),
+        )
+        for kind, eta, discount_rate, expected in cases:
+            with self.subTest(kind=kind):
+                env = self._env(
+                    kind, eta=eta, discount_rate=discount_rate
+                )
+                self.assertAlmostEqual(
+                    env.task.failure_reward_rate, expected, places=8
+                )
+                self.assertEqual(
+                    env.task.failure_reward_rate_source, "reward_lower_bound"
+                )
+                self.assertAlmostEqual(
+                    env.task.failure_reward_rate,
+                    reward_rate_lower_bound(
+                        kind, eta=eta, discount_rate=discount_rate
+                    ),
+                    places=12,
+                )
+
+    def test_failure_reward_rate_retains_explicit_negative_override(self):
         env = self._env("r1", failure_reward_rate=-1.25)
         self.assertEqual(env.task.failure_reward_rate, -1.25)
-        self.assertEqual(self._env("r1").task.failure_reward_rate, -1.0)
+        self.assertEqual(env.task.failure_reward_rate_source, "explicit")
         for invalid in (0.0, 1.0, float("nan"), float("inf")):
             with self.subTest(failure_reward_rate=invalid):
                 with self.assertRaises(ValueError):
                     swingup_xk(failure_reward_rate=invalid)
+
+    def test_automatic_failure_rate_is_below_sampled_admissible_rewards(self):
+        rng = np.random.default_rng(1234)
+        cases = (
+            ("r0", None, None),
+            ("r1", None, None),
+            ("r2", 0.1, None),
+            ("r2", 1.0, None),
+            ("r3", 0.1, 0.1),
+            ("r3", 1.0, 0.1),
+        )
+        for kind, eta, discount_rate in cases:
+            with self.subTest(kind=kind, eta=eta):
+                env = self._env(
+                    kind, eta=eta, discount_rate=discount_rate
+                )
+                shoulder_limit = (
+                    SHOULDER_RATE_SCALE_LIMIT * env.task._rate_scale
+                )
+                for _ in range(128):
+                    state = [
+                        rng.uniform(-np.pi, np.pi),
+                        rng.uniform(-ELBOW_ANGLE_LIMIT, ELBOW_ANGLE_LIMIT),
+                        rng.uniform(-shoulder_limit, shoulder_limit),
+                        rng.uniform(-ELBOW_RATE_LIMIT, ELBOW_RATE_LIMIT),
+                    ]
+                    torque = rng.uniform(-20.0, 20.0)
+                    self._set_state_and_torque(env, state, torque)
+                    selected = env.task.xk_reward_terms(env.physics)[kind]
+                    self.assertGreaterEqual(
+                        selected + 1e-9, env.task.failure_reward_rate
+                    )
 
     def test_r0_wraps_elbow_but_r1_penalizes_winding(self):
         env = self._env("r1")

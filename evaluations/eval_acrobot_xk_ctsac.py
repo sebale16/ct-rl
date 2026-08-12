@@ -298,13 +298,14 @@ def build_task_kwargs(
     task.update(
         damping=protocol.damping,
         torque_limit=protocol.torque_limit,
-        failure_reward_rate=configured.get("failure_reward_rate", -1.0),
         uniform_start=False,
         paper_start=False,
         release_start=True,
         release_angle_range=protocol.release_angle_range,
         **reward.task_values(),
     )
+    if "failure_reward_rate" in configured:
+        task["failure_reward_rate"] = configured["failure_reward_rate"]
     return task
 
 
@@ -537,9 +538,6 @@ def evaluate_checkpoint(
         discount_rate=discount_rate,
     )
     task_kwargs = build_task_kwargs(config.env_kwargs, reward, protocol)
-    task_metadata_json = json.dumps(
-        task_kwargs, sort_keys=True, separators=(",", ":")
-    )
     checkpoint_sha = _sha256_path(checkpoint)
     train_seed = infer_train_seed(checkpoint)
     config_sha = getattr(config, "config_sha256", None)
@@ -550,6 +548,16 @@ def evaluate_checkpoint(
     metrics: list[EpisodeMetrics] = []
     rows: list[dict[str, Any]] = []
     try:
+        effective_task_kwargs = dict(task_kwargs)
+        effective_task_kwargs["failure_reward_rate"] = float(
+            env._env.task.failure_reward_rate
+        )
+        effective_task_kwargs["failure_reward_rate_source"] = str(
+            env._env.task.failure_reward_rate_source
+        )
+        task_metadata_json = json.dumps(
+            effective_task_kwargs, sort_keys=True, separators=(",", ":")
+        )
         model = load_checkpoint_model(
             env, config.model_kwargs, checkpoint, device
         )
@@ -604,7 +612,7 @@ def evaluate_checkpoint(
         "train_seed": train_seed,
         "config_sha256": config_sha,
         "reward_metadata": asdict(reward),
-        "task_metadata": task_kwargs,
+        "task_metadata": effective_task_kwargs,
         "protocol": protocol.as_metadata(),
         "tube": {
             "energy_tolerance": tube_spec.energy_tolerance,

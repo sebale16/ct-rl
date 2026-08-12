@@ -100,7 +100,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertFalse(task["paper_start"])
         self.assertEqual(task["damping"], 0.0)
         self.assertEqual(task["torque_limit"], 20.0)
-        self.assertEqual(task["failure_reward_rate"], -1.0)
+        self.assertNotIn("failure_reward_rate", task)
         with self.assertRaises(ValueError):
             RewardMetadata("r2", None)
         with self.assertRaises(ValueError):
@@ -225,6 +225,8 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             )
             env = Mock()
             env._env.physics = object()
+            env._env.task.failure_reward_rate = -58.1056207428
+            env._env.task.failure_reward_rate_source = "reward_lower_bound"
             model = SimpleNamespace(device=th.device("cpu"))
 
             def fake_rollout(_env, _policy, seed, *, torque_limit):
@@ -273,7 +275,12 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
                 result.summary["reward_metadata"]["discount_rate"], 0.1
             )
             self.assertEqual(
-                result.summary["task_metadata"]["failure_reward_rate"], -1.0
+                result.summary["task_metadata"]["failure_reward_rate"],
+                -58.1056207428,
+            )
+            self.assertEqual(
+                result.summary["task_metadata"]["failure_reward_rate_source"],
+                "reward_lower_bound",
             )
             self.assertEqual(result.rows[0]["train_seed"], 7)
             self.assertNotIn("episode_return", OUTPUT_FIELDS)

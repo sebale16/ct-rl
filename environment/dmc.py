@@ -807,7 +807,12 @@ class DMCContinuousEnv(ContinuousEnv):
                     "Acrobot-XK cap failures require a finite "
                     "episode_duration to define their analytical continuation"
                 )
-            failure_rate = float(getattr(task, "failure_reward_rate", -1.0))
+            failure_rate_value = getattr(task, "failure_reward_rate", None)
+            if failure_rate_value is None:
+                raise RuntimeError(
+                    "Acrobot-XK cap failure has no resolved failure reward rate"
+                )
+            failure_rate = float(failure_rate_value)
             remaining = max(
                 0.0, float(self.episode_duration) - float(self._elapsed_time)
             )

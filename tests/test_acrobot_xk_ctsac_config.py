@@ -134,7 +134,7 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 self.assertTrue(task["release_start"])
                 self.assertEqual(task["damping"], 0)
                 self.assertEqual(task["torque_limit"], 20)
-                self.assertEqual(task["failure_reward_rate"], -1)
+                self.assertNotIn("failure_reward_rate", task)
                 if reward_kind == "r3":
                     self.assertEqual(task["discount_rate"], 0.1)
                     self.assertEqual(
@@ -186,7 +186,6 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 "release_start": True,
                 "damping": 0,
                 "torque_limit": 20,
-                "failure_reward_rate": -1,
             },
         )
         self.assertEqual(model, train_model)

@@ -43,15 +43,18 @@ Here ``V_down = V(x_down) = E_s^2 / 2`` is the Lyapunov value at hanging rest.
 The common linear scale preserves the shape and units of every Lyapunov term;
 the state, rate, and torque caps make their ranges finite without clipping.
 ``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
-``r3`` also requires the physical discount rate ``lambda``.  These rewards are
-training signals only: the analytical controller ignores them, and comparisons
-are made with the seven reward-independent metrics recomputed from state,
-physical time, and torque.
+``r3`` also requires the physical discount rate ``lambda``.  A cap failure uses
+the selected reward's finite lower envelope as its constant absorbing reward
+rate, so resetting early cannot replace a worse ordinary reward with a milder
+terminal value.  These rewards are training signals only: the analytical
+controller ignores them, and comparisons are made with the seven
+reward-independent metrics recomputed from state, physical time, and torque.
 """
 
 from __future__ import annotations
 
 import collections
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -101,8 +104,182 @@ DEFAULT_VELOCITY_NOISE = 0.01
 # Lyapunov function without changing the plant.
 DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
-DEFAULT_FAILURE_REWARD_RATE = -1.0
+# ``None`` selects the finite lower envelope of the configured reward.  An
+# explicit negative scalar remains accepted for reproducing historical runs.
+DEFAULT_FAILURE_REWARD_RATE = None
 REWARD_KINDS = frozenset(("r0", "r1", "r2", "r3"))
+
+# Xin--Kaneda's grouped constants, derived from the physical constants above.
+_A1 = LINK1_INERTIA + LINK1_MASS * LINK1_COM**2 + LINK2_MASS * LINK1_LENGTH**2
+_A2 = LINK2_INERTIA + LINK2_MASS * LINK2_COM**2
+_A3 = LINK2_MASS * LINK1_LENGTH * LINK2_COM
+_B1 = (LINK1_MASS * LINK1_COM + LINK2_MASS * LINK1_LENGTH) * GRAVITY
+_B2 = LINK2_MASS * LINK2_COM * GRAVITY
+_ENERGY_SPAN = 2.0 * (_B1 + _B2)
+_EXTENDED_M11 = _A1 + _A2 + 2.0 * _A3
+_EXTENDED_M12 = _A2 + _A3
+_OMEGA_S = np.sqrt(2.0 * _ENERGY_SPAN / _EXTENDED_M11)
+_V_DOWN = 0.5 * _ENERGY_SPAN**2
+
+
+@lru_cache(maxsize=64)
+def _elbow_acceleration_abs_bound(
+    torque_limit: float, damping: float
+) -> float:
+    """Bound ``|qddot2|`` over the capped state/action closure.
+
+    At fixed ``q2`` the velocity, damping, torque and gravity contributions to
+    the second row of ``M^-1`` can each be maximized analytically.  What remains
+    is a smooth one-dimensional periodic envelope.  A dense deterministic grid
+    followed by bounded refinement of every sampled local maximum avoids a
+    costly five-dimensional optimizer while retaining a small outward margin.
+    """
+    from scipy.optimize import minimize_scalar
+
+    shoulder_rate = SHOULDER_RATE_SCALE_LIMIT * _OMEGA_S
+    elbow_rate = ELBOW_RATE_LIMIT
+
+    def envelope(q2):
+        q2 = np.asarray(q2, dtype=np.float64)
+        cosine = np.cos(q2)
+        sine_abs = np.abs(np.sin(q2))
+        m11 = _A1 + _A2 + 2.0 * _A3 * cosine
+        m12 = _A2 + _A3 * cosine
+        determinant = _A1 * _A2 - (_A3 * cosine) ** 2
+
+        coriolis = _A3 * sine_abs * (
+            m12
+            * (2.0 * shoulder_rate * elbow_rate + elbow_rate**2)
+            + m11 * shoulder_rate**2
+        )
+        damping_force = damping * (
+            m12 * shoulder_rate + m11 * elbow_rate
+        )
+        first_gravity = m12 * _B1
+        second_gravity = (m12 - m11) * _B2
+        gravity = np.sqrt(
+            np.maximum(
+                0.0,
+                first_gravity**2
+                + second_gravity**2
+                + 2.0
+                * first_gravity
+                * second_gravity
+                * cosine,
+            )
+        )
+        return (
+            coriolis + damping_force + gravity + m11 * torque_limit
+        ) / determinant
+
+    grid = np.linspace(0.0, 2.0 * np.pi, 4097)
+    values = envelope(grid)
+    candidate_indices = np.flatnonzero(
+        (values[1:-1] >= values[:-2])
+        & (values[1:-1] >= values[2:])
+    ) + 1
+    candidates = [float(values[0]), float(values[-1])]
+    for index in candidate_indices:
+        result = minimize_scalar(
+            lambda angle: -float(envelope(angle)),
+            bounds=(float(grid[index - 1]), float(grid[index + 1])),
+            method="bounded",
+            options={"xatol": 1e-14},
+        )
+        candidates.append(-float(result.fun))
+
+    # Round outward so floating-point/refinement error cannot make the failure
+    # rate slightly more attractive than an admissible ordinary reward.
+    return float(np.nextafter(max(candidates) * (1.0 + 1e-10), np.inf))
+
+
+@lru_cache(maxsize=128)
+def reward_rate_lower_bound(
+    reward_kind: str,
+    *,
+    k_d: float = DEFAULT_LYAPUNOV_K_D,
+    k_p: float = DEFAULT_LYAPUNOV_K_P,
+    eta: Optional[float] = None,
+    discount_rate: Optional[float] = None,
+    torque_limit: float = DEFAULT_TORQUE_LIMIT,
+    damping: float = 0.0,
+) -> float:
+    """Return a conservative minimum reward rate on the capped domain.
+
+    The calculation uses the closure of the nonterminal state/action limits.
+    It is deliberately an envelope rather than a sampled endpoint minimum: a
+    cap failure must never be preferable merely because two individually worst
+    reward terms cannot be attained at exactly the same state.
+    """
+    kind = str(reward_kind).strip().lower()
+    if kind not in REWARD_KINDS:
+        raise ValueError(f"unknown Acrobot-XK reward kind {reward_kind!r}")
+    k_d = float(k_d)
+    k_p = float(k_p)
+    torque_limit = float(torque_limit)
+    damping = float(damping)
+    if not np.isfinite(k_d) or k_d <= 0.0:
+        raise ValueError("k_d must be finite and > 0")
+    if not np.isfinite(k_p) or k_p <= 0.0:
+        raise ValueError("k_p must be finite and > 0")
+    if not np.isfinite(torque_limit) or torque_limit <= 0.0:
+        raise ValueError("torque_limit must be finite and > 0")
+    if not np.isfinite(damping) or damping < 0.0:
+        raise ValueError("damping must be finite and >= 0")
+
+    shoulder_rate = SHOULDER_RATE_SCALE_LIMIT * _OMEGA_S
+    elbow_rate = ELBOW_RATE_LIMIT
+    elbow_angle = ELBOW_ANGLE_LIMIT
+    kinetic_max = 0.5 * (
+        _EXTENDED_M11 * shoulder_rate**2
+        + 2.0 * _EXTENDED_M12 * shoulder_rate * elbow_rate
+        + _A2 * elbow_rate**2
+    )
+    energy_error_abs = max(_ENERGY_SPAN, kinetic_max)
+
+    if kind == "r0":
+        magnitude = (
+            (energy_error_abs / _ENERGY_SPAN) ** 2
+            + 1.0
+            + (elbow_rate / _OMEGA_S) ** 2
+        )
+        return -float(magnitude)
+
+    lyapunov_max = (
+        0.5 * energy_error_abs**2
+        + 0.5 * k_d * elbow_rate**2
+        + 0.5 * k_p * elbow_angle**2
+    ) / _V_DOWN
+    if kind == "r1":
+        return -float(lyapunov_max)
+
+    eta_value = float(eta) if eta is not None else float("nan")
+    if not np.isfinite(eta_value) or eta_value < 0.0:
+        raise ValueError(f"reward_kind={kind!r} requires finite eta >= 0")
+    acceleration = _elbow_acceleration_abs_bound(torque_limit, damping)
+    energy_rate_abs = (
+        elbow_rate * torque_limit
+        + damping * (shoulder_rate**2 + elbow_rate**2)
+    )
+    lyapunov_rate_abs = (
+        energy_error_abs * energy_rate_abs
+        + k_d * elbow_rate * acceleration
+        + k_p * elbow_angle * elbow_rate
+    ) / _V_DOWN
+
+    coefficient = 1.0
+    if kind == "r3":
+        lambda_value = (
+            float(discount_rate)
+            if discount_rate is not None
+            else float("nan")
+        )
+        if not np.isfinite(lambda_value) or lambda_value < 0.0:
+            raise ValueError(
+                "reward_kind='r3' requires finite discount_rate >= 0"
+            )
+        coefficient = max(1.0 - lambda_value * eta_value, 0.0)
+    return -float(coefficient * lyapunov_max + eta_value * lyapunov_rate_abs)
 
 # The reward-independent homoclinic tube from the experiment protocol.
 HOMOCLINIC_ENERGY_TOLERANCE = 0.05
@@ -240,7 +417,9 @@ class BalanceXK(suite_base.Task):
         k_p: float = DEFAULT_LYAPUNOV_K_P,
         eta: Optional[float] = None,
         discount_rate: Optional[float] = None,
-        failure_reward_rate: float = DEFAULT_FAILURE_REWARD_RATE,
+        failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
+        torque_limit: float = DEFAULT_TORQUE_LIMIT,
+        damping: float = 0.0,
     ) -> None:
         super().__init__(random=random)
         self.angle_noise = float(angle_noise)
@@ -303,15 +482,28 @@ class BalanceXK(suite_base.Task):
             raise ValueError("reward_kind='r3' requires an explicit discount_rate")
         if self.reward_kind != "r3" and self.discount_rate is not None:
             raise ValueError("discount_rate is only valid when reward_kind='r3'")
-        self.failure_reward_rate = float(failure_reward_rate)
-        if (
-            not np.isfinite(self.failure_reward_rate)
-            or self.failure_reward_rate >= 0.0
-        ):
-            raise ValueError(
-                "failure_reward_rate must be finite and < 0, got "
-                f"{failure_reward_rate}"
+        if failure_reward_rate is None:
+            self.failure_reward_rate = reward_rate_lower_bound(
+                self.reward_kind,
+                k_d=self.k_d,
+                k_p=self.k_p,
+                eta=self.eta,
+                discount_rate=self.discount_rate,
+                torque_limit=torque_limit,
+                damping=damping,
             )
+            self.failure_reward_rate_source = "reward_lower_bound"
+        else:
+            self.failure_reward_rate = float(failure_reward_rate)
+            if (
+                not np.isfinite(self.failure_reward_rate)
+                or self.failure_reward_rate >= 0.0
+            ):
+                raise ValueError(
+                    "failure_reward_rate must be finite and < 0, got "
+                    f"{failure_reward_rate}"
+                )
+            self.failure_reward_rate_source = "explicit"
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
         self._rate_scale: Optional[float] = None
@@ -641,7 +833,7 @@ def swingup_xk(
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     eta: Optional[float] = None,
     discount_rate: Optional[float] = None,
-    failure_reward_rate: float = DEFAULT_FAILURE_REWARD_RATE,
+    failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
 ):
     """Construct ``acrobot-swingup-xk``.
 
@@ -650,10 +842,11 @@ def swingup_xk(
     can always confirm which plant it is holding.  ``reward_kind`` chooses the
     training reward.  ``r2`` and ``r3`` additionally require an explicit
     ``eta`` shaping time scale, and ``r3`` requires the physical
-    ``discount_rate`` used by CT-SAC.  ``failure_reward_rate`` defines the
-    action-independent absorbing-failure rate used by the wrapper/critic.  The
+    ``discount_rate`` used by CT-SAC.  By default, the action-independent
+    absorbing-failure rate is the configured reward's finite lower envelope;
+    ``failure_reward_rate`` can explicitly override it for reproduction.  The
     task still records the selected endpoint reward for diagnostics when the
-    wrapper emits this failure rate at a cap.
+    wrapper emits the failure rate at a cap.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -672,6 +865,8 @@ def swingup_xk(
         eta=eta,
         discount_rate=discount_rate,
         failure_reward_rate=failure_reward_rate,
+        torque_limit=torque_limit,
+        damping=damping,
     )
     return control.Environment(
         physics,
