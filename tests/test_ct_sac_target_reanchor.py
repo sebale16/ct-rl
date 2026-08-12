@@ -274,9 +274,10 @@ class TestReanchoredEndpoint(unittest.TestCase):
 
 class TestReanchoredTarget(unittest.TestCase):
     def test_new_options_do_not_shift_existing_positional_cadence_arguments(self):
-        params = list(inspect.signature(CTSAC.__init__).parameters)
+        signature = inspect.signature(CTSAC.__init__)
+        params = list(signature.parameters)
         self.assertEqual(
-            params[-5:],
+            params[-8:-3],
             [
                 "dynamics_publish_interval",
                 "dynamics_train_interval",
@@ -285,6 +286,15 @@ class TestReanchoredTarget(unittest.TestCase):
                 "target_reanchor_gate_rho",
             ],
         )
+        self.assertEqual(
+            params[-3:],
+            ["discount_rate", "target_reference_dt", "reward_is_rate"],
+        )
+        for name in params[-3:]:
+            self.assertEqual(
+                signature.parameters[name].kind,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
 
     def test_fork_reanchor_mode_is_wired(self):
         _, _, _, algo_kwargs, _ = load_ct_hyperparams_from_table(

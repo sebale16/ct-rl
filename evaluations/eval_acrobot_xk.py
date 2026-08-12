@@ -101,9 +101,8 @@ OUTPUT_FIELDS = (
     "peak_commanded_torque",
 )
 
-# The plant defaults to an ample gear; the law's peak demand on this
-# geometry is about 20 N*m at the paper's gains.
-UNBOUNDED_TORQUE = 64.0
+# The release-protocol peak demand is about 19.71 N*m at the paper's gains.
+DEFAULT_TORQUE_LIMIT = 20.0
 
 # The plant XML's own integration step.
 MODEL_TIMESTEP = 0.01
@@ -260,7 +259,7 @@ def frontier_arms(
     arms: List[Arm] = []
     for k_p in kp_values:
         t_max = t_max_fast if k_p < 288.12 else t_max_slow
-        for torque_limit in (UNBOUNDED_TORQUE,):
+        for torque_limit in (DEFAULT_TORQUE_LIMIT,):
             for damping in (0.0, 0.05):
                 arms.append(
                     Arm(
@@ -346,7 +345,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--kv", type=float, default=DEFAULT_K_V)
     parser.add_argument("--kd", type=float, default=DEFAULT_K_D)
     parser.add_argument("--kp", type=float, default=61.2)
-    parser.add_argument("--torque-limit", type=float, default=UNBOUNDED_TORQUE)
+    parser.add_argument(
+        "--torque-limit", type=float, default=DEFAULT_TORQUE_LIMIT
+    )
     parser.add_argument("--damping", type=float, default=0.0)
     parser.add_argument("--t-max", type=float, default=120.0)
     parser.add_argument("--t-max-fast", type=float, default=120.0)

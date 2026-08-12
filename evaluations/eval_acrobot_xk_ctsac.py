@@ -5,13 +5,14 @@ architecture recorded in ``benchmarks/hyperparams/ct_sac.csv`` and acts with
 the policy mean (``deterministic=True``).  It then scores the resulting state
 and applied-torque trajectories with metrics 1--6 from
 ``docs/reward_shaping_for_acrobot_swingup.md``.  Episode reward and return are
-deliberately neither accumulated nor written: ``r0``, ``r1`` and ``r2`` have
-different numerical scales and are training-arm metadata, not evaluation
-criteria.
+deliberately neither accumulated nor written: ``r0``, ``r1``, ``r2`` and
+``r3`` have different numerical scales and are training-arm metadata, not
+evaluation criteria. ``r3`` additionally records the physical discount rate
+used by its discount-consistent potential term.
 
 By default every checkpoint is evaluated on the document's exact common
 protocol: release-from-rest starts, seeds 20000--20031, a 20 second horizon,
-0.5 ms control and physics periods, zero damping, and a 64 N m actuator gear.
+1 ms control and physics periods, zero damping, and a 20 N m actuator gear.
 The protocol arguments remain configurable for short smoke runs, but every
 chosen value is recorded in both outputs.
 
@@ -27,7 +28,7 @@ Example
 
     MUJOCO_GL=disable python -m evaluations.eval_acrobot_xk_ctsac \\
       --checkpoint /runs/xk_r2/seed_0/final_model.pth \\
-      --mode xk_r2_eta0p1_fixed0p5ms --reward-kind r2 --eta 0.1 \\
+      --mode xk_r2_eta0p1_fixed1ms_h10s --reward-kind r2 --eta 0.1 \\
       --evaluations-npz /runs/xk_r2/seed_0/eval/evaluations.npz \\
       --output results/acrobot_xk_r2_seed0.csv
 """
@@ -60,17 +61,17 @@ from evaluations.acrobot_homoclinic_metrics import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ENV_ID = "acrobot-swingup-xk"
 ALGORITHM = "ct_sac"
-REWARD_KINDS = ("r0", "r1", "r2")
+REWARD_KINDS = ("r0", "r1", "r2", "r3")
 
 DEFAULT_SEEDS = tuple(range(20000, 20032))
 DEFAULT_T_MAX = 20.0
-DEFAULT_DT = 0.0005
-DEFAULT_PHYSICS_DT = 0.0005
+DEFAULT_DT = 0.001
+DEFAULT_PHYSICS_DT = 0.001
 DEFAULT_DAMPING = 0.0
-DEFAULT_TORQUE_LIMIT = 64.0
+DEFAULT_TORQUE_LIMIT = 20.0
 DEFAULT_RELEASE_ANGLE_RANGE = (0.05, 0.5)
 DEFAULT_METRIC7_TARGETS = (0.5, 0.8, 0.9)
 
@@ -86,6 +87,7 @@ OUTPUT_FIELDS = (
     "config_sha256",
     "reward_kind",
     "eta",
+    "discount_rate",
     "task_metadata_json",
     "seed",
     "start",
@@ -183,6 +185,7 @@ class RewardMetadata:
 
     reward_kind: str
     eta: Optional[float]
+    discount_rate: Optional[float] = None
 
     def __post_init__(self) -> None:
         kind = str(self.reward_kind).strip().lower()
@@ -197,16 +200,38 @@ class RewardMetadata:
             eta = float(self.eta)
             if not np.isfinite(eta) or eta < 0.0:
                 raise ValueError(f"eta must be finite and >= 0, got {self.eta}")
-        if kind == "r2" and eta is None:
-            raise ValueError("reward_kind='r2' requires --eta or configured task eta")
-        if kind != "r2" and eta is not None:
-            raise ValueError("eta is only meaningful for reward_kind='r2'")
+        if kind in ("r2", "r3") and eta is None:
+            raise ValueError(
+                f"reward_kind={kind!r} requires --eta or configured task eta"
+            )
+        if kind not in ("r2", "r3") and eta is not None:
+            raise ValueError("eta is only meaningful for reward_kind='r2' or 'r3'")
         object.__setattr__(self, "eta", eta)
+
+        if self.discount_rate is None:
+            discount_rate = None
+        else:
+            discount_rate = float(self.discount_rate)
+            if not np.isfinite(discount_rate) or discount_rate < 0.0:
+                raise ValueError(
+                    "discount_rate must be finite and >= 0, got "
+                    f"{self.discount_rate}"
+                )
+        if kind == "r3" and discount_rate is None:
+            raise ValueError(
+                "reward_kind='r3' requires --discount-rate or configured "
+                "task discount_rate"
+            )
+        if kind != "r3" and discount_rate is not None:
+            raise ValueError("discount_rate is only meaningful for reward_kind='r3'")
+        object.__setattr__(self, "discount_rate", discount_rate)
 
     def task_values(self) -> dict[str, Any]:
         values: dict[str, Any] = {"reward_kind": self.reward_kind}
         if self.eta is not None:
             values["eta"] = self.eta
+        if self.discount_rate is not None:
+            values["discount_rate"] = self.discount_rate
         return values
 
 
@@ -224,6 +249,7 @@ def resolve_reward_metadata(
     *,
     reward_kind: Optional[str] = None,
     eta: Optional[float] = None,
+    discount_rate: Optional[float] = None,
 ) -> RewardMetadata:
     """Resolve explicit sweep metadata over values stored in ``task_kwargs``.
 
@@ -238,11 +264,17 @@ def resolve_reward_metadata(
     kind = configured_kind if reward_kind is None else reward_kind
     if eta is not None:
         chosen_eta: Optional[float] = eta
-    elif str(kind).strip().lower() == "r2":
+    elif str(kind).strip().lower() in ("r2", "r3"):
         chosen_eta = task_kwargs.get("eta")
     else:
         chosen_eta = None
-    return RewardMetadata(str(kind), chosen_eta)
+    if discount_rate is not None:
+        chosen_discount_rate: Optional[float] = discount_rate
+    elif str(kind).strip().lower() == "r3":
+        chosen_discount_rate = task_kwargs.get("discount_rate")
+    else:
+        chosen_discount_rate = None
+    return RewardMetadata(str(kind), chosen_eta, chosen_discount_rate)
 
 
 def build_task_kwargs(
@@ -253,8 +285,8 @@ def build_task_kwargs(
     """Build the task portion of the fixed protocol.
 
     ``k_d`` and ``k_p`` are preserved when the training row explicitly set
-    them because they define ``r1``/``r2`` metadata.  Every plant or reset value
-    that affects the comparison is fixed by ``protocol``.
+    them because they define ``r1``/``r2``/``r3`` metadata.  Every plant or
+    reset value that affects the comparison is fixed by ``protocol``.
     """
 
     configured = dict(train_env_kwargs.get("task_kwargs", {}) or {})
@@ -266,6 +298,7 @@ def build_task_kwargs(
     task.update(
         damping=protocol.damping,
         torque_limit=protocol.torque_limit,
+        failure_reward_rate=configured.get("failure_reward_rate", -1.0),
         uniform_start=False,
         paper_start=False,
         release_start=True,
@@ -485,6 +518,7 @@ def evaluate_checkpoint(
     protocol: EvaluationProtocol = EvaluationProtocol(),
     reward_kind: Optional[str] = None,
     eta: Optional[float] = None,
+    discount_rate: Optional[float] = None,
     tube_spec: TubeSpec = TubeSpec(),
     lqr_threshold: float = LQR_SWITCH_THRESHOLD,
     device: str = "cpu",
@@ -497,7 +531,10 @@ def evaluate_checkpoint(
     if not checkpoint.is_file():
         raise FileNotFoundError(f"checkpoint does not exist: {checkpoint}")
     reward = resolve_reward_metadata(
-        config.env_kwargs, reward_kind=reward_kind, eta=eta
+        config.env_kwargs,
+        reward_kind=reward_kind,
+        eta=eta,
+        discount_rate=discount_rate,
     )
     task_kwargs = build_task_kwargs(config.env_kwargs, reward, protocol)
     task_metadata_json = json.dumps(
@@ -537,6 +574,7 @@ def evaluate_checkpoint(
                 "config_sha256": config_sha,
                 "reward_kind": reward.reward_kind,
                 "eta": reward.eta,
+                "discount_rate": reward.discount_rate,
                 "task_metadata_json": task_metadata_json,
                 "seed": int(seed),
                 "start": "release",
@@ -661,7 +699,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--eta",
         type=float,
         default=None,
-        help="r2 shaping time scale; explicit so eta sweeps remain identifiable",
+        help=(
+            "r2/r3 shaping time scale; explicit so eta sweeps remain "
+            "identifiable"
+        ),
+    )
+    parser.add_argument(
+        "--discount-rate",
+        type=float,
+        default=None,
+        help="r3 continuous-time physical discount rate in inverse seconds",
     )
     parser.add_argument(
         "--hyperparams-dir", type=Path, default=Path("benchmarks/hyperparams")
@@ -729,6 +776,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             protocol=protocol,
             reward_kind=args.reward_kind,
             eta=args.eta,
+            discount_rate=args.discount_rate,
             tube_spec=tube,
             lqr_threshold=args.lqr_threshold,
             device=args.device,

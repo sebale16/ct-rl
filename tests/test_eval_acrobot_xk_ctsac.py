@@ -22,6 +22,7 @@ from evaluations.eval_acrobot_xk_ctsac import (
     EvaluationProtocol,
     RewardMetadata,
     build_env,
+    build_parser,
     build_task_kwargs,
     evaluate_checkpoint,
     load_metric7_summary,
@@ -63,11 +64,11 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertEqual(protocol.seeds[-1], 20031)
         self.assertEqual(len(protocol.seeds), 32)
         self.assertEqual(protocol.t_max, 20.0)
-        self.assertEqual(protocol.dt, 0.0005)
-        self.assertEqual(protocol.physics_dt, 0.0005)
+        self.assertEqual(protocol.dt, 0.001)
+        self.assertEqual(protocol.physics_dt, 0.001)
         self.assertEqual(protocol.damping, 0.0)
-        self.assertEqual(protocol.torque_limit, 64.0)
-        self.assertEqual(protocol.max_steps, 40000)
+        self.assertEqual(protocol.torque_limit, 20.0)
+        self.assertEqual(protocol.max_steps, 20000)
         self.assertEqual(protocol.as_metadata()["start"], "release")
 
     def test_seed_parser_is_stop_exclusive_and_rejects_duplicates(self):
@@ -98,11 +99,61 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertFalse(task["uniform_start"])
         self.assertFalse(task["paper_start"])
         self.assertEqual(task["damping"], 0.0)
-        self.assertEqual(task["torque_limit"], 64.0)
+        self.assertEqual(task["torque_limit"], 20.0)
+        self.assertEqual(task["failure_reward_rate"], -1.0)
         with self.assertRaises(ValueError):
             RewardMetadata("r2", None)
         with self.assertRaises(ValueError):
             RewardMetadata("r1", 0.2)
+
+    def test_r3_metadata_requires_and_emits_physical_discount_rate(self):
+        env_kwargs = {
+            "task_kwargs": {
+                "reward_kind": "r3",
+                "eta": 0.03,
+                "discount_rate": 0.1,
+                "failure_reward_rate": -2.5,
+            }
+        }
+        configured = resolve_reward_metadata(env_kwargs)
+        self.assertEqual(configured, RewardMetadata("r3", 0.03, 0.1))
+        overridden = resolve_reward_metadata(
+            env_kwargs, eta=0.3, discount_rate=0.2
+        )
+        self.assertEqual(overridden, RewardMetadata("r3", 0.3, 0.2))
+
+        task = build_task_kwargs(
+            env_kwargs, overridden, EvaluationProtocol(seeds=(1,))
+        )
+        self.assertEqual(task["reward_kind"], "r3")
+        self.assertEqual(task["eta"], 0.3)
+        self.assertEqual(task["discount_rate"], 0.2)
+        self.assertEqual(task["failure_reward_rate"], -2.5)
+        self.assertIn("discount_rate", OUTPUT_FIELDS)
+
+        with self.assertRaisesRegex(ValueError, "requires.*discount"):
+            RewardMetadata("r3", 0.1)
+        with self.assertRaisesRegex(ValueError, "only meaningful"):
+            RewardMetadata("r2", 0.1, 0.1)
+
+    def test_cli_accepts_r3_discount_metadata(self):
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "model.pth",
+                "--mode",
+                "xk_r3_eta0p1_fixed1ms_h10s",
+                "--reward-kind",
+                "r3",
+                "--eta",
+                "0.1",
+                "--discount-rate",
+                "0.1",
+            ]
+        )
+        self.assertEqual(args.reward_kind, "r3")
+        self.assertEqual(args.eta, 0.1)
+        self.assertEqual(args.discount_rate, 0.1)
 
     def test_policy_always_requests_deterministic_action(self):
         class Model:
@@ -135,10 +186,10 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertEqual(kwargs["task_name"], "swingup-xk")
         self.assertTrue(kwargs["raw_state_obs"])
         self.assertEqual(kwargs["time_sampling"], "uniform")
-        self.assertEqual(kwargs["dt"], 0.0005)
-        self.assertEqual(kwargs["physics_dt"], 0.0005)
+        self.assertEqual(kwargs["dt"], 0.001)
+        self.assertEqual(kwargs["physics_dt"], 0.001)
         self.assertEqual(kwargs["episode_duration"], 20.0)
-        self.assertEqual(kwargs["max_steps"], 40000)
+        self.assertEqual(kwargs["max_steps"], 20000)
         self.assertFalse(kwargs["return_reward_increment"])
         self.assertTrue(kwargs["task_kwargs"]["release_start"])
 
@@ -162,7 +213,13 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             checkpoint.parent.mkdir()
             checkpoint.write_bytes(b"checkpoint")
             config = SimpleNamespace(
-                env_kwargs={"task_kwargs": {"reward_kind": "r1"}},
+                env_kwargs={
+                    "task_kwargs": {
+                        "reward_kind": "r3",
+                        "eta": 0.03,
+                        "discount_rate": 0.1,
+                    }
+                },
                 model_kwargs={"pi_net_arch": [4]},
                 config_sha256="config-hash",
             )
@@ -171,7 +228,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             model = SimpleNamespace(device=th.device("cpu"))
 
             def fake_rollout(_env, _policy, seed, *, torque_limit):
-                self.assertEqual(torque_limit, 64.0)
+                self.assertEqual(torque_limit, 20.0)
                 return int(seed)
 
             def fake_reduce(trajectory, _params, _tube, *, lqr_threshold):
@@ -202,14 +259,22 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             ):
                 result = evaluate_checkpoint(
                     checkpoint=checkpoint,
-                    mode="xk_r1",
+                    mode="xk_r3_eta0p03_fixed1ms_h10s",
                     config=config,
                     protocol=EvaluationProtocol(seeds=(11, 12)),
                 )
 
             self.assertEqual(len(result.rows), 2)
             self.assertEqual([row["seed"] for row in result.rows], [11, 12])
-            self.assertEqual(result.rows[0]["reward_kind"], "r1")
+            self.assertEqual(result.rows[0]["reward_kind"], "r3")
+            self.assertEqual(result.rows[0]["eta"], 0.03)
+            self.assertEqual(result.rows[0]["discount_rate"], 0.1)
+            self.assertEqual(
+                result.summary["reward_metadata"]["discount_rate"], 0.1
+            )
+            self.assertEqual(
+                result.summary["task_metadata"]["failure_reward_rate"], -1.0
+            )
             self.assertEqual(result.rows[0]["train_seed"], 7)
             self.assertNotIn("episode_return", OUTPUT_FIELDS)
             self.assertNotIn("reward", OUTPUT_FIELDS)

@@ -215,7 +215,10 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
         next_obs: np.ndarray,
         t: Union[float, np.ndarray],
         next_t: Union[float, np.ndarray],
-        infos: Optional[List[Dict[str, Any]]],
+        infos: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]],
+        *,
+        terminated: Optional[Union[bool, np.ndarray]] = None,
+        truncated: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
         Wraps data to suitable arrays and calls ReplayBuffer.add().
@@ -228,15 +231,43 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
         if action.ndim == 1:
             action = action[None, :]
         reward = np.asarray(reward).reshape(-1)
-        done = np.asarray(done).reshape(-1)
+        # ``done`` is the reset/episode-boundary mask supplied by the rollout
+        # loop.  True task termination is the critic's bootstrap mask; an
+        # ordinary time-limit truncation still bootstraps from its stashed
+        # terminal observation.  Optional arguments keep direct legacy callers
+        # backward compatible (their old ``done`` retains its old meaning).
+        episode_end = np.asarray(done).reshape(-1)
+        if terminated is None:
+            objective_done = episode_end.copy()
+        else:
+            objective_done = np.asarray(terminated).reshape(-1)
+        if truncated is not None:
+            truncated_arr = np.asarray(truncated).reshape(-1)
+            if truncated_arr.shape != episode_end.shape:
+                raise ValueError("truncated must contain one value per env slot")
+            if terminated is not None and not np.array_equal(
+                episode_end.astype(bool),
+                np.logical_or(
+                    objective_done.astype(bool), truncated_arr.astype(bool)
+                ),
+            ):
+                raise ValueError(
+                    "done must equal terminated or truncated for every env slot"
+                )
+        if objective_done.shape != episode_end.shape:
+            raise ValueError("terminated must contain one value per env slot")
         t = np.asarray(t).reshape(-1)
         next_t = np.asarray(next_t).reshape(-1)
+
+        cap_failure = np.zeros_like(episode_end, dtype=np.float32)
+        failure_reward_rate = np.zeros_like(episode_end, dtype=np.float32)
+        failure_remaining_time = np.zeros_like(episode_end, dtype=np.float32)
 
         # terminal handling for reset in vec_env
         if isinstance(infos, (list, tuple)):
             for i, info in enumerate(infos):
                 if (
-                    done[i]
+                    episode_end[i]
                     and isinstance(info, dict)
                     and "terminal_observation" in info
                 ):
@@ -244,14 +275,63 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                     if "terminal_next_t" in info:
                         next_t[i] = info["terminal_next_t"]
 
+                if not isinstance(info, dict) or not bool(
+                    info.get("absorbing_failure", False)
+                ):
+                    continue
+                cap_failure[i] = 1.0
+                rate = float(info["absorbing_failure_reward_rate"])
+                remaining = float(info["absorbing_failure_remaining_seconds"])
+                if not np.isfinite(rate) or rate >= 0.0:
+                    raise ValueError(
+                        "absorbing failure reward rate must be finite and < 0"
+                    )
+                if not np.isfinite(remaining) or remaining < 0.0:
+                    raise ValueError(
+                        "absorbing failure remaining time must be finite and >= 0"
+                    )
+                if not episode_end[i] or not objective_done[i]:
+                    raise ValueError(
+                        "an absorbing failure must also be a true episode termination"
+                    )
+                failure_reward_rate[i] = rate
+                failure_remaining_time[i] = remaining
+        elif isinstance(infos, dict):
+            if episode_end[0] and "terminal_observation" in infos:
+                next_obs[0] = infos["terminal_observation"]
+                if "terminal_next_t" in infos:
+                    next_t[0] = infos["terminal_next_t"]
+            if bool(infos.get("absorbing_failure", False)):
+                cap_failure[0] = 1.0
+                rate = float(infos["absorbing_failure_reward_rate"])
+                remaining = float(infos["absorbing_failure_remaining_seconds"])
+                if not np.isfinite(rate) or rate >= 0.0:
+                    raise ValueError(
+                        "absorbing failure reward rate must be finite and < 0"
+                    )
+                if not np.isfinite(remaining) or remaining < 0.0:
+                    raise ValueError(
+                        "absorbing failure remaining time must be finite and >= 0"
+                    )
+                if not episode_end[0] or not objective_done[0]:
+                    raise ValueError(
+                        "an absorbing failure must also be a true episode termination"
+                    )
+                failure_reward_rate[0] = rate
+                failure_remaining_time[0] = remaining
+
         self.replay_buffer.add(
             obs=obs,
             next_obs=next_obs,
             action=action,
             reward=reward,
-            done=done,
+            done=objective_done,
             t=t,
             next_t=next_t,
+            episode_end=episode_end,
+            cap_failure=cap_failure,
+            failure_reward_rate=failure_reward_rate,
+            failure_remaining_time=failure_remaining_time,
         )
 
     # ---------------------- Learn ----------------------
@@ -296,6 +376,8 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 t=t,
                 next_t=next_t,
                 infos=infos,
+                terminated=terminated,
+                truncated=truncated,
             )
             self.num_simulated_seconds += simulated_seconds
 

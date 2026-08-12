@@ -99,6 +99,10 @@ def save_checkpoint(
         actions=buf.actions,
         rewards=buf.rewards,
         dones=buf.dones,
+        episode_ends=buf.episode_ends,
+        cap_failures=buf.cap_failures,
+        failure_reward_rates=buf.failure_reward_rates,
+        failure_remaining_times=buf.failure_remaining_times,
         t=buf.t,
         next_t=buf.next_t,
         dt=buf.dt,
@@ -179,6 +183,23 @@ def load_checkpoint(
         ):
             arr = data[name]
             getattr(buf, name)[...] = arr
+        # Older checkpoints predate the distinction between objective
+        # terminals and reset boundaries and carry no cap-failure annotations.
+        # Preserve their historical behavior while initializing the new
+        # fields deterministically.
+        if "episode_ends" in data:
+            buf.episode_ends[...] = data["episode_ends"]
+        else:
+            buf.episode_ends[...] = buf.dones
+        for name in (
+            "cap_failures",
+            "failure_reward_rates",
+            "failure_remaining_times",
+        ):
+            if name in data:
+                getattr(buf, name)[...] = data[name]
+            else:
+                getattr(buf, name).fill(0.0)
         buf.pos = int(data["pos"])
         buf.full = bool(data["full"])
 

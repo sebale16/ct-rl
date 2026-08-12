@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import os
 
 import numpy as np
 import torch as th
@@ -137,6 +138,77 @@ class TestFreshRunReproducibility(unittest.TestCase):
 
         self.assertEqual(agent.num_timesteps, 17)
         self.assertAlmostEqual(agent.num_simulated_seconds, 0.314)
+
+    def test_checkpoint_restores_replay_failure_annotations(self):
+        agent = _agent(39)
+        buf = agent.replay_buffer
+        buf.add(
+            obs=np.array([[0.0]], dtype=np.float32),
+            action=np.array([[0.25]], dtype=np.float32),
+            reward=np.array([-1.0], dtype=np.float32),
+            done=np.array([0.0], dtype=np.float32),
+            next_obs=np.array([[0.1]], dtype=np.float32),
+            t=np.array([0.0], dtype=np.float64),
+            next_t=np.array([0.02], dtype=np.float64),
+            episode_end=np.array([1.0], dtype=np.float32),
+            cap_failure=np.array([1.0], dtype=np.float32),
+            failure_reward_rate=np.array([-12.0], dtype=np.float32),
+            failure_remaining_time=np.array([0.18], dtype=np.float32),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            save_checkpoint(agent, tmp)
+            for name in (
+                "episode_ends",
+                "cap_failures",
+                "failure_reward_rates",
+                "failure_remaining_times",
+            ):
+                getattr(buf, name).fill(0.0)
+            load_checkpoint(agent, tmp)
+
+        self.assertEqual(buf.episode_ends[0, 0], 1.0)
+        self.assertEqual(buf.cap_failures[0, 0], 1.0)
+        self.assertEqual(buf.failure_reward_rates[0, 0], -12.0)
+        self.assertAlmostEqual(buf.failure_remaining_times[0, 0], 0.18)
+
+    def test_checkpoint_loads_legacy_replay_without_annotations(self):
+        agent = _agent(40)
+        buf = agent.replay_buffer
+        buf.add(
+            obs=np.array([[0.0]], dtype=np.float32),
+            action=np.array([[0.0]], dtype=np.float32),
+            reward=np.array([0.0], dtype=np.float32),
+            done=np.array([1.0], dtype=np.float32),
+            next_obs=np.array([[0.1]], dtype=np.float32),
+            t=np.array([0.0], dtype=np.float64),
+            next_t=np.array([0.02], dtype=np.float64),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            save_checkpoint(agent, tmp)
+            path = os.path.join(tmp, "buffer.npz")
+            with np.load(path, allow_pickle=False) as data:
+                legacy = {
+                    name: data[name]
+                    for name in data.files
+                    if name
+                    not in {
+                        "episode_ends",
+                        "cap_failures",
+                        "failure_reward_rates",
+                        "failure_remaining_times",
+                    }
+                }
+            np.savez(path, **legacy)
+            buf.episode_ends.fill(0.0)
+            buf.cap_failures.fill(1.0)
+            buf.failure_reward_rates.fill(2.0)
+            buf.failure_remaining_times.fill(3.0)
+            load_checkpoint(agent, tmp)
+
+        np.testing.assert_array_equal(buf.episode_ends, buf.dones)
+        self.assertFalse(np.any(buf.cap_failures))
+        self.assertFalse(np.any(buf.failure_reward_rates))
+        self.assertFalse(np.any(buf.failure_remaining_times))
 
     def test_fixed_evaluation_seed_replays_the_same_episode_stream(self):
         agent = _agent(41)

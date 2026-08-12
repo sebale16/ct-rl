@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import pathlib
 from copy import deepcopy
@@ -18,11 +19,12 @@ from models.port_hamiltonian import FlowIntegrationError, integrate_drift
 
 
 class ModelBasedTargetNumericalError(RuntimeError):
-    """A model-based critic target failure safe for guarded fallback.
+    """A typed CT-SAC critic-target numerical failure.
 
-    This deliberately excludes arbitrary ``RuntimeError`` instances. Only
-    explicitly detected non-finite target/flow conditions use this type, so an
-    OOM or programming error cannot be mistaken for learned-model divergence.
+    The model-based guard catches this type only around its model branch; a
+    non-finite model-free anchor still propagates. Arbitrary ``RuntimeError``
+    instances remain distinct, so an OOM or programming error cannot be
+    mistaken for learned-model divergence.
     """
 
 
@@ -258,7 +260,7 @@ class CTSAC(OffPolicyAlgorithm):
         model_kwargs: Optional[Dict[str, Any]] = None,
         device: Union[str, th.device] = "auto",
         seed: Optional[int] = None,
-        gamma: float = 0.99,
+        gamma: Optional[float] = None,
         buffer_size: int = 1_000_000,
         learning_rate: Union[float, Schedule] = 3e-4,
         batch_size: int = 256,
@@ -297,14 +299,59 @@ class CTSAC(OffPolicyAlgorithm):
         dynamics_rollout_interval: int = 1,
         target_reanchor: bool = False,
         target_reanchor_gate_rho: float = 0.0,
+        *,
+        # Physical-time target semantics. ``gamma`` remains the legacy discount
+        # per target-reference interval. New experiments should instead provide
+        # ``discount_rate`` in s^-1 and an explicit ``target_reference_dt`` in
+        # seconds so neither quantity depends on a simulator's native control
+        # timestep. ``reward_is_rate`` converts a physical reward rate to the
+        # reference-interval contribution used by the CT-SAC critic.
+        discount_rate: Optional[float] = None,
+        target_reference_dt: Optional[float] = None,
+        reward_is_rate: bool = False,
     ) -> None:
+        if gamma is not None and discount_rate is not None:
+            raise ValueError(
+                "Specify either gamma (per target reference interval) or "
+                "discount_rate (per physical second), not both."
+            )
+        legacy_gamma = 0.99 if gamma is None else float(gamma)
+        if not np.isfinite(legacy_gamma) or not 0.0 < legacy_gamma <= 1.0:
+            raise ValueError(f"gamma must be finite and in (0, 1], got {gamma!r}")
+        if discount_rate is not None:
+            discount_rate = float(discount_rate)
+            if not np.isfinite(discount_rate) or discount_rate < 0.0:
+                raise ValueError(
+                    "discount_rate must be finite and >= 0 s^-1, got "
+                    f"{discount_rate!r}"
+                )
+        if isinstance(reward_is_rate, str):
+            normalized = reward_is_rate.strip().lower()
+            if normalized in ("1", "true", "yes"):
+                reward_is_rate = True
+            elif normalized in ("0", "false", "no"):
+                reward_is_rate = False
+            else:
+                raise ValueError(
+                    "reward_is_rate must be a boolean value, got "
+                    f"{reward_is_rate!r}"
+                )
+        reward_is_rate = bool(reward_is_rate)
+        if (
+            discount_rate is not None or reward_is_rate
+        ) and target_reference_dt is None:
+            raise ValueError(
+                "target_reference_dt must be explicit when discount_rate or "
+                "reward_is_rate is configured"
+            )
+
         super().__init__(
             env=env,
             model=model,
             model_kwargs=model_kwargs,
             device=device,
             seed=seed,
-            gamma=gamma,
+            gamma=legacy_gamma,
             buffer_size=buffer_size,
             learning_rate=learning_rate,
             batch_size=batch_size,
@@ -312,6 +359,39 @@ class CTSAC(OffPolicyAlgorithm):
             gradient_steps=gradient_steps,
             learning_starts=learning_starts,
         )
+        reference_dt = (
+            float(self.dt_default)
+            if target_reference_dt is None
+            else float(target_reference_dt)
+        )
+        if not np.isfinite(reference_dt) or reference_dt <= 0.0:
+            raise ValueError(
+                "target_reference_dt must be finite and > 0 seconds, got "
+                f"{target_reference_dt!r}"
+            )
+
+        # ``dt_default`` is retained as a compatibility alias because the
+        # model-based/re-anchored target paths already use it as their nominal
+        # integration duration. It now means the explicit target reference,
+        # never an implicitly re-read simulator clock when the new argument is
+        # supplied.
+        self.target_reference_dt = reference_dt
+        self.dt_default = reference_dt
+        self.time_rescale = 1.0 / reference_dt
+        if discount_rate is None:
+            self.gamma = legacy_gamma
+            self.beta = -math.log(self.gamma)  # per reference interval
+            self.discount_rate = self.beta / reference_dt  # physical s^-1
+        else:
+            self.discount_rate = discount_rate
+            self.beta = self.discount_rate * reference_dt
+            self.gamma = math.exp(-self.beta)
+        self.discount_horizon_seconds = (
+            math.inf if self.discount_rate == 0.0 else 1.0 / self.discount_rate
+        )
+        self.reward_is_rate = reward_is_rate
+        self._validate_reward_discount_rate(self.env)
+
         # Target entropy: "auto" -> -|A|, else use float value
         self.target_entropy = target_entropy
         action_dim = int(np.prod(self.env.action_space.shape))
@@ -596,6 +676,43 @@ class CTSAC(OffPolicyAlgorithm):
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
 
+    def _validate_reward_discount_rate(self, env) -> None:
+        """Require an r3 task's shaping rate to match the critic discount.
+
+        The same physical ``lambda`` appears in both the r3 reward and the
+        Bellman target.  A mismatch silently destroys the advertised
+        discount-consistent potential transformation, so reject it through
+        common vector/Gym wrapper layers at construction time.
+        """
+        pending = [env]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            pending.extend(getattr(current, "envs", ()) or ())
+            wrapped = getattr(current, "env", None)
+            if wrapped is not None:
+                pending.append(wrapped)
+
+            dm_env = getattr(current, "_env", None)
+            task = getattr(dm_env, "task", None)
+            if str(getattr(task, "reward_kind", "")).lower() != "r3":
+                continue
+            reward_rate = getattr(task, "discount_rate", None)
+            if reward_rate is None or not math.isclose(
+                float(reward_rate),
+                self.discount_rate,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "reward_kind='r3' requires the task discount_rate to "
+                    "match CT-SAC discount_rate; got "
+                    f"{reward_rate!r} and {self.discount_rate!r}"
+                )
+
     @staticmethod
     def _coerce_target_guard_parameter(name: str, value: Any) -> float:
         """Parse an optional CSV guard value and reject unsafe settings."""
@@ -866,7 +983,7 @@ class CTSAC(OffPolicyAlgorithm):
         )
         bad = int((~finite).sum())
         raise ModelBasedTargetNumericalError(
-            "Model-based critic target is non-finite: "
+            "CT-SAC critic target is non-finite: "
             f"component={name}; bad={bad}/{value.numel()}, shape={tuple(value.shape)}, "
             f"max_abs_finite={max_abs_finite:.6g}."
         )
@@ -1109,30 +1226,7 @@ class CTSAC(OffPolicyAlgorithm):
                 self.logger.record("train/value_loss", value_loss.item())
 
             ## Critic update (target)
-            # Use the model-based generator once the dynamics model is ready:
-            # immediately for a non-trainable oracle, after warmup for a learned model.
-            dynamics_ready = self._dynamics_ready
-            if (
-                self.use_model_based_q
-                and self.dynamics_model is not None
-                and dynamics_ready
-            ):
-                if self._target_guard_enabled:
-                    q_fast_target = self._guarded_model_based_target(
-                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
-                    )
-                else:
-                    q_fast_target = self._model_based_target(
-                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
-                    )
-                # Each model-based construction performs one aggregate finite
-                # check and diagnoses the first bad component only on failure.
-                # There is deliberately no model-free fallback outside the
-                # explicit, separately-labeled guard mode (target_guard_*).
-            else:
-                q_fast_target = self._finite_difference_target(
-                    obs, next_obs, rewards, dones, dt, alpha_tensor
-                )
+            q_fast_target = self._critic_target(batch, alpha_tensor)
 
             # Calculate critic loss
             current_q_list = self.model.q_values(obs, actions)  # list of (B, 1)
@@ -1169,6 +1263,178 @@ class CTSAC(OffPolicyAlgorithm):
         self.logger.record("train/n_updates", self._n_updates)
 
     # ------------------------ Critic targets ------------------------
+
+    def _critic_target(
+        self, batch: ReplayBatch, alpha_tensor: th.Tensor
+    ) -> th.Tensor:
+        """Build one target batch without bootstrapping through cap failures.
+
+        Ordinary rows retain the configured model-free/model-based target.
+        Cap rows take a separate analytical route and are never passed through
+        a learned endpoint value or dynamics target.  Splitting before target
+        evaluation is important: merely overwriting afterward would still let
+        a non-finite learned terminal value poison the batch.
+        """
+        cap_mask = batch.cap_failures.reshape(-1) > 0.5
+        regular_mask = ~cap_mask
+        target = th.empty_like(batch.rewards)
+
+        if bool(th.any(cap_mask)):
+            cap_dones = batch.dones[cap_mask]
+            cap_ends = batch.episode_ends[cap_mask]
+            if bool(th.any(cap_dones <= 0.5)) or bool(th.any(cap_ends <= 0.5)):
+                raise ValueError(
+                    "cap-failure replay rows must be true terminal episode ends"
+                )
+            target[cap_mask] = self._absorbing_failure_target(
+                batch.observations[cap_mask],
+                batch.rewards[cap_mask],
+                batch.dt[cap_mask],
+                batch.failure_reward_rates[cap_mask],
+                batch.failure_remaining_times[cap_mask],
+                alpha_tensor,
+            )
+
+        if bool(th.any(regular_mask)):
+            obs = batch.observations[regular_mask]
+            actions = batch.actions[regular_mask]
+            next_obs = batch.next_observations[regular_mask]
+            rewards = batch.rewards[regular_mask]
+            dones = batch.dones[regular_mask]
+            dt = batch.dt[regular_mask]
+            dynamics_ready = self._dynamics_ready
+            if (
+                self.use_model_based_q
+                and self.dynamics_model is not None
+                and dynamics_ready
+            ):
+                if self._target_guard_enabled:
+                    regular_target = self._guarded_model_based_target(
+                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+                    )
+                else:
+                    regular_target = self._model_based_target(
+                        obs, actions, next_obs, rewards, dones, dt, alpha_tensor
+                    )
+                # Each model-based construction performs one aggregate finite
+                # check and diagnoses the first bad component only on failure.
+                # There is deliberately no model-free fallback outside the
+                # explicit, separately-labeled guard mode (target_guard_*).
+            else:
+                regular_target = self._finite_difference_target(
+                    obs, next_obs, rewards, dones, dt, alpha_tensor
+                )
+            target[regular_mask] = regular_target
+
+        self._require_finite_target_component("q_fast_target", target)
+        self.logger.record(
+            "train/cap_failure_fraction", cap_mask.to(th.float32).mean().item()
+        )
+        return target.detach()
+
+    def _absorbing_failure_target(
+        self,
+        obs: th.Tensor,
+        rewards: th.Tensor,
+        dt: th.Tensor,
+        failure_reward_rates: th.Tensor,
+        failure_remaining_times: th.Tensor,
+        alpha_tensor: th.Tensor,
+    ) -> th.Tensor:
+        r"""Analytical cap target over the unexecuted episode remainder.
+
+        For reference interval ``T``, realized duration ``h``, physical
+        discount rate ``lambda``, remaining time ``R`` and constant absorbing
+        failure rate ``r_F``, the known endpoint value is
+
+        ``G_F = r_F (1-exp(-lambda R))/lambda``
+
+        (or ``r_F R`` at zero discount).  It replaces the learned ``V(s')`` in
+        the CT finite-difference target.  At the regular ``h == T`` interval,
+        the current-value anchor cancels exactly:
+
+        ``y_F = T r_F + exp(-lambda T) G_F``.
+
+        The cap endpoint and unexecuted tail both use the action-independent
+        failure rate.  The selected environment reward is retained only as a
+        diagnostic, and no dummy absorbing transitions are inserted in replay.
+        For r3 this safety terminal deliberately omits a terminal-potential
+        jump; exact PBRS equivalence is therefore not claimed at finite caps.
+        """
+        with th.no_grad():
+            dt_seconds = _duration_column(dt, rewards, name="dt")
+            if bool(th.any(dt_seconds <= 0.0)):
+                raise ValueError("dt values must be strictly positive")
+            rates = th.as_tensor(
+                failure_reward_rates,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            )
+            if rates.numel() == 1:
+                rates = rates.reshape(1, 1).expand(rewards.shape[0], 1)
+            elif rates.numel() == rewards.shape[0]:
+                rates = rates.reshape(rewards.shape[0], 1)
+            else:
+                raise ValueError(
+                    "failure_reward_rates must contain one value per row"
+                )
+            if not bool(th.all(th.isfinite(rates))):
+                raise ValueError("failure reward rates must be finite")
+            remaining = _duration_column(
+                failure_remaining_times,
+                rewards,
+                name="failure_remaining_times",
+            )
+            if bool(th.any(rates >= 0.0)):
+                raise ValueError("failure reward rates must be strictly negative")
+
+            discount_log = -self.discount_rate * dt_seconds
+            gamma_dt = th.exp(discount_log)
+            if self.discount_rate == 0.0:
+                continuation = rates * remaining
+            else:
+                continuation = rates * (
+                    -th.expm1(-self.discount_rate * remaining)
+                    / self.discount_rate
+                )
+
+            reference_dt = rewards.new_tensor(self.target_reference_dt)
+            nominal = (dt_seconds == reference_dt).reshape(-1)
+            future = th.empty_like(rewards)
+            if bool(th.any(nominal)):
+                future[nominal] = (
+                    gamma_dt[nominal] * continuation[nominal]
+                )
+            irregular = ~nominal
+            if bool(th.any(irregular)):
+                # V(s) is the existing CT re-anchor for h != T.  It is not a
+                # learned terminal bootstrap; the endpoint is still G_F.
+                value_current = self._state_value(
+                    obs[irregular], alpha_tensor
+                )
+                ratio = dt_seconds[irregular] / reference_dt
+                future[irregular] = value_current + (
+                    gamma_dt[irregular] * continuation[irregular]
+                    - value_current
+                ) / ratio
+
+            # r_F is always a physical reward rate, independent of the legacy
+            # ``reward_is_rate`` switch used by ordinary environments.
+            reward_term = rates * reference_dt
+            target = reward_term + future
+            self._require_finite_target_components(
+                (
+                    ("failure_reward_rate", rates),
+                    ("failure_remaining_time", remaining),
+                    ("failure_continuation", continuation),
+                    ("failure_target", target),
+                )
+            )
+            self.logger.record(
+                "train/failure_continuation_max_abs",
+                continuation.abs().max().item(),
+            )
+            return target.detach()
 
     @property
     def _value_head_ready(self) -> bool:
@@ -1214,10 +1480,17 @@ class CTSAC(OffPolicyAlgorithm):
     def _finite_difference_target(
         self, obs, next_obs, rewards, dones, dt, alpha_tensor
     ) -> th.Tensor:
-        """Model-free target (Eq. 166): generator estimated by a finite difference
-        over the sampled next state.
+        """Model-free target: generator estimated over the physical duration.
 
-          Q_fast = r + E[Q̃(s,a)] + (e^(-β*dt) E[Q̃(s',a')] - E[Q̃(s,a)]) / dt
+        For target reference interval ``T`` and physical discount rate
+        ``beta_phys``::
+
+          Q_fast = r_T + V(s)
+                   + T * (exp(-beta_phys*dt) V(s') - V(s)) / dt
+
+        where ``r_T = T*r`` for a physical reward rate and ``r_T = r`` for
+        legacy per-reference-interval rewards. At ``dt == T`` this reduces
+        exactly to the ordinary soft-SAC target ``r_T + gamma_T*V(s')``.
         """
         with th.no_grad():
             expectation_q_tilde_next = self._state_value(next_obs, alpha_tensor)
@@ -1230,6 +1503,19 @@ class CTSAC(OffPolicyAlgorithm):
                 dt,
             )
 
+    def _target_reward_term(self, rewards: th.Tensor) -> th.Tensor:
+        """Convert configured rewards to one target-reference-interval.
+
+        Historical environments expose a reward already normalized per
+        reference interval. Acrobot-XK explicitly exposes a physical reward
+        rate, for which the CT target requires multiplication by ``T``.
+        """
+        return (
+            rewards * self.target_reference_dt
+            if self.reward_is_rate
+            else rewards
+        )
+
     def _finite_difference_target_from_values(
         self, V_cur, V_next, rewards, dones, dt
     ) -> th.Tensor:
@@ -1239,17 +1525,53 @@ class CTSAC(OffPolicyAlgorithm):
         anchor share the exact same ``V_cur`` rather than performing a second
         stochastic value read.  Callers are expected to hold ``no_grad``.
         """
-        dt_rescaled = th.as_tensor(
-            dt, dtype=V_cur.dtype, device=V_cur.device
-        ) * self.time_rescale
-        gamma_dt = th.exp(-self.beta * dt_rescaled)
-        fraction = (
-            gamma_dt * V_next - V_cur
-        ) / (dt_rescaled + 1e-8)
+        dt_seconds = _duration_column(dt, V_cur, name="dt")
+        if bool(th.any(dt_seconds <= 0.0)):
+            raise ValueError("dt values must be strictly positive")
+
+        reference_dt = V_cur.new_tensor(self.target_reference_dt)
+        dt_ratio = dt_seconds / reference_dt
+        discount_log = -self.discount_rate * dt_seconds
+        gamma_dt = th.exp(discount_log)
+
+        # Evaluate the difference as delta-V plus expm1's accurate discount
+        # correction. This avoids subtracting nearly equal values when dt is
+        # very small. For nominal rows use the algebraically reduced expression
+        # directly, eliminating both the current-value sample and roundoff from
+        # subtracting and re-adding it.
+        value_delta = V_next - V_cur
+        discount_delta = th.expm1(discount_log)
+        fraction = (value_delta + discount_delta * V_next) / dt_ratio
         future_val = V_cur + fraction
-        q_fast_target = rewards + (1 - dones) * future_val
+        nominal = dt_seconds == reference_dt
+        future_val = th.where(nominal, gamma_dt * V_next, future_val)
+        fraction = future_val - V_cur
+
+        reward_term = self._target_reward_term(rewards)
+        q_fast_target = reward_term + (1 - dones) * future_val
+        self._require_finite_target_components(
+            (
+                ("V_cur", V_cur),
+                ("V_next", V_next),
+                ("reward_term", reward_term),
+                ("finite_difference_increment", fraction),
+                ("q_fast_target", q_fast_target),
+            )
+        )
 
         self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
+        self.logger.record("train/dt_ratio_min", th.min(dt_ratio).item())
+        self.logger.record("train/dt_ratio_max", th.max(dt_ratio).item())
+        self.logger.record("train/gamma_dt_min", th.min(gamma_dt).item())
+        self.logger.record("train/gamma_dt_max", th.max(gamma_dt).item())
+        self.logger.record("train/discount_rate", self.discount_rate)
+        self.logger.record(
+            "train/target_reference_dt", self.target_reference_dt
+        )
+        self.logger.record(
+            "train/reward_target_scale",
+            self.target_reference_dt if self.reward_is_rate else 1.0,
+        )
         return q_fast_target.detach()
 
     def _model_based_target(
@@ -1279,7 +1601,7 @@ class CTSAC(OffPolicyAlgorithm):
         by a sub-step quadrature: integrate the model over the nominal interval
         with the same finite-duration flow routine used by dynamics fitting and
         read the value change directly from the V-head endpoints,
-        lf = (V(x_hat) - V(x)) - beta*V(x). This is autograd-free and captures
+          lf = (V(x_hat) - V(x)) - beta*V(x). This is autograd-free and captures
         curvature the first-order term drops. ``m=1`` is a single Euler step only
         when no finer dynamics integration step applies. See
         docs/ct_sac_substep_quadrature.md.
@@ -1337,7 +1659,10 @@ class CTSAC(OffPolicyAlgorithm):
                 hess = hess + (sj * hvp).sum(dim=-1, keepdim=True)
             lf = lf + self.dt_default * 0.5 * hess.detach()
 
-        q_fast_target = (rewards + (1 - dones) * (V_det + lf.detach())).detach()
+        reward_term = self._target_reward_term(rewards)
+        q_fast_target = (
+            reward_term + (1 - dones) * (V_det + lf.detach())
+        ).detach()
         if check:
             self._require_finite_target_components(
                 (
@@ -1363,7 +1688,7 @@ class CTSAC(OffPolicyAlgorithm):
         the model is integrated with explicit-Euler steps no larger than
         min(dt_default/m, dynamics_integration_step) when the latter is known. The
         V-head is read at the rolled endpoint and the value change is taken directly:
-          lf = (V(x_hat) - V(x)) - beta*V(x),  target = r + V(x) + lf.
+          lf = (V(x_hat) - V(x)) - beta*V(x),  target = r_T + V(x) + lf.
         No autograd / gradient is used; the value gradient and its curvature enter
         through the finite difference of the (clean) V-head over the predicted
         states. Larger m requests a finer integration; an even finer exposed
@@ -1401,7 +1726,10 @@ class CTSAC(OffPolicyAlgorithm):
             V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
             V_next = self._state_value(x_hat, alpha_tensor)  # (B, 1) at rolled state
             lf = (V_next - V_cur) - self.beta * V_cur
-            q_fast_target = (rewards + (1 - dones) * (V_cur + lf)).detach()
+            reward_term = self._target_reward_term(rewards)
+            q_fast_target = (
+                reward_term + (1 - dones) * (V_cur + lf)
+            ).detach()
             try:
                 if check:
                     self._require_finite_target_components(
@@ -1455,7 +1783,8 @@ class CTSAC(OffPolicyAlgorithm):
         preserves. The state-space defect and guard's target-space median remain
         distinct statistics.
 
-          lf = (V(x_re) - V(x)) - beta * V(x),   y_re = r + keep * (V(x) + lf)
+          lf = (V(x_re) - V(x)) - beta * V(x),
+          y_re = r_T + keep * (V(x) + lf)
 
         With ``target_reanchor_gate_rho`` = rho0 > 0, each sample is
         additionally blended toward the model-free finite-difference target by
@@ -1515,7 +1844,8 @@ class CTSAC(OffPolicyAlgorithm):
             V_cur = self._state_value(obs, alpha_tensor)  # (B, 1)
             V_re = self._state_value(x_re, alpha_tensor)  # (B, 1)
             lf = (V_re - V_cur) - self.beta * V_cur
-            y_re = (rewards + (1 - dones) * (V_cur + lf)).detach()
+            reward_term = self._target_reward_term(rewards)
+            y_re = (reward_term + (1 - dones) * (V_cur + lf)).detach()
 
             rho, innovation_rho, mismatch_fraction = reanchor_gate_statistics(
                 obs, next_obs, innovation, dt, self.dt_default

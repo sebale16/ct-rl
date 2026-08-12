@@ -624,6 +624,11 @@ class DMCContinuousEnv(ContinuousEnv):
                         reward_terms
                     ).items():
                         info.setdefault(key, value)
+                termination_reason = getattr(task, "last_termination_reason", None)
+                if termination_reason is not None:
+                    info["acrobot_xk_termination_reason"] = str(
+                        termination_reason
+                    )
             return info
 
         if not hasattr(task, "reward_terms"):
@@ -762,18 +767,62 @@ class DMCContinuousEnv(ContinuousEnv):
             is_last and ts.discount is not None and float(ts.discount) == 0.0
         )
         truncated = is_last and not terminated
+        effective_discount = ts.discount
+
+        # dm_control checks its internal step limit before asking a task for
+        # termination.  Re-evaluate the Acrobot-XK state caps here so a cap
+        # crossed on the final scheduled step is still classified as a cap,
+        # rather than being silently relabeled as an ordinary time limit.
+        task = self._env.task
+        xk_terms_fn = getattr(task, "xk_diagnostic_terms", None)
+        termination_fn = getattr(task, "get_termination", None)
+        if callable(xk_terms_fn) and callable(termination_fn):
+            xk_discount = termination_fn(self._env.physics)
+            if xk_discount is not None:
+                terminated = True
+                truncated = False
+                effective_discount = float(xk_discount)
 
         # Track elapsed time separately for diagnostics
         self._elapsed_time += float(actual_dt)
 
         info: Dict[str, Any] = {
             "elapsed_time": self._elapsed_time,
-            "discount": ts.discount,
+            "discount": effective_discount,
             "dt_requested": float(dt),
             "dt_used": float(actual_dt),
         }
         info.update(self._acrobot_reward_info(update=True))
         info.update(self._curriculum_task_info())
+
+        # A state-cap failure stops and resets immediately, but CT-SAC still
+        # needs the return of the action-independent absorbing failure state
+        # over the unexecuted portion of this finite episode.  Store only the
+        # primitive rate and remaining physical time here; the learner applies
+        # its own physical discount rate analytically in the critic target.
+        termination_reason = getattr(task, "last_termination_reason", None)
+        if termination_reason is not None:
+            if self.episode_duration is None:
+                raise RuntimeError(
+                    "Acrobot-XK cap failures require a finite "
+                    "episode_duration to define their analytical continuation"
+                )
+            failure_rate = float(getattr(task, "failure_reward_rate", -1.0))
+            remaining = max(
+                0.0, float(self.episode_duration) - float(self._elapsed_time)
+            )
+            info["absorbing_failure"] = 1.0
+            info["absorbing_failure_reward_rate"] = failure_rate
+            info["absorbing_failure_remaining_seconds"] = remaining
+            # The cap endpoint is the first sample of the absorbing failure
+            # state, so its emitted reward rate is action-independent as well.
+            # ``acrobot_xk_reward`` in info still retains the selected r0--r3
+            # endpoint value for diagnostics.
+            if "acrobot_xk_reward" in info:
+                info["acrobot_xk_unpenalized_reward"] = info[
+                    "acrobot_xk_reward"
+                ]
+            reward = failure_rate
 
         return obs, reward, terminated, truncated, info, float(actual_dt)
 

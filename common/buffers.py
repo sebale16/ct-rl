@@ -29,6 +29,10 @@ class ReplayBatch:
     next_observations: th.Tensor
     rewards: th.Tensor
     dones: th.Tensor
+    episode_ends: th.Tensor
+    cap_failures: th.Tensor
+    failure_reward_rates: th.Tensor
+    failure_remaining_times: th.Tensor
     t: th.Tensor
     next_t: th.Tensor
     dt: th.Tensor
@@ -132,7 +136,13 @@ class BaseBuffer(ABC):
 class ReplayBuffer(BaseBuffer):
     """
     Simple off-policy replay buffer with time-awareness:
-    stores (s, a, r, done, s', t, t', dt).
+    stores (s, a, r, done, episode_end, cap_failure,
+    failure_reward_rate, failure_remaining_time, s', t, t', dt).
+
+    ``done`` is the terminal mask for the learning objective. ``episode_end``
+    records every reset boundary, including time-limit truncations that should
+    continue bootstrapping. The failure fields annotate cap-triggered episode
+    endings without changing the objective mask.
     """
 
     def __init__(
@@ -161,6 +171,18 @@ class ReplayBuffer(BaseBuffer):
         # (T, n_env)
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.episode_ends = np.zeros(
+            (self.buffer_size, self.n_envs), dtype=np.float32
+        )
+        self.cap_failures = np.zeros(
+            (self.buffer_size, self.n_envs), dtype=np.float32
+        )
+        self.failure_reward_rates = np.zeros(
+            (self.buffer_size, self.n_envs), dtype=np.float32
+        )
+        self.failure_remaining_times = np.zeros(
+            (self.buffer_size, self.n_envs), dtype=np.float32
+        )
         self.t = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.next_t = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.dt = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
@@ -174,12 +196,20 @@ class ReplayBuffer(BaseBuffer):
         next_obs: np.ndarray,
         t: np.ndarray,
         next_t: np.ndarray,
+        *,
+        episode_end: Optional[np.ndarray] = None,
+        cap_failure: Optional[np.ndarray] = None,
+        failure_reward_rate: Optional[np.ndarray] = None,
+        failure_remaining_time: Optional[np.ndarray] = None,
     ) -> None:
         """
         Add a batch of transitions for all envs.
 
         All inputs are expected shape (n_envs, ...) for obs/action/etc,
-        and (n_envs,) for reward/done/t/next_t.
+        and (n_envs,) for reward/done/t/next_t and optional annotations.
+
+        For compatibility with older callers, ``episode_end`` defaults to
+        ``done`` and the failure annotations default to zero.
         """
         # Ensure proper shapes for vectorized envs
         obs = np.asarray(obs, dtype=np.float32).reshape((self.n_envs, *self.obs_shape))
@@ -192,17 +222,61 @@ class ReplayBuffer(BaseBuffer):
         )
         reward = np.asarray(reward, dtype=np.float32).reshape((self.n_envs,))
         done = np.asarray(done, dtype=np.float32).reshape((self.n_envs,))
-        t = np.asarray(t, dtype=np.float32).reshape((self.n_envs,))
-        next_t = np.asarray(next_t, dtype=np.float32).reshape((self.n_envs,))
+        episode_end = np.asarray(
+            done if episode_end is None else episode_end,
+            dtype=np.float32,
+        ).reshape((self.n_envs,))
+        cap_failure = np.asarray(
+            0.0 if cap_failure is None else cap_failure,
+            dtype=np.float32,
+        )
+        if cap_failure.ndim == 0:
+            cap_failure = np.full((self.n_envs,), cap_failure, dtype=np.float32)
+        else:
+            cap_failure = cap_failure.reshape((self.n_envs,))
+        failure_reward_rate = np.asarray(
+            0.0 if failure_reward_rate is None else failure_reward_rate,
+            dtype=np.float32,
+        )
+        if failure_reward_rate.ndim == 0:
+            failure_reward_rate = np.full(
+                (self.n_envs,), failure_reward_rate, dtype=np.float32
+            )
+        else:
+            failure_reward_rate = failure_reward_rate.reshape((self.n_envs,))
+        failure_remaining_time = np.asarray(
+            0.0 if failure_remaining_time is None else failure_remaining_time,
+            dtype=np.float32,
+        )
+        if failure_remaining_time.ndim == 0:
+            failure_remaining_time = np.full(
+                (self.n_envs,), failure_remaining_time, dtype=np.float32
+            )
+        else:
+            failure_remaining_time = failure_remaining_time.reshape(
+                (self.n_envs,)
+            )
+        # Form the small duration before narrowing the much larger absolute
+        # timestamps to float32.  For example, float32(20.0) -
+        # float32(19.9995) is not an accurate representation of 0.5 ms.
+        t64 = np.asarray(t, dtype=np.float64).reshape((self.n_envs,))
+        next_t64 = np.asarray(next_t, dtype=np.float64).reshape((self.n_envs,))
+        dt = np.asarray(next_t64 - t64, dtype=np.float32)
+        t = np.asarray(t64, dtype=np.float32)
+        next_t = np.asarray(next_t64, dtype=np.float32)
 
         self.observations[self.pos] = obs
         self.next_observations[self.pos] = next_obs
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
         self.dones[self.pos] = done
+        self.episode_ends[self.pos] = episode_end
+        self.cap_failures[self.pos] = cap_failure
+        self.failure_reward_rates[self.pos] = failure_reward_rate
+        self.failure_remaining_times[self.pos] = failure_remaining_time
         self.t[self.pos] = t
         self.next_t[self.pos] = next_t
-        self.dt[self.pos] = next_t - t
+        self.dt[self.pos] = dt
 
         self.pos += 1
         if self.pos >= self.buffer_size:
@@ -224,6 +298,12 @@ class ReplayBuffer(BaseBuffer):
         actions = self.actions[batch_inds, env_inds, :]
         rewards = self.rewards[batch_inds, env_inds]
         dones = self.dones[batch_inds, env_inds]
+        episode_ends = self.episode_ends[batch_inds, env_inds]
+        cap_failures = self.cap_failures[batch_inds, env_inds]
+        failure_reward_rates = self.failure_reward_rates[batch_inds, env_inds]
+        failure_remaining_times = self.failure_remaining_times[
+            batch_inds, env_inds
+        ]
         t = self.t[batch_inds, env_inds]
         next_t = self.next_t[batch_inds, env_inds]
         dt = self.dt[batch_inds, env_inds]
@@ -231,6 +311,10 @@ class ReplayBuffer(BaseBuffer):
         # Add singleton dim for rewards/dones/time (batch, 1)
         rewards = rewards.reshape(-1, 1)
         dones = dones.reshape(-1, 1)
+        episode_ends = episode_ends.reshape(-1, 1)
+        cap_failures = cap_failures.reshape(-1, 1)
+        failure_reward_rates = failure_reward_rates.reshape(-1, 1)
+        failure_remaining_times = failure_remaining_times.reshape(-1, 1)
         t = t.reshape(-1, 1)
         next_t = next_t.reshape(-1, 1)
         dt = dt.reshape(-1, 1)
@@ -241,6 +325,10 @@ class ReplayBuffer(BaseBuffer):
             next_observations=self.to_torch(next_obs),
             rewards=self.to_torch(rewards),
             dones=self.to_torch(dones),
+            episode_ends=self.to_torch(episode_ends),
+            cap_failures=self.to_torch(cap_failures),
+            failure_reward_rates=self.to_torch(failure_reward_rates),
+            failure_remaining_times=self.to_torch(failure_remaining_times),
             t=self.to_torch(t),
             next_t=self.to_torch(next_t),
             dt=self.to_torch(dt),
@@ -286,12 +374,12 @@ class ReplayBuffer(BaseBuffer):
         dt = self.dt[steps, env_cols]                           # (B, H)
 
         # Step k stays valid while every earlier transition in the window kept
-        # the episode alive and step k did not enter the seam slot. The done
-        # transition itself is a valid target; the step after it is not.
+        # the episode alive and step k did not enter the seam slot. The episode
+        # ending transition itself is a valid target; the step after it is not.
         valid = np.ones((batch, horizon), dtype=np.float32)
         if horizon > 1:
             cont = (
-                (self.dones[steps[:, :-1], env_cols] <= 0.5)
+                (self.episode_ends[steps[:, :-1], env_cols] <= 0.5)
                 & (steps[:, 1:] != seam)
             ).astype(np.float32)  # (B, H-1)
             valid[:, 1:] = np.cumprod(cont, axis=1)
@@ -393,8 +481,11 @@ class RolloutBuffer(BaseBuffer):
         episode_start = np.asarray(episode_start, dtype=np.float32).reshape(
             (self.n_envs,)
         )
-        t = np.asarray(t, dtype=np.float32).reshape((self.n_envs,))
-        next_t = np.asarray(next_t, dtype=np.float32).reshape((self.n_envs,))
+        t64 = np.asarray(t, dtype=np.float64).reshape((self.n_envs,))
+        next_t64 = np.asarray(next_t, dtype=np.float64).reshape((self.n_envs,))
+        dt = np.asarray(next_t64 - t64, dtype=np.float32)
+        t = np.asarray(t64, dtype=np.float32)
+        next_t = np.asarray(next_t64, dtype=np.float32)
 
         self.observations[self.pos] = obs
         self.next_observations[self.pos] = next_obs
@@ -408,7 +499,7 @@ class RolloutBuffer(BaseBuffer):
 
         self.t[self.pos] = t
         self.next_t[self.pos] = next_t
-        self.dt[self.pos] = next_t - t
+        self.dt[self.pos] = dt
 
         self.pos += 1
         if self.pos >= self.buffer_size:

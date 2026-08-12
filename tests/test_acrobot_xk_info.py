@@ -59,8 +59,13 @@ class TestAcrobotXKInfo(unittest.TestCase):
         self.assertNotIn("acrobot_xk_vector_debug_value", info)
 
     def test_real_xk_modes_publish_the_same_capture_contract(self):
-        modes = (("r0", None), ("r1", None), ("r2", 0.25))
-        for reward_kind, eta in modes:
+        modes = (
+            ("r0", None, None),
+            ("r1", None, None),
+            ("r2", 0.25, None),
+            ("r3", 0.25, 0.1),
+        )
+        for reward_kind, eta, discount_rate in modes:
             with self.subTest(reward_kind=reward_kind):
                 task_kwargs = {
                     "reward_kind": reward_kind,
@@ -68,6 +73,8 @@ class TestAcrobotXKInfo(unittest.TestCase):
                 }
                 if eta is not None:
                     task_kwargs["eta"] = eta
+                if discount_rate is not None:
+                    task_kwargs["discount_rate"] = discount_rate
                 env = DMCContinuousEnv(
                     "acrobot",
                     "swingup-xk",

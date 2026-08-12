@@ -65,10 +65,12 @@ class TestVecEnv(unittest.TestCase):
             # Check shapes of all returned values
             self.assertEqual(obs_t.shape, (n_envs, 1))
             self.assertEqual(t.shape, (n_envs,))
+            self.assertEqual(t.dtype, np.float64)
             self.assertEqual(actions_out.shape, (n_envs, 1))
             self.assertEqual(rewards.shape, (n_envs,))
             self.assertEqual(next_obs.shape, (n_envs, 1))
             self.assertEqual(next_t.shape, (n_envs,))
+            self.assertEqual(next_t.dtype, np.float64)
             self.assertEqual(terminated.shape, (n_envs,))
             self.assertEqual(truncated.shape, (n_envs,))
 

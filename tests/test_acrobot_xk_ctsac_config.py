@@ -19,6 +19,16 @@ REWARD_MODES.update({mode: ("r2", eta) for mode, eta in ETA_MODES.items()})
 FIXED_HALF_MS_MODES = {
     f"{mode}_fixed0p5ms": expected for mode, expected in REWARD_MODES.items()
 }
+FIXED_ONE_MS_H10_MODES = {
+    f"{mode}_fixed1ms_h10s": expected
+    for mode, expected in REWARD_MODES.items()
+}
+FIXED_ONE_MS_H10_MODES.update(
+    {
+        f"{mode.replace('xk_r2', 'xk_r3')}_fixed1ms_h10s": ("r3", eta)
+        for mode, eta in ETA_MODES.items()
+    }
+)
 
 
 def _load(mode):
@@ -38,6 +48,7 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 self.assertTrue(task["release_start"])
                 self.assertEqual(task["damping"], 0)
                 self.assertEqual(task["torque_limit"], 64)
+                self.assertNotIn("failure_reward_rate", task)
                 self.assertEqual(model["periodic_obs_indices"], (0,))
 
                 common = (env, model, algo, log)
@@ -58,6 +69,7 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 self.assertTrue(task["release_start"])
                 self.assertEqual(task["damping"], 0)
                 self.assertEqual(task["torque_limit"], 64)
+                self.assertNotIn("failure_reward_rate", task)
 
                 self.assertEqual(env["time_sampling"], "uniform")
                 self.assertEqual(env["dt"], 0.0005)
@@ -110,6 +122,44 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 self.assertEqual(fixed_algo, irregular_algo)
                 self.assertEqual(fixed_log, irregular_log)
 
+    def test_corrected_one_millisecond_arms_use_physical_ten_second_discount(self):
+        reference = None
+        for mode, (reward_kind, eta) in FIXED_ONE_MS_H10_MODES.items():
+            with self.subTest(mode=mode):
+                total, env, model, algo, log = _load(mode)
+                self.assertEqual(total, 1_000_000)
+                task = env.pop("task_kwargs")
+                self.assertEqual(task["reward_kind"], reward_kind)
+                self.assertEqual(task.get("eta"), eta)
+                self.assertTrue(task["release_start"])
+                self.assertEqual(task["damping"], 0)
+                self.assertEqual(task["torque_limit"], 20)
+                self.assertEqual(task["failure_reward_rate"], -1)
+                if reward_kind == "r3":
+                    self.assertEqual(task["discount_rate"], 0.1)
+                    self.assertEqual(
+                        task["discount_rate"], algo["discount_rate"]
+                    )
+                else:
+                    self.assertNotIn("discount_rate", task)
+
+                self.assertEqual(env["time_sampling"], "uniform")
+                self.assertEqual(env["dt"], 0.001)
+                self.assertEqual(env["physics_dt"], 0.001)
+                self.assertEqual(env["max_steps"], 20_000)
+                self.assertEqual(env["episode_duration"], 20)
+                self.assertNotIn("gamma", algo)
+                self.assertEqual(algo["discount_rate"], 0.1)
+                self.assertEqual(algo["target_reference_dt"], 0.001)
+                self.assertEqual(str(algo["reward_is_rate"]).lower(), "true")
+                self.assertEqual(algo["alpha"], "auto_0.001")
+
+                common = (env, model, algo, log)
+                if reference is None:
+                    reference = common
+                else:
+                    self.assertEqual(common, reference)
+
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")
         self.assertEqual(train["time_sampling"], "irregular")
@@ -123,10 +173,10 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         total, evaluation, model, algo, log = _load("xk_eval")
         self.assertEqual(total, 1_000_000)
         self.assertEqual(evaluation["time_sampling"], "uniform")
-        self.assertEqual(evaluation["dt"], 0.0005)
-        self.assertEqual(evaluation["physics_dt"], 0.0005)
+        self.assertEqual(evaluation["dt"], 0.001)
+        self.assertEqual(evaluation["physics_dt"], 0.001)
         self.assertEqual(evaluation["episode_duration"], 20)
-        self.assertEqual(evaluation["max_steps"], 40_000)
+        self.assertEqual(evaluation["max_steps"], 20_000)
         self.assertNotIn("min_dt", evaluation)
         self.assertNotIn("max_dt", evaluation)
         self.assertEqual(
@@ -135,7 +185,8 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 "reward_kind": "r0",
                 "release_start": True,
                 "damping": 0,
-                "torque_limit": 64,
+                "torque_limit": 20,
+                "failure_reward_rate": -1,
             },
         )
         self.assertEqual(model, train_model)

@@ -24,24 +24,29 @@ Two further properties of their setting are carried over:
   the homoclinic orbit is not an invariant set of the damped closed loop for any
   gains.  ``damping`` therefore defaults to 0; a positive value stays reachable
   so the obstruction can be measured rather than asserted.
-* **Ample actuation.**  The law is derived without an input bound, and on this
-  geometry it asks for around 20 N*m at the paper's own gains.  ``torque_limit``
-  sets the actuator gear and defaults high enough never to bind.  It is a kwarg
-  rather than a constant because a learned policy sees it as an action scaling:
-  the plant applies ``tau2 = gear * ctrl`` with ``ctrl`` in ``[-1, 1]``, so the
-  gear multiplies exploration noise and the meaning of the entropy target.
+* **Bounded actuation and runaway termination.**  The law asks for just under
+  20 N*m at the paper's gains, so ``torque_limit`` defaults to 20 N*m.  The
+  episode terminates if the unwrapped elbow winds to ``2 pi``, either the elbow
+  rate reaches ``2 pi`` rad/s, or the shoulder rate reaches twice its peak on
+  the target homoclinic orbit.  These bounds retain the analytical swing-up
+  trajectories while stopping the energetic runaways seen during learning.
 
-The task selects one of the three reward rates in
+The task selects one of the four reward rates in
 ``docs/reward_shaping_for_acrobot_swingup.md`` with ``reward_kind``:
 
     r0(x) = -[(Etil / E_s)^2 + (q2 / q_s)^2 + (qdot2 / omega_s)^2]
-    r1(x) = -V(x)
-    r2(x, u) = -V(x) - eta Vdot(x, u)
+    r1(x) = -V(x) / V_down
+    r2(x, u) = [-V(x) - eta Vdot(x, u)] / V_down
+    r3(x, u) = [-V(x) - eta Vdot(x, u) + lambda eta V(x)] / V_down
 
-``eta`` is an explicit, non-negative parameter required by ``r2`` so it can be
-swept without changing code.  These rewards are training signals only: the
-analytical controller ignores them, and comparisons are made with the seven
-reward-independent metrics recomputed from state, physical time, and torque.
+Here ``V_down = V(x_down) = E_s^2 / 2`` is the Lyapunov value at hanging rest.
+The common linear scale preserves the shape and units of every Lyapunov term;
+the state, rate, and torque caps make their ranges finite without clipping.
+``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
+``r3`` also requires the physical discount rate ``lambda``.  These rewards are
+training signals only: the analytical controller ignores them, and comparisons
+are made with the seven reward-independent metrics recomputed from state,
+physical time, and torque.
 """
 
 from __future__ import annotations
@@ -71,9 +76,19 @@ GRAVITY = 9.8
 # Full reach of the chain, used to place the target site, the light and the floor.
 REACH = LINK1_LENGTH + LINK2_LENGTH
 
-# High enough never to bind: the law's peak demand on this geometry is about
-# 20 N*m at the paper's gains.
-DEFAULT_TORQUE_LIMIT = 64.0
+# The paper-gain controller peaks at about 19.71 N*m on the release protocol.
+DEFAULT_TORQUE_LIMIT = 20.0
+
+# State bounds used to stop physically unhelpful high-energy trajectories.
+# The shoulder-rate threshold is multiplied by the plant-derived omega_s after
+# energy calibration; the elbow angle is deliberately checked unwrapped.
+ELBOW_ANGLE_LIMIT = 2.0 * np.pi
+ELBOW_RATE_LIMIT = 2.0 * np.pi
+SHOULDER_RATE_SCALE_LIMIT = 2.0
+
+TERMINATION_ELBOW_ANGLE = "elbow_angle_limit"
+TERMINATION_ELBOW_RATE = "elbow_rate_limit"
+TERMINATION_SHOULDER_RATE = "shoulder_rate_limit"
 
 # Reset used by the swing-up arms: near hanging, matching the paper's own
 # initial condition, which sits a small angle off the downward equilibrium.
@@ -86,7 +101,8 @@ DEFAULT_VELOCITY_NOISE = 0.01
 # Lyapunov function without changing the plant.
 DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
-REWARD_KINDS = frozenset(("r0", "r1", "r2"))
+DEFAULT_FAILURE_REWARD_RATE = -1.0
+REWARD_KINDS = frozenset(("r0", "r1", "r2", "r3"))
 
 # The reward-independent homoclinic tube from the experiment protocol.
 HOMOCLINIC_ENERGY_TOLERANCE = 0.05
@@ -203,7 +219,7 @@ def _model_xml(damping: float, torque_limit: float) -> bytes:
 
 
 class BalanceXK(suite_base.Task):
-    """Swing-up task with selectable ``r0``, ``r1`` and ``r2`` reward rates.
+    """Swing-up task with selectable ``r0`` through ``r3`` reward rates.
 
     Deliberately standalone: it shares no code with the ``v2 ... v6.1`` reward
     line, so its numbers cannot drift when those tasks are edited.
@@ -223,6 +239,8 @@ class BalanceXK(suite_base.Task):
         k_d: float = DEFAULT_LYAPUNOV_K_D,
         k_p: float = DEFAULT_LYAPUNOV_K_P,
         eta: Optional[float] = None,
+        discount_rate: Optional[float] = None,
+        failure_reward_rate: float = DEFAULT_FAILURE_REWARD_RATE,
     ) -> None:
         super().__init__(random=random)
         self.angle_noise = float(angle_noise)
@@ -265,14 +283,40 @@ class BalanceXK(suite_base.Task):
             self.eta = float(eta)
             if not np.isfinite(self.eta) or self.eta < 0.0:
                 raise ValueError(f"eta must be finite and >= 0, got {eta}")
-        if self.reward_kind == "r2" and self.eta is None:
-            raise ValueError("reward_kind='r2' requires an explicit eta")
-        if self.reward_kind != "r2" and self.eta is not None:
-            raise ValueError("eta is only valid when reward_kind='r2'")
+        derivative_rewards = {"r2", "r3"}
+        if self.reward_kind in derivative_rewards and self.eta is None:
+            raise ValueError(
+                f"reward_kind={self.reward_kind!r} requires an explicit eta"
+            )
+        if self.reward_kind not in derivative_rewards and self.eta is not None:
+            raise ValueError("eta is only valid for reward_kind='r2' or 'r3'")
+        if discount_rate is None:
+            self.discount_rate = None
+        else:
+            self.discount_rate = float(discount_rate)
+            if not np.isfinite(self.discount_rate) or self.discount_rate < 0.0:
+                raise ValueError(
+                    "discount_rate must be finite and >= 0 s^-1, got "
+                    f"{discount_rate}"
+                )
+        if self.reward_kind == "r3" and self.discount_rate is None:
+            raise ValueError("reward_kind='r3' requires an explicit discount_rate")
+        if self.reward_kind != "r3" and self.discount_rate is not None:
+            raise ValueError("discount_rate is only valid when reward_kind='r3'")
+        self.failure_reward_rate = float(failure_reward_rate)
+        if (
+            not np.isfinite(self.failure_reward_rate)
+            or self.failure_reward_rate >= 0.0
+        ):
+            raise ValueError(
+                "failure_reward_rate must be finite and < 0, got "
+                f"{failure_reward_rate}"
+            )
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
         self._rate_scale: Optional[float] = None
         self._last_reward_terms: Optional[Dict[str, float]] = None
+        self._last_termination_reason: Optional[str] = None
 
     # --- Mechanical energy ------------------------------------------------
 
@@ -333,6 +377,17 @@ class BalanceXK(suite_base.Task):
             raise RuntimeError("energy references are not calibrated yet")
         return self._energy_hang + self._energy_span
 
+    @property
+    def lyapunov_scale(self) -> float:
+        """Return ``V_down = V(hanging rest) = E_s^2 / 2``.
+
+        At hanging rest the elbow-angle and elbow-rate terms vanish, while the
+        energy error is ``-E_s``.  This scale therefore does not depend on the
+        configurable Lyapunov gains and puts both ``r0`` and ``r1`` at ``-1``
+        for the exact hanging-rest state.
+        """
+        return 0.5 * self.energy_span**2
+
     # --- Episode ----------------------------------------------------------
 
     def reseed(self, seed) -> None:
@@ -342,6 +397,7 @@ class BalanceXK(suite_base.Task):
     def initialize_episode(self, physics) -> None:
         self._calibrate_energy(physics)
         self._last_reward_terms = None
+        self._last_termination_reason = None
         if self.uniform_start:
             physics.named.data.qpos[["shoulder", "elbow"]] = self.random.uniform(
                 -np.pi, np.pi, 2
@@ -374,6 +430,36 @@ class BalanceXK(suite_base.Task):
                 -self.velocity_noise, self.velocity_noise, 2
             )
         super().initialize_episode(physics)
+
+    @property
+    def last_termination_reason(self) -> Optional[str]:
+        """Stable reason code for the most recent state-limit termination."""
+        return self._last_termination_reason
+
+    def get_termination(self, physics) -> Optional[float]:
+        """Terminate energetic runaways, returning dm-control discount zero.
+
+        The checks are made on the post-step state.  In particular, ``q2`` is
+        read directly from ``qpos`` rather than wrapped, so elbow winding can
+        actually reach its limit.  The terminal endpoint may overshoot by one
+        control interval; no nonphysical state clipping is applied.
+        """
+        rate_scale = self._rate_scale
+        if rate_scale is None:
+            raise RuntimeError(
+                "Acrobot termination limits require an initialized episode"
+            )
+        qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
+        qvel = np.asarray(physics.data.qvel, dtype=np.float64).reshape(-1)
+        reason: Optional[str] = None
+        if abs(float(qpos[1])) >= ELBOW_ANGLE_LIMIT:
+            reason = TERMINATION_ELBOW_ANGLE
+        elif abs(float(qvel[1])) >= ELBOW_RATE_LIMIT:
+            reason = TERMINATION_ELBOW_RATE
+        elif abs(float(qvel[0])) >= SHOULDER_RATE_SCALE_LIMIT * rate_scale:
+            reason = TERMINATION_SHOULDER_RATE
+        self._last_termination_reason = reason
+        return 0.0 if reason is not None else None
 
     def get_observation(self, physics):
         """Wrapped joint angles and rates.
@@ -453,13 +539,15 @@ class BalanceXK(suite_base.Task):
         }
 
     def xk_reward_terms(self, physics) -> Dict[str, float]:
-        """Return all three reward rates at the live endpoint state.
+        """Return all four reward rates at the live endpoint state.
 
         ``r0`` is the normalized, periodic distance already shipped with this
-        task. ``r1`` and ``r2`` use Xin--Kaneda's unwrapped shape coordinate,
-        because their Lyapunov function penalizes elbow winding on ``R``.  The
-        derivative uses the generalized force the plant actually applies, so
-        the normalized policy action is never mistaken for physical torque.
+        task. The Lyapunov rewards use Xin--Kaneda's unwrapped shape coordinate
+        because their function penalizes elbow winding on ``R``.  Both ``V``
+        and its actual action-dependent derivative are divided by the same
+        ``V_down`` scale.  The derivative uses the generalized force the plant
+        actually applies, so the normalized policy action is never mistaken
+        for physical torque.
         """
         baseline = self.baseline_terms(physics)
         qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
@@ -503,17 +591,32 @@ class BalanceXK(suite_base.Task):
             + self.k_d * elbow_rate * float(qacc[1])
             + self.k_p * elbow_unwrapped * elbow_rate
         )
+        lyapunov_scale = self.lyapunov_scale
+        lyapunov_normalized = lyapunov / lyapunov_scale
+        lyapunov_rate_normalized = lyapunov_rate / lyapunov_scale
+        eta = float(self.eta or 0.0)
+        discount_rate = float(self.discount_rate or 0.0)
         r0 = float(baseline["reward"])
-        r1 = -lyapunov
-        r2 = -lyapunov - float(self.eta or 0.0) * lyapunov_rate
-        selected = {"r0": r0, "r1": r1, "r2": r2}[self.reward_kind]
+        r1 = -lyapunov_normalized
+        r2 = r1 - eta * lyapunov_rate_normalized
+        r3 = r2 + discount_rate * eta * lyapunov_normalized
+        selected = {
+            "r0": r0,
+            "r1": r1,
+            "r2": r2,
+            "r3": r3,
+        }[self.reward_kind]
         return {
             "reward": float(selected),
             "r0": r0,
             "r1": r1,
             "r2": r2,
+            "r3": r3,
             "lyapunov": lyapunov,
             "lyapunov_rate": lyapunov_rate,
+            "lyapunov_scale": lyapunov_scale,
+            "lyapunov_normalized": lyapunov_normalized,
+            "lyapunov_rate_normalized": lyapunov_rate_normalized,
             "energy_rate": energy_rate,
             "elbow_acceleration": float(qacc[1]),
             "applied_torque": float(actuator_force[1]),
@@ -537,15 +640,20 @@ def swingup_xk(
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     eta: Optional[float] = None,
+    discount_rate: Optional[float] = None,
+    failure_reward_rate: float = DEFAULT_FAILURE_REWARD_RATE,
 ):
     """Construct ``acrobot-swingup-xk``.
 
     ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
     from the stock model; both are recoverable from the built model, so a caller
     can always confirm which plant it is holding.  ``reward_kind`` chooses the
-    training reward.  ``r2`` additionally requires an explicit ``eta`` shaping
-    time scale; ``eta`` is rejected for the other modes to catch mislabeled
-    sweep arms.
+    training reward.  ``r2`` and ``r3`` additionally require an explicit
+    ``eta`` shaping time scale, and ``r3`` requires the physical
+    ``discount_rate`` used by CT-SAC.  ``failure_reward_rate`` defines the
+    action-independent absorbing-failure rate used by the wrapper/critic.  The
+    task still records the selected endpoint reward for diagnostics when the
+    wrapper emits this failure rate at a cap.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -562,6 +670,8 @@ def swingup_xk(
         k_d=k_d,
         k_p=k_p,
         eta=eta,
+        discount_rate=discount_rate,
+        failure_reward_rate=failure_reward_rate,
     )
     return control.Environment(
         physics,

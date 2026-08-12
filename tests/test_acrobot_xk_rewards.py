@@ -9,8 +9,10 @@ import numpy as np
 
 from controllers import xin_kaneda as xk
 from environment.acrobot_xk import (
+    DEFAULT_FAILURE_REWARD_RATE,
     DEFAULT_LYAPUNOV_K_D,
     DEFAULT_LYAPUNOV_K_P,
+    HANGING_SHOULDER,
     HOMOCLINIC_ANGLE_TOLERANCE,
     UPRIGHT_SHOULDER,
     swingup_xk,
@@ -19,10 +21,19 @@ from environment.dmc import DMCContinuousEnv
 
 
 class TestAcrobotXKRewards(unittest.TestCase):
-    def _env(self, reward_kind="r0", *, eta=None):
+    def _env(
+        self,
+        reward_kind="r0",
+        *,
+        eta=None,
+        discount_rate=None,
+        failure_reward_rate=DEFAULT_FAILURE_REWARD_RATE,
+    ):
         env = swingup_xk(
             reward_kind=reward_kind,
             eta=eta,
+            discount_rate=discount_rate,
+            failure_reward_rate=failure_reward_rate,
             angle_noise=0.0,
             velocity_noise=0.0,
         )
@@ -49,7 +60,7 @@ class TestAcrobotXKRewards(unittest.TestCase):
             terms["reward"], env.task.baseline_terms(env.physics)["reward"], 12
         )
 
-    def test_r1_is_exactly_minus_the_published_lyapunov_function(self):
+    def test_r1_is_published_lyapunov_function_scaled_by_hanging_rest(self):
         env = self._env("r1")
         params = xk.AcrobotParams.from_physics(env.physics)
         gains = xk.Gains(
@@ -60,7 +71,23 @@ class TestAcrobotXKRewards(unittest.TestCase):
         terms = env.task.xk_reward_terms(env.physics)
         expected = xk.lyapunov(params, gains, state)
         self.assertAlmostEqual(terms["lyapunov"], expected, places=9)
-        self.assertAlmostEqual(terms["reward"], -expected, places=9)
+        expected_scale = 0.5 * env.task.energy_span**2
+        self.assertAlmostEqual(env.task.lyapunov_scale, expected_scale, places=12)
+        self.assertAlmostEqual(terms["lyapunov_scale"], expected_scale, places=12)
+        self.assertAlmostEqual(
+            terms["lyapunov_normalized"], expected / expected_scale, places=12
+        )
+        self.assertAlmostEqual(terms["reward"], -expected / expected_scale, places=12)
+
+    def test_hanging_rest_puts_r0_and_r1_on_the_same_minus_one_scale(self):
+        env = self._env("r1")
+        self._set_state_and_torque(
+            env, [HANGING_SHOULDER, 0.0, 0.0, 0.0], torque=0.0
+        )
+        terms = env.task.xk_reward_terms(env.physics)
+        self.assertAlmostEqual(terms["r0"], -1.0, places=12)
+        self.assertAlmostEqual(terms["r1"], -1.0, places=12)
+        self.assertAlmostEqual(terms["lyapunov_normalized"], 1.0, places=12)
 
     def test_lyapunov_rate_matches_the_state_directional_derivative(self):
         env = self._env("r2", eta=0.3)
@@ -89,23 +116,74 @@ class TestAcrobotXKRewards(unittest.TestCase):
             terms["lyapunov_rate"], finite_difference, delta=2e-5
         )
         self.assertAlmostEqual(
+            terms["lyapunov_rate_normalized"],
+            terms["lyapunov_rate"] / terms["lyapunov_scale"],
+            places=12,
+        )
+        self.assertAlmostEqual(
             terms["r2"],
-            terms["r1"] - 0.3 * terms["lyapunov_rate"],
+            terms["r1"] - 0.3 * terms["lyapunov_rate_normalized"],
             places=10,
         )
 
-    def test_eta_is_a_required_nonnegative_r2_parameter(self):
-        with self.assertRaises(ValueError):
-            swingup_xk(reward_kind="r2")
-        with self.assertRaises(ValueError):
-            swingup_xk(reward_kind="r2", eta=-0.1)
+    def test_eta_and_discount_rate_validation_matches_reward_definitions(self):
+        for kind in ("r2", "r3"):
+            with self.subTest(kind=kind, case="missing eta"):
+                with self.assertRaises(ValueError):
+                    swingup_xk(
+                        reward_kind=kind,
+                        **({"discount_rate": 0.1} if kind == "r3" else {}),
+                    )
+            with self.subTest(kind=kind, case="negative eta"):
+                with self.assertRaises(ValueError):
+                    swingup_xk(
+                        reward_kind=kind,
+                        eta=-0.1,
+                        **({"discount_rate": 0.1} if kind == "r3" else {}),
+                    )
         with self.assertRaises(ValueError):
             swingup_xk(reward_kind="r1", eta=0.1)
+        with self.assertRaises(ValueError):
+            swingup_xk(reward_kind="r3", eta=0.1)
+        with self.assertRaises(ValueError):
+            swingup_xk(reward_kind="r3", eta=0.1, discount_rate=-0.1)
+        with self.assertRaises(ValueError):
+            swingup_xk(reward_kind="r2", eta=0.1, discount_rate=0.1)
 
         env = self._env("r2", eta=0.0)
         self._set_state_and_torque(env, [-1.0, 0.2, 0.4, -0.3], torque=4.0)
         terms = env.task.xk_reward_terms(env.physics)
         self.assertAlmostEqual(terms["r2"], terms["r1"], places=12)
+
+    def test_r3_is_discount_consistent_potential_shaping_rate(self):
+        eta = 0.3
+        discount_rate = 0.1
+        env = self._env("r3", eta=eta, discount_rate=discount_rate)
+        self._set_state_and_torque(env, [-0.9, 0.6, 1.1, -0.75], torque=7.5)
+        terms = env.task.xk_reward_terms(env.physics)
+        expected = (
+            terms["r1"]
+            - eta * terms["lyapunov_rate_normalized"]
+            + discount_rate * eta * terms["lyapunov_normalized"]
+        )
+        self.assertAlmostEqual(terms["r3"], expected, places=12)
+        self.assertAlmostEqual(terms["reward"], expected, places=12)
+
+        eta_zero = self._env("r3", eta=0.0, discount_rate=discount_rate)
+        self._set_state_and_torque(
+            eta_zero, [-1.0, 0.2, 0.4, -0.3], torque=4.0
+        )
+        zero_terms = eta_zero.task.xk_reward_terms(eta_zero.physics)
+        self.assertAlmostEqual(zero_terms["r3"], zero_terms["r1"], places=12)
+
+    def test_failure_reward_rate_is_configurable_negative_metadata(self):
+        env = self._env("r1", failure_reward_rate=-1.25)
+        self.assertEqual(env.task.failure_reward_rate, -1.25)
+        self.assertEqual(self._env("r1").task.failure_reward_rate, -1.0)
+        for invalid in (0.0, 1.0, float("nan"), float("inf")):
+            with self.subTest(failure_reward_rate=invalid):
+                with self.assertRaises(ValueError):
+                    swingup_xk(failure_reward_rate=invalid)
 
     def test_r0_wraps_elbow_but_r1_penalizes_winding(self):
         env = self._env("r1")
@@ -131,10 +209,11 @@ class TestAcrobotXKRewards(unittest.TestCase):
                 task_kwargs={
                     "release_start": True,
                     "reward_kind": kind,
-                    **({"eta": 0.2} if kind == "r2" else {}),
+                    **({"eta": 0.2} if kind in ("r2", "r3") else {}),
+                    **({"discount_rate": 0.1} if kind == "r3" else {}),
                 },
             )
-            for kind in ("r0", "r1", "r2")
+            for kind in ("r0", "r1", "r2", "r3")
         ]
         starts = [env.reset(seed=17)[0] for env in wrappers]
         for start in starts[1:]:
@@ -143,7 +222,7 @@ class TestAcrobotXKRewards(unittest.TestCase):
         for transition in transitions[1:]:
             np.testing.assert_allclose(transition[4], transitions[0][4], atol=0.0)
             self.assertEqual(transition[5], transitions[0][5])
-        self.assertEqual(len({round(float(t[3]), 8) for t in transitions}), 3)
+        self.assertEqual(len({round(float(t[3]), 8) for t in transitions}), 4)
 
     def test_environment_emits_the_endpoint_reward(self):
         env = DMCContinuousEnv(
