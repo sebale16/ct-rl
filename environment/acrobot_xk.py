@@ -26,7 +26,7 @@ Two further properties of their setting are carried over:
   so the obstruction can be measured rather than asserted.
 * **Bounded actuation and runaway termination.**  The law asks for just under
   20 N*m at the paper's gains, so ``torque_limit`` defaults to 20 N*m.  The
-  episode terminates if the unwrapped elbow winds to ``2 pi``, either the elbow
+  episode terminates if the unwrapped elbow winds to ``4 pi``, either the elbow
   rate reaches ``2 pi`` rad/s, or the shoulder rate reaches twice its peak on
   the target homoclinic orbit.  These bounds retain the analytical swing-up
   trajectories while stopping the energetic runaways seen during learning.
@@ -85,7 +85,7 @@ DEFAULT_TORQUE_LIMIT = 20.0
 # State bounds used to stop physically unhelpful high-energy trajectories.
 # The shoulder-rate threshold is multiplied by the plant-derived omega_s after
 # energy calibration; the elbow angle is deliberately checked unwrapped.
-ELBOW_ANGLE_LIMIT = 2.0 * np.pi
+ELBOW_ANGLE_LIMIT = 4.0 * np.pi
 ELBOW_RATE_LIMIT = 2.0 * np.pi
 SHOULDER_RATE_SCALE_LIMIT = 2.0
 

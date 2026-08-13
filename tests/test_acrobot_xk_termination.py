@@ -40,6 +40,16 @@ class TestAcrobotXKTermination(unittest.TestCase):
         self.assertEqual(DEFAULT_TORQUE_LIMIT, 20.0)
         self.assertEqual(gear, DEFAULT_TORQUE_LIMIT)
 
+    def test_elbow_angle_limit_allows_two_full_turns(self):
+        self.assertEqual(ELBOW_ANGLE_LIMIT, 4.0 * np.pi)
+        for sign in (-1.0, 1.0):
+            with self.subTest(sign=sign):
+                self._set_state(q2=sign * (2.0 * np.pi + 0.2))
+                self.assertIsNone(
+                    self.env.task.get_termination(self.env.physics)
+                )
+                self.assertIsNone(self.env.task.last_termination_reason)
+
     def test_each_limit_terminates_at_either_sign(self):
         omega_s = float(self.env.task._rate_scale)
         cases = (

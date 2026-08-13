@@ -225,7 +225,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             )
             env = Mock()
             env._env.physics = object()
-            env._env.task.failure_reward_rate = -58.1056207428
+            env._env.task.failure_reward_rate = -61.1757779491
             env._env.task.failure_reward_rate_source = "reward_lower_bound"
             model = SimpleNamespace(device=th.device("cpu"))
 
@@ -276,7 +276,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             )
             self.assertEqual(
                 result.summary["task_metadata"]["failure_reward_rate"],
-                -58.1056207428,
+                -61.1757779491,
             )
             self.assertEqual(
                 result.summary["task_metadata"]["failure_reward_rate_source"],

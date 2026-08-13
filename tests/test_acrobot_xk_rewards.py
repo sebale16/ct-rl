@@ -183,9 +183,10 @@ class TestAcrobotXKRewards(unittest.TestCase):
     def test_failure_reward_rate_defaults_to_each_rewards_lower_bound(self):
         cases = (
             ("r0", None, None, -55.8061730307),
-            ("r1", None, None, -54.5226469607),
-            ("r2", 0.1, None, -67.0111054085),
-            ("r3", 0.1, 0.1, -66.4658789389),
+            ("r1", None, None, -57.5414880570),
+            ("r2", 0.1, None, -70.2312025779),
+            ("r3", 0.1, 0.1, -69.6557876973),
+            ("r3", 0.1, 0.5, -67.3541281750),
         )
         for kind, eta, discount_rate, expected in cases:
             with self.subTest(kind=kind):
