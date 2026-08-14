@@ -85,6 +85,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
                 "k_d": 35.8,
                 "k_p": 61.2,
                 "k_v": 66.3,
+                "reward_base": "r0",
                 "lyapunov_rate_source": "xk_closed_loop",
                 "elbow_angle_limit": 4.0 * np.pi,
                 "elbow_rate_limit": 4.0 * np.pi * np.sqrt(2.0),
@@ -101,6 +102,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertEqual(task["k_d"], 35.8)
         self.assertEqual(task["k_p"], 61.2)
         self.assertEqual(task["k_v"], 66.3)
+        self.assertEqual(task["reward_base"], "r0")
         self.assertEqual(task["lyapunov_rate_source"], "xk_closed_loop")
         self.assertEqual(task["elbow_angle_limit"], 4.0 * np.pi)
         self.assertEqual(
@@ -118,6 +120,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             RewardMetadata("r0", None),
             EvaluationProtocol(seeds=(1,)),
         )
+        self.assertNotIn("reward_base", r0_override)
         self.assertNotIn("lyapunov_rate_source", r0_override)
         self.assertNotIn("k_v", r0_override)
         self.assertEqual(r0_override["elbow_angle_limit"], 4.0 * np.pi)
@@ -242,6 +245,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
                         "reward_kind": "r3",
                         "eta": 0.03,
                         "discount_rate": 0.1,
+                        "reward_base": "r0",
                     }
                 },
                 model_kwargs={"pi_net_arch": [4]},
@@ -297,6 +301,13 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             self.assertEqual(result.rows[0]["discount_rate"], 0.1)
             self.assertEqual(
                 result.summary["reward_metadata"]["discount_rate"], 0.1
+            )
+            self.assertEqual(
+                result.summary["task_metadata"]["reward_base"], "r0"
+            )
+            self.assertEqual(
+                json.loads(result.rows[0]["task_metadata_json"])["reward_base"],
+                "r0",
             )
             self.assertEqual(
                 result.summary["task_metadata"]["failure_reward_rate"],

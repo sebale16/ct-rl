@@ -39,6 +39,20 @@ The task selects one of the four reward rates in
     r2(x, u) = [-V(x) - eta Vdot(x, u)] / V_down
     r3(x, u) = [-V(x) - eta Vdot(x, u) + lambda eta V(x)] / V_down
 
+Historical runs retain these definitions through the default
+``reward_base="lyapunov"``.  The ``reward_base="r0"`` experiment family keeps
+the same r1--r3 shaping structure but replaces only the leading
+``-V(x) / V_down`` term with the normalized baseline reward:
+
+    r1_r0(x) = r0(x)
+    r2_r0(x, u) = r0(x) - eta Vdot(x, u) / V_down
+    r3_r0(x, u) = r0(x) - eta Vdot(x, u) / V_down
+                  + lambda eta V(x) / V_down
+
+Thus the derivative and, for r3, the discount correction still use the
+original Xin--Kaneda ``V``; ``reward_base`` does not reinterpret them as a
+derivative or potential of ``r0``.
+
 By default ``Vdot`` is the true directional derivative under the action the
 plant applies.  The counterfactual ``lyapunov_rate_source="xk_closed_loop"``
 instead substitutes the identity from the exact Xin--Kaneda feedback law,
@@ -114,6 +128,8 @@ DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
 DEFAULT_LYAPUNOV_K_V = 66.3
 LYAPUNOV_RATE_SOURCES = frozenset(("actual", "xk_closed_loop"))
+REWARD_BASES = frozenset(("lyapunov", "r0"))
+DEFAULT_REWARD_BASE = "lyapunov"
 # ``None`` selects the finite lower envelope of the configured reward.  An
 # explicit negative scalar remains accepted for reproducing historical runs.
 DEFAULT_FAILURE_REWARD_RATE = None
@@ -210,6 +226,7 @@ def _elbow_acceleration_abs_bound(
 def reward_rate_lower_bound(
     reward_kind: str,
     *,
+    reward_base: str = DEFAULT_REWARD_BASE,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     k_v: float = DEFAULT_LYAPUNOV_K_V,
@@ -238,6 +255,7 @@ def reward_rate_lower_bound(
     torque_limit = float(torque_limit)
     damping = float(damping)
     source = str(lyapunov_rate_source).strip().lower()
+    base = str(reward_base).strip().lower()
     elbow_angle_limit = float(elbow_angle_limit)
     elbow_rate_limit = float(elbow_rate_limit)
     shoulder_rate_scale_limit = float(shoulder_rate_scale_limit)
@@ -253,8 +271,19 @@ def reward_rate_lower_bound(
             f"lyapunov_rate_source must be one of {{{choices}}}, got "
             f"{lyapunov_rate_source!r}"
         )
+    if base not in REWARD_BASES:
+        choices = ", ".join(sorted(REWARD_BASES))
+        raise ValueError(
+            f"reward_base must be one of {{{choices}}}, got {reward_base!r}"
+        )
+    if kind == "r0" and base != DEFAULT_REWARD_BASE:
+        raise ValueError(
+            "reward_base is only meaningful for reward_kind='r1'--'r3'"
+        )
     if kind == "r0" and source != "actual":
-        raise ValueError("lyapunov_rate_source is not meaningful for reward_kind='r0'")
+        raise ValueError(
+            "lyapunov_rate_source is not meaningful for reward_kind='r0'"
+        )
     if not np.isfinite(torque_limit) or torque_limit <= 0.0:
         raise ValueError("torque_limit must be finite and > 0")
     if not np.isfinite(damping) or damping < 0.0:
@@ -277,14 +306,14 @@ def reward_rate_lower_bound(
     )
     energy_error_abs = max(_ENERGY_SPAN, kinetic_max)
 
-    if kind == "r0":
-        wrapped_elbow_abs = min(elbow_angle, np.pi)
-        magnitude = (
-            (energy_error_abs / _ENERGY_SPAN) ** 2
-            + (wrapped_elbow_abs / np.pi) ** 2
-            + (elbow_rate / _OMEGA_S) ** 2
-        )
-        return -float(magnitude)
+    wrapped_elbow_abs = min(elbow_angle, np.pi)
+    baseline_magnitude = (
+        (energy_error_abs / _ENERGY_SPAN) ** 2
+        + (wrapped_elbow_abs / np.pi) ** 2
+        + (elbow_rate / _OMEGA_S) ** 2
+    )
+    if kind == "r0" or (base == "r0" and kind == "r1"):
+        return -float(baseline_magnitude)
 
     state_part_max = (
         0.5 * energy_error_abs**2 + 0.5 * k_p * elbow_angle**2
@@ -298,18 +327,24 @@ def reward_rate_lower_bound(
     eta_value = float(eta) if eta is not None else float("nan")
     if not np.isfinite(eta_value) or eta_value < 0.0:
         raise ValueError(f"reward_kind={kind!r} requires finite eta >= 0")
+    lambda_value = None
+    if kind == "r3":
+        lambda_value = (
+            float(discount_rate)
+            if discount_rate is not None
+            else float("nan")
+        )
+        if not np.isfinite(lambda_value) or lambda_value < 0.0:
+            raise ValueError(
+                "reward_kind='r3' requires finite discount_rate >= 0"
+            )
+    if base == "r0" and source == "xk_closed_loop":
+        # Both shaping additions are non-negative on the capped domain:
+        # -eta Vdot_XK = eta k_V qdot2^2 and lambda eta V >= 0.
+        return -float(baseline_magnitude)
     if source == "xk_closed_loop":
         coefficient = 1.0
         if kind == "r3":
-            lambda_value = (
-                float(discount_rate)
-                if discount_rate is not None
-                else float("nan")
-            )
-            if not np.isfinite(lambda_value) or lambda_value < 0.0:
-                raise ValueError(
-                    "reward_kind='r3' requires finite discount_rate >= 0"
-                )
             coefficient = 1.0 - lambda_value * eta_value
             if coefficient <= 0.0:
                 raise ValueError(
@@ -342,17 +377,13 @@ def reward_rate_lower_bound(
         + k_p * elbow_angle * elbow_rate
     ) / _V_DOWN
 
+    if base == "r0":
+        # The r3 correction lambda eta V is non-negative, so dropping it gives
+        # a conservative lower envelope shared with the r2 construction.
+        return -float(baseline_magnitude + eta_value * lyapunov_rate_abs)
+
     coefficient = 1.0
     if kind == "r3":
-        lambda_value = (
-            float(discount_rate)
-            if discount_rate is not None
-            else float("nan")
-        )
-        if not np.isfinite(lambda_value) or lambda_value < 0.0:
-            raise ValueError(
-                "reward_kind='r3' requires finite discount_rate >= 0"
-            )
         coefficient = max(1.0 - lambda_value * eta_value, 0.0)
     return -float(coefficient * lyapunov_max + eta_value * lyapunov_rate_abs)
 
@@ -488,6 +519,7 @@ class BalanceXK(suite_base.Task):
         release_start: bool = False,
         release_angle_range: tuple = RELEASE_ANGLE_RANGE,
         reward_kind: str = "r0",
+        reward_base: str = DEFAULT_REWARD_BASE,
         k_d: float = DEFAULT_LYAPUNOV_K_D,
         k_p: float = DEFAULT_LYAPUNOV_K_P,
         k_v: float = DEFAULT_LYAPUNOV_K_V,
@@ -530,6 +562,16 @@ class BalanceXK(suite_base.Task):
             choices = ", ".join(sorted(REWARD_KINDS))
             raise ValueError(
                 f"reward_kind must be one of {{{choices}}}, got {reward_kind!r}"
+            )
+        self.reward_base = str(reward_base).strip().lower()
+        if self.reward_base not in REWARD_BASES:
+            choices = ", ".join(sorted(REWARD_BASES))
+            raise ValueError(
+                f"reward_base must be one of {{{choices}}}, got {reward_base!r}"
+            )
+        if self.reward_kind == "r0" and self.reward_base != DEFAULT_REWARD_BASE:
+            raise ValueError(
+                "reward_base is only meaningful for reward_kind='r1'--'r3'"
             )
         self.k_d = float(k_d)
         self.k_p = float(k_p)
@@ -590,6 +632,7 @@ class BalanceXK(suite_base.Task):
             raise ValueError("discount_rate is only valid when reward_kind='r3'")
         if (
             self.reward_kind == "r3"
+            and self.reward_base == "lyapunov"
             and self.lyapunov_rate_source == "xk_closed_loop"
             and self.discount_rate * self.eta >= 1.0
         ):
@@ -601,6 +644,7 @@ class BalanceXK(suite_base.Task):
         if failure_reward_rate is None:
             self.failure_reward_rate = reward_rate_lower_bound(
                 self.reward_kind,
+                reward_base=self.reward_base,
                 k_d=self.k_d,
                 k_p=self.k_p,
                 k_v=self.k_v,
@@ -859,8 +903,10 @@ class BalanceXK(suite_base.Task):
 
         ``r0`` is the normalized, periodic distance already shipped with this
         task. The Lyapunov rewards use Xin--Kaneda's unwrapped shape coordinate
-        because their function penalizes elbow winding on ``R``.  Both ``V``
-        and its derivative term are divided by the same ``V_down`` scale.  The
+        because their function penalizes elbow winding on ``R``.  The r1 state
+        term is either ``-V / V_down`` or ``r0`` according to ``reward_base``;
+        r2 and r3 build on that selection.  The derivative and r3 correction
+        always retain the original ``V`` and its common ``V_down`` scale.  The
         actual derivative uses the generalized force the plant applies, so the
         normalized policy action is never mistaken for physical torque.  The
         separately named Xin--Kaneda closed-loop value is the optional
@@ -926,7 +972,8 @@ class BalanceXK(suite_base.Task):
         eta = float(self.eta or 0.0)
         discount_rate = float(self.discount_rate or 0.0)
         r0 = float(baseline["reward"])
-        r1 = -lyapunov_normalized
+        lyapunov_reward = -lyapunov_normalized
+        r1 = r0 if self.reward_base == "r0" else lyapunov_reward
         r2 = r1 - eta * selected_lyapunov_rate_normalized
         r3 = r2 + discount_rate * eta * lyapunov_normalized
         selected = {
@@ -941,6 +988,7 @@ class BalanceXK(suite_base.Task):
             "r1": r1,
             "r2": r2,
             "r3": r3,
+            "lyapunov_reward": lyapunov_reward,
             "lyapunov": lyapunov,
             "lyapunov_rate": lyapunov_rate,
             "xk_closed_loop_lyapunov_rate": xk_closed_loop_lyapunov_rate,
@@ -974,6 +1022,7 @@ def swingup_xk(
     release_start: bool = False,
     release_angle_range: tuple = RELEASE_ANGLE_RANGE,
     reward_kind: str = "r0",
+    reward_base: str = DEFAULT_REWARD_BASE,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     k_v: float = DEFAULT_LYAPUNOV_K_V,
@@ -990,8 +1039,10 @@ def swingup_xk(
     ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
     from the stock model; both are recoverable from the built model, so a caller
     can always confirm which plant it is holding.  ``reward_kind`` chooses the
-    training reward.  ``r2`` and ``r3`` additionally require an explicit
-    ``eta`` shaping time scale, and ``r3`` requires the physical
+    training reward.  For r1--r3, ``reward_base`` chooses the historical
+    ``-V / V_down`` state term or substitutes ``r0`` while retaining the
+    original-V shaping terms.  ``r2`` and ``r3`` additionally require an
+    explicit ``eta`` shaping time scale, and ``r3`` requires the physical
     ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
     actual action-dependent derivative or the counterfactual Xin--Kaneda
     closed-loop surrogate.  The three state limits are instance kwargs and are
@@ -1010,6 +1061,7 @@ def swingup_xk(
         release_start=release_start,
         release_angle_range=release_angle_range,
         reward_kind=reward_kind,
+        reward_base=reward_base,
         k_d=k_d,
         k_p=k_p,
         k_v=k_v,

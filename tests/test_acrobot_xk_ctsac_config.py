@@ -3,6 +3,7 @@
 import csv
 import math
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from common.utils import load_ct_hyperparams_from_table
@@ -73,6 +74,50 @@ for cap_label, cap in (
             f"xkdot_{cap_label}"
         )
         XK_CLOSED_LOOP_MODES[mode] = ("r3", eta, discount_rate, cap)
+
+R0_BASE_ETA_VALUES = (
+    ("0", 0.0),
+    ("0p01", 0.01),
+    ("0p03", 0.03),
+    ("0p1", 0.1),
+    ("0p3", 0.3),
+    ("1", 1.0),
+)
+R0_BASE_MODES = {}
+for horizon, discount_rate in (("h10s", 0.1), ("h2s", 0.5)):
+    for cap_label, elbow_rate_limit in (
+        ("q2dot4pi", PREVIOUS_ELBOW_RATE_LIMIT),
+        ("q2dot4sqrt2pi", NEW_ELBOW_RATE_LIMIT),
+    ):
+        mode = f"xk_r0base_r1_fixed1ms_{horizon}_temp1_{cap_label}"
+        R0_BASE_MODES[mode] = {
+            "reward_kind": "r1",
+            "eta": None,
+            "rate_source": None,
+            "discount_rate": discount_rate,
+            "horizon": horizon,
+            "cap_label": cap_label,
+            "elbow_rate_limit": elbow_rate_limit,
+        }
+        for source_label, rate_source in (
+            ("actualdot", "actual"),
+            ("xkdot", "xk_closed_loop"),
+        ):
+            for reward_kind in ("r2", "r3"):
+                for eta_label, eta in R0_BASE_ETA_VALUES:
+                    mode = (
+                        f"xk_r0base_{reward_kind}_eta{eta_label}_fixed1ms_"
+                        f"{horizon}_temp1_{source_label}_{cap_label}"
+                    )
+                    R0_BASE_MODES[mode] = {
+                        "reward_kind": reward_kind,
+                        "eta": eta,
+                        "rate_source": rate_source,
+                        "discount_rate": discount_rate,
+                        "horizon": horizon,
+                        "cap_label": cap_label,
+                        "elbow_rate_limit": elbow_rate_limit,
+                    }
 
 
 def _load(mode):
@@ -421,6 +466,122 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 _, env, _, algo, _ = _load(mode)
                 self.assertEqual(env["task_kwargs"]["eta"], 0.31)
                 self.assertEqual(algo["discount_rate"], 0.5)
+
+    def test_r0_base_reward_matrix_contract(self):
+        table = (
+            Path(__file__).parents[1]
+            / "benchmarks"
+            / "hyperparams"
+            / "ct_sac.csv"
+        )
+        with table.open(newline="") as handle:
+            rows = [
+                row
+                for row in csv.DictReader(handle)
+                if row["env_id"] == ENV_ID
+                and row["mode"].startswith("xk_r0base_")
+            ]
+
+        self.assertEqual(len(R0_BASE_MODES), 100)
+        self.assertEqual(len(rows), 100)
+        self.assertEqual(
+            {row["mode"] for row in rows}, set(R0_BASE_MODES)
+        )
+        self.assertEqual(
+            Counter(
+                expected["reward_kind"]
+                for expected in R0_BASE_MODES.values()
+            ),
+            {"r1": 4, "r2": 48, "r3": 48},
+        )
+        self.assertEqual(
+            Counter(
+                expected["rate_source"]
+                for expected in R0_BASE_MODES.values()
+            ),
+            {None: 4, "actual": 48, "xk_closed_loop": 48},
+        )
+        self.assertEqual(
+            Counter(
+                expected["horizon"]
+                for expected in R0_BASE_MODES.values()
+            ),
+            {"h10s": 50, "h2s": 50},
+        )
+        self.assertEqual(
+            Counter(
+                expected["cap_label"]
+                for expected in R0_BASE_MODES.values()
+            ),
+            {"q2dot4pi": 50, "q2dot4sqrt2pi": 50},
+        )
+        self.assertFalse(
+            any(
+                forbidden in mode
+                for mode in R0_BASE_MODES
+                for forbidden in ("eta0p35", "eta0p31")
+            )
+        )
+        self.assertEqual(
+            {
+                expected["eta"]
+                for expected in R0_BASE_MODES.values()
+                if expected["eta"] is not None
+            },
+            {0.0, 0.01, 0.03, 0.1, 0.3, 1.0},
+        )
+
+        references = {}
+        for mode, expected in R0_BASE_MODES.items():
+            with self.subTest(mode=mode):
+                total, env, model, algo, log = _load(mode)
+                expected_task = {
+                    "reward_kind": expected["reward_kind"],
+                    "reward_base": "r0",
+                    "release_start": True,
+                    "damping": 0,
+                    "torque_limit": 20,
+                    "elbow_angle_limit": PREVIOUS_ELBOW_RATE_LIMIT,
+                    "elbow_rate_limit": expected["elbow_rate_limit"],
+                    "shoulder_rate_scale_limit": 2,
+                }
+                if expected["eta"] is not None:
+                    expected_task["eta"] = expected["eta"]
+                if expected["rate_source"] is not None:
+                    expected_task["lyapunov_rate_source"] = expected[
+                        "rate_source"
+                    ]
+                if expected["rate_source"] == "xk_closed_loop":
+                    expected_task["k_v"] = 66.3
+                if expected["reward_kind"] == "r3":
+                    expected_task["discount_rate"] = expected[
+                        "discount_rate"
+                    ]
+
+                self.assertEqual(total, 1_000_000)
+                self.assertEqual(env["task_kwargs"], expected_task)
+                self.assertEqual(env["time_sampling"], "uniform")
+                self.assertEqual(env["dt"], 0.001)
+                self.assertEqual(env["physics_dt"], 0.001)
+                self.assertEqual(env["max_steps"], 20_000)
+                self.assertEqual(env["episode_duration"], 20)
+                self.assertNotIn("gamma", algo)
+                self.assertEqual(
+                    algo["discount_rate"], expected["discount_rate"]
+                )
+                self.assertEqual(algo["target_reference_dt"], 0.001)
+                self.assertEqual(str(algo["reward_is_rate"]).lower(), "true")
+                self.assertEqual(algo["alpha"], "auto_1.0")
+                self.assertEqual(model["periodic_obs_indices"], (0,))
+                self.assertEqual(log["eval_freq"], 100_000)
+
+                common_env = dict(env)
+                common_env.pop("task_kwargs")
+                common = (common_env, model, algo, log)
+                reference = references.setdefault(
+                    expected["horizon"], common
+                )
+                self.assertEqual(common, reference)
 
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")

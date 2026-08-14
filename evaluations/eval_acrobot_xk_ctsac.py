@@ -286,10 +286,11 @@ def build_task_kwargs(
 ) -> dict[str, Any]:
     """Build the task portion of the fixed protocol.
 
-    Lyapunov gains, the derivative source, and the runaway-termination envelope
-    are preserved when the training row explicitly set them because they
-    define the experimental task arm.  The remaining plant and reset values
-    that affect the comparison are fixed by ``protocol``.
+    Lyapunov gains, the reward base, the derivative source, and the
+    runaway-termination envelope are preserved when the training row
+    explicitly set them because they define the experimental task arm.  The
+    remaining plant and reset values that affect the comparison are fixed by
+    ``protocol``.
     """
 
     configured = dict(train_env_kwargs.get("task_kwargs", {}) or {})
@@ -301,7 +302,7 @@ def build_task_kwargs(
         "shoulder_rate_scale_limit",
     ]
     if reward.reward_kind != "r0":
-        preserved_keys.extend(("k_v", "lyapunov_rate_source"))
+        preserved_keys.extend(("k_v", "reward_base", "lyapunov_rate_source"))
     task = {
         key: configured[key]
         for key in preserved_keys
