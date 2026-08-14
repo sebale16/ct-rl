@@ -138,6 +138,8 @@ ROLLOUT_INFO_KEYS = {
         "acrobot_xk_homoclinic_capture",
         "acrobot_xk_lyapunov",
         "acrobot_xk_lyapunov_rate",
+        "acrobot_xk_xk_closed_loop_lyapunov_rate",
+        "acrobot_xk_selected_lyapunov_rate",
         "acrobot_xk_applied_torque",
     ),
     "acrobot-swingup-v6": (
@@ -158,6 +160,11 @@ ROLLOUT_INFO_KEYS["acrobot-swingup-v6.1"] = ROLLOUT_INFO_KEYS[
 ACROBOT_XK_ENV_ID = "acrobot-swingup-xk"
 ACROBOT_XK_EVAL_MODE = "xk_eval"
 ACROBOT_XK_EVAL_SEEDS = tuple(range(20000, 20032))
+ACROBOT_XK_TERMINATION_TASK_KEYS = (
+    "elbow_angle_limit",
+    "elbow_rate_limit",
+    "shoulder_rate_scale_limit",
+)
 
 
 def rollout_info_keys(env_id: str) -> tuple[str, ...]:
@@ -175,6 +182,31 @@ def _resolved_eval_mode(env_id: str, eval_mode: str | None) -> str | None:
             f"{ACROBOT_XK_EVAL_MODE!s}; got {eval_mode!r}"
         )
     return ACROBOT_XK_EVAL_MODE
+
+
+def _align_acrobot_xk_eval_termination_limits(
+    env_id: str,
+    train_env_kwargs: dict,
+    eval_env_kwargs: dict,
+) -> dict:
+    """Evaluate each XK arm under the termination envelope it trained on."""
+    if env_id != ACROBOT_XK_ENV_ID:
+        return eval_env_kwargs
+
+    train_task = dict(train_env_kwargs.get("task_kwargs", {}) or {})
+    configured_limits = {
+        key: train_task[key]
+        for key in ACROBOT_XK_TERMINATION_TASK_KEYS
+        if key in train_task
+    }
+    if not configured_limits:
+        return eval_env_kwargs
+
+    aligned = dict(eval_env_kwargs)
+    eval_task = dict(aligned.get("task_kwargs", {}) or {})
+    eval_task.update(configured_limits)
+    aligned["task_kwargs"] = eval_task
+    return aligned
 
 
 def _primary_eval_schedule(
@@ -429,6 +461,10 @@ def run_algorithm(
         )
     else:
         eval_env_kwargs = env_kwargs.copy()
+
+    eval_env_kwargs = _align_acrobot_xk_eval_termination_limits(
+        env_id, env_kwargs, eval_env_kwargs
+    )
 
     if env_id.startswith("trading") and eval_range is not None:
         eval_env_kwargs = eval_env_kwargs.copy()
@@ -1196,7 +1232,8 @@ def parse_args():
         type=str,
         default=None,
         help="Evaluation mode key for EvalCallback. Defaults to --mode; "
-        "Acrobot-XK always uses its fixed xk_eval protocol.",
+        "Acrobot-XK uses xk_eval while retaining the training arm's "
+        "termination limits.",
     )
     parser.add_argument(
         "--eval_hanging",

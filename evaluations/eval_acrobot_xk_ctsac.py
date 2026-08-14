@@ -13,6 +13,8 @@ used by its discount-consistent potential term.
 By default every checkpoint is evaluated on the document's exact common
 protocol: release-from-rest starts, seeds 20000--20031, a 20 second horizon,
 1 ms control and physics periods, zero damping, and a 20 N m actuator gear.
+The training row's runaway-termination envelope is retained because the rate
+cap is itself an experimental factor, and it is recorded in task metadata.
 The protocol arguments remain configurable for short smoke runs, but every
 chosen value is recorded in both outputs.
 
@@ -284,15 +286,25 @@ def build_task_kwargs(
 ) -> dict[str, Any]:
     """Build the task portion of the fixed protocol.
 
-    ``k_d`` and ``k_p`` are preserved when the training row explicitly set
-    them because they define ``r1``/``r2``/``r3`` metadata.  Every plant or
-    reset value that affects the comparison is fixed by ``protocol``.
+    Lyapunov gains, the derivative source, and the runaway-termination envelope
+    are preserved when the training row explicitly set them because they
+    define the experimental task arm.  The remaining plant and reset values
+    that affect the comparison are fixed by ``protocol``.
     """
 
     configured = dict(train_env_kwargs.get("task_kwargs", {}) or {})
+    preserved_keys = [
+        "k_d",
+        "k_p",
+        "elbow_angle_limit",
+        "elbow_rate_limit",
+        "shoulder_rate_scale_limit",
+    ]
+    if reward.reward_kind != "r0":
+        preserved_keys.extend(("k_v", "lyapunov_rate_source"))
     task = {
         key: configured[key]
-        for key in ("k_d", "k_p")
+        for key in preserved_keys
         if key in configured
     }
     task.update(

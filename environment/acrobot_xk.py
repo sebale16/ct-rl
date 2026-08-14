@@ -27,7 +27,7 @@ Two further properties of their setting are carried over:
 * **Bounded actuation and runaway termination.**  The law asks for just under
   20 N*m at the paper's gains, so ``torque_limit`` defaults to 20 N*m.  The
   episode terminates if the unwrapped elbow winds to ``4 pi``, either the elbow
-  rate reaches ``2 pi`` rad/s, or the shoulder rate reaches twice its peak on
+  rate reaches ``4 pi`` rad/s, or the shoulder rate reaches twice its peak on
   the target homoclinic orbit.  These bounds retain the analytical swing-up
   trajectories while stopping the energetic runaways seen during learning.
 
@@ -38,6 +38,14 @@ The task selects one of the four reward rates in
     r1(x) = -V(x) / V_down
     r2(x, u) = [-V(x) - eta Vdot(x, u)] / V_down
     r3(x, u) = [-V(x) - eta Vdot(x, u) + lambda eta V(x)] / V_down
+
+By default ``Vdot`` is the true directional derivative under the action the
+plant applies.  The counterfactual ``lyapunov_rate_source="xk_closed_loop"``
+instead substitutes the identity from the exact Xin--Kaneda feedback law,
+``Vdot_XK = -k_V qdot2^2``.  Under a learned policy this is an
+action-independent surrogate, not the derivative of ``V`` along that policy;
+it can reward elbow speed and is therefore kept as an explicit experiment arm
+rather than replacing the physical derivative.
 
 Here ``V_down = V(x_down) = E_s^2 / 2`` is the Lyapunov value at hanging rest.
 The common linear scale preserves the shape and units of every Lyapunov term;
@@ -86,7 +94,7 @@ DEFAULT_TORQUE_LIMIT = 20.0
 # The shoulder-rate threshold is multiplied by the plant-derived omega_s after
 # energy calibration; the elbow angle is deliberately checked unwrapped.
 ELBOW_ANGLE_LIMIT = 4.0 * np.pi
-ELBOW_RATE_LIMIT = 2.0 * np.pi
+ELBOW_RATE_LIMIT = 4.0 * np.pi
 SHOULDER_RATE_SCALE_LIMIT = 2.0
 
 TERMINATION_ELBOW_ANGLE = "elbow_angle_limit"
@@ -98,12 +106,14 @@ TERMINATION_SHOULDER_RATE = "shoulder_rate_limit"
 DEFAULT_ANGLE_NOISE = 0.05
 DEFAULT_VELOCITY_NOISE = 0.01
 
-# Xin & Kaneda's Section-7 gains used by the Lyapunov rewards.  k_V belongs to
-# the analytical controller, not to V itself, so the reward needs only k_D and
-# k_P.  Keep these configurable so reward studies can vary the candidate
-# Lyapunov function without changing the plant.
+# Xin & Kaneda's Section-7 gains used by the Lyapunov rewards.  k_D and k_P
+# define V; k_V is used only by the optional closed-loop Vdot surrogate.  Keep
+# them configurable so reward studies can vary either construction without
+# changing the plant.
 DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
+DEFAULT_LYAPUNOV_K_V = 66.3
+LYAPUNOV_RATE_SOURCES = frozenset(("actual", "xk_closed_loop"))
 # ``None`` selects the finite lower envelope of the configured reward.  An
 # explicit negative scalar remains accepted for reproducing historical runs.
 DEFAULT_FAILURE_REWARD_RATE = None
@@ -124,7 +134,10 @@ _V_DOWN = 0.5 * _ENERGY_SPAN**2
 
 @lru_cache(maxsize=64)
 def _elbow_acceleration_abs_bound(
-    torque_limit: float, damping: float
+    torque_limit: float,
+    damping: float,
+    shoulder_rate_limit: float,
+    elbow_rate_limit: float,
 ) -> float:
     """Bound ``|qddot2|`` over the capped state/action closure.
 
@@ -136,8 +149,8 @@ def _elbow_acceleration_abs_bound(
     """
     from scipy.optimize import minimize_scalar
 
-    shoulder_rate = SHOULDER_RATE_SCALE_LIMIT * _OMEGA_S
-    elbow_rate = ELBOW_RATE_LIMIT
+    shoulder_rate = float(shoulder_rate_limit)
+    elbow_rate = float(elbow_rate_limit)
 
     def envelope(q2):
         q2 = np.asarray(q2, dtype=np.float64)
@@ -199,10 +212,15 @@ def reward_rate_lower_bound(
     *,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
+    k_v: float = DEFAULT_LYAPUNOV_K_V,
     eta: Optional[float] = None,
     discount_rate: Optional[float] = None,
+    lyapunov_rate_source: str = "actual",
     torque_limit: float = DEFAULT_TORQUE_LIMIT,
     damping: float = 0.0,
+    elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
+    elbow_rate_limit: float = ELBOW_RATE_LIMIT,
+    shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
 ) -> float:
     """Return a conservative minimum reward rate on the capped domain.
 
@@ -216,20 +234,42 @@ def reward_rate_lower_bound(
         raise ValueError(f"unknown Acrobot-XK reward kind {reward_kind!r}")
     k_d = float(k_d)
     k_p = float(k_p)
+    k_v = float(k_v)
     torque_limit = float(torque_limit)
     damping = float(damping)
+    source = str(lyapunov_rate_source).strip().lower()
+    elbow_angle_limit = float(elbow_angle_limit)
+    elbow_rate_limit = float(elbow_rate_limit)
+    shoulder_rate_scale_limit = float(shoulder_rate_scale_limit)
     if not np.isfinite(k_d) or k_d <= 0.0:
         raise ValueError("k_d must be finite and > 0")
     if not np.isfinite(k_p) or k_p <= 0.0:
         raise ValueError("k_p must be finite and > 0")
+    if not np.isfinite(k_v) or k_v <= 0.0:
+        raise ValueError("k_v must be finite and > 0")
+    if source not in LYAPUNOV_RATE_SOURCES:
+        choices = ", ".join(sorted(LYAPUNOV_RATE_SOURCES))
+        raise ValueError(
+            f"lyapunov_rate_source must be one of {{{choices}}}, got "
+            f"{lyapunov_rate_source!r}"
+        )
+    if kind == "r0" and source != "actual":
+        raise ValueError("lyapunov_rate_source is not meaningful for reward_kind='r0'")
     if not np.isfinite(torque_limit) or torque_limit <= 0.0:
         raise ValueError("torque_limit must be finite and > 0")
     if not np.isfinite(damping) or damping < 0.0:
         raise ValueError("damping must be finite and >= 0")
+    for name, value in (
+        ("elbow_angle_limit", elbow_angle_limit),
+        ("elbow_rate_limit", elbow_rate_limit),
+        ("shoulder_rate_scale_limit", shoulder_rate_scale_limit),
+    ):
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and > 0")
 
-    shoulder_rate = SHOULDER_RATE_SCALE_LIMIT * _OMEGA_S
-    elbow_rate = ELBOW_RATE_LIMIT
-    elbow_angle = ELBOW_ANGLE_LIMIT
+    shoulder_rate = shoulder_rate_scale_limit * _OMEGA_S
+    elbow_rate = elbow_rate_limit
+    elbow_angle = elbow_angle_limit
     kinetic_max = 0.5 * (
         _EXTENDED_M11 * shoulder_rate**2
         + 2.0 * _EXTENDED_M12 * shoulder_rate * elbow_rate
@@ -238,17 +278,19 @@ def reward_rate_lower_bound(
     energy_error_abs = max(_ENERGY_SPAN, kinetic_max)
 
     if kind == "r0":
+        wrapped_elbow_abs = min(elbow_angle, np.pi)
         magnitude = (
             (energy_error_abs / _ENERGY_SPAN) ** 2
-            + 1.0
+            + (wrapped_elbow_abs / np.pi) ** 2
             + (elbow_rate / _OMEGA_S) ** 2
         )
         return -float(magnitude)
 
+    state_part_max = (
+        0.5 * energy_error_abs**2 + 0.5 * k_p * elbow_angle**2
+    )
     lyapunov_max = (
-        0.5 * energy_error_abs**2
-        + 0.5 * k_d * elbow_rate**2
-        + 0.5 * k_p * elbow_angle**2
+        state_part_max + 0.5 * k_d * elbow_rate**2
     ) / _V_DOWN
     if kind == "r1":
         return -float(lyapunov_max)
@@ -256,7 +298,40 @@ def reward_rate_lower_bound(
     eta_value = float(eta) if eta is not None else float("nan")
     if not np.isfinite(eta_value) or eta_value < 0.0:
         raise ValueError(f"reward_kind={kind!r} requires finite eta >= 0")
-    acceleration = _elbow_acceleration_abs_bound(torque_limit, damping)
+    if source == "xk_closed_loop":
+        coefficient = 1.0
+        if kind == "r3":
+            lambda_value = (
+                float(discount_rate)
+                if discount_rate is not None
+                else float("nan")
+            )
+            if not np.isfinite(lambda_value) or lambda_value < 0.0:
+                raise ValueError(
+                    "reward_kind='r3' requires finite discount_rate >= 0"
+                )
+            coefficient = 1.0 - lambda_value * eta_value
+            if coefficient <= 0.0:
+                raise ValueError(
+                    "xk_closed_loop r3 requires discount_rate * eta < 1 so "
+                    "the energy and elbow-angle terms retain negative reward "
+                    "coefficients"
+                )
+        rate_coefficient = max(
+            0.5 * coefficient * k_d - eta_value * k_v, 0.0
+        )
+        magnitude = (
+            coefficient * state_part_max
+            + rate_coefficient * elbow_rate**2
+        ) / _V_DOWN
+        return -float(magnitude)
+
+    acceleration = _elbow_acceleration_abs_bound(
+        torque_limit,
+        damping,
+        shoulder_rate,
+        elbow_rate,
+    )
     energy_rate_abs = (
         elbow_rate * torque_limit
         + damping * (shoulder_rate**2 + elbow_rate**2)
@@ -415,11 +490,16 @@ class BalanceXK(suite_base.Task):
         reward_kind: str = "r0",
         k_d: float = DEFAULT_LYAPUNOV_K_D,
         k_p: float = DEFAULT_LYAPUNOV_K_P,
+        k_v: float = DEFAULT_LYAPUNOV_K_V,
         eta: Optional[float] = None,
         discount_rate: Optional[float] = None,
+        lyapunov_rate_source: str = "actual",
         failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
         torque_limit: float = DEFAULT_TORQUE_LIMIT,
         damping: float = 0.0,
+        elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
+        elbow_rate_limit: float = ELBOW_RATE_LIMIT,
+        shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
     ) -> None:
         super().__init__(random=random)
         self.angle_noise = float(angle_noise)
@@ -453,7 +533,33 @@ class BalanceXK(suite_base.Task):
             )
         self.k_d = float(k_d)
         self.k_p = float(k_p)
-        for name, value in (("k_d", self.k_d), ("k_p", self.k_p)):
+        self.k_v = float(k_v)
+        for name, value in (
+            ("k_d", self.k_d),
+            ("k_p", self.k_p),
+            ("k_v", self.k_v),
+        ):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and > 0, got {value}")
+        self.lyapunov_rate_source = str(lyapunov_rate_source).strip().lower()
+        if self.lyapunov_rate_source not in LYAPUNOV_RATE_SOURCES:
+            choices = ", ".join(sorted(LYAPUNOV_RATE_SOURCES))
+            raise ValueError(
+                f"lyapunov_rate_source must be one of {{{choices}}}, got "
+                f"{lyapunov_rate_source!r}"
+            )
+        if self.reward_kind == "r0" and self.lyapunov_rate_source != "actual":
+            raise ValueError(
+                "lyapunov_rate_source is not meaningful for reward_kind='r0'"
+            )
+        self.elbow_angle_limit = float(elbow_angle_limit)
+        self.elbow_rate_limit = float(elbow_rate_limit)
+        self.shoulder_rate_scale_limit = float(shoulder_rate_scale_limit)
+        for name, value in (
+            ("elbow_angle_limit", self.elbow_angle_limit),
+            ("elbow_rate_limit", self.elbow_rate_limit),
+            ("shoulder_rate_scale_limit", self.shoulder_rate_scale_limit),
+        ):
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and > 0, got {value}")
         if eta is None:
@@ -482,15 +588,30 @@ class BalanceXK(suite_base.Task):
             raise ValueError("reward_kind='r3' requires an explicit discount_rate")
         if self.reward_kind != "r3" and self.discount_rate is not None:
             raise ValueError("discount_rate is only valid when reward_kind='r3'")
+        if (
+            self.reward_kind == "r3"
+            and self.lyapunov_rate_source == "xk_closed_loop"
+            and self.discount_rate * self.eta >= 1.0
+        ):
+            raise ValueError(
+                "xk_closed_loop r3 requires discount_rate * eta < 1 so the "
+                "energy and elbow-angle terms retain negative reward "
+                "coefficients"
+            )
         if failure_reward_rate is None:
             self.failure_reward_rate = reward_rate_lower_bound(
                 self.reward_kind,
                 k_d=self.k_d,
                 k_p=self.k_p,
+                k_v=self.k_v,
                 eta=self.eta,
                 discount_rate=self.discount_rate,
+                lyapunov_rate_source=self.lyapunov_rate_source,
                 torque_limit=torque_limit,
                 damping=damping,
+                elbow_angle_limit=self.elbow_angle_limit,
+                elbow_rate_limit=self.elbow_rate_limit,
+                shoulder_rate_scale_limit=self.shoulder_rate_scale_limit,
             )
             self.failure_reward_rate_source = "reward_lower_bound"
         else:
@@ -644,11 +765,14 @@ class BalanceXK(suite_base.Task):
         qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
         qvel = np.asarray(physics.data.qvel, dtype=np.float64).reshape(-1)
         reason: Optional[str] = None
-        if abs(float(qpos[1])) >= ELBOW_ANGLE_LIMIT:
+        if abs(float(qpos[1])) >= self.elbow_angle_limit:
             reason = TERMINATION_ELBOW_ANGLE
-        elif abs(float(qvel[1])) >= ELBOW_RATE_LIMIT:
+        elif abs(float(qvel[1])) >= self.elbow_rate_limit:
             reason = TERMINATION_ELBOW_RATE
-        elif abs(float(qvel[0])) >= SHOULDER_RATE_SCALE_LIMIT * rate_scale:
+        elif (
+            abs(float(qvel[0]))
+            >= self.shoulder_rate_scale_limit * rate_scale
+        ):
             reason = TERMINATION_SHOULDER_RATE
         self._last_termination_reason = reason
         return 0.0 if reason is not None else None
@@ -736,10 +860,11 @@ class BalanceXK(suite_base.Task):
         ``r0`` is the normalized, periodic distance already shipped with this
         task. The Lyapunov rewards use Xin--Kaneda's unwrapped shape coordinate
         because their function penalizes elbow winding on ``R``.  Both ``V``
-        and its actual action-dependent derivative are divided by the same
-        ``V_down`` scale.  The derivative uses the generalized force the plant
-        actually applies, so the normalized policy action is never mistaken
-        for physical torque.
+        and its derivative term are divided by the same ``V_down`` scale.  The
+        actual derivative uses the generalized force the plant applies, so the
+        normalized policy action is never mistaken for physical torque.  The
+        separately named Xin--Kaneda closed-loop value is the optional
+        action-independent surrogate ``-k_V qdot2^2``.
         """
         baseline = self.baseline_terms(physics)
         qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
@@ -783,14 +908,26 @@ class BalanceXK(suite_base.Task):
             + self.k_d * elbow_rate * float(qacc[1])
             + self.k_p * elbow_unwrapped * elbow_rate
         )
+        xk_closed_loop_lyapunov_rate = -self.k_v * elbow_rate**2
+        selected_lyapunov_rate = (
+            lyapunov_rate
+            if self.lyapunov_rate_source == "actual"
+            else xk_closed_loop_lyapunov_rate
+        )
         lyapunov_scale = self.lyapunov_scale
         lyapunov_normalized = lyapunov / lyapunov_scale
         lyapunov_rate_normalized = lyapunov_rate / lyapunov_scale
+        xk_closed_loop_lyapunov_rate_normalized = (
+            xk_closed_loop_lyapunov_rate / lyapunov_scale
+        )
+        selected_lyapunov_rate_normalized = (
+            selected_lyapunov_rate / lyapunov_scale
+        )
         eta = float(self.eta or 0.0)
         discount_rate = float(self.discount_rate or 0.0)
         r0 = float(baseline["reward"])
         r1 = -lyapunov_normalized
-        r2 = r1 - eta * lyapunov_rate_normalized
+        r2 = r1 - eta * selected_lyapunov_rate_normalized
         r3 = r2 + discount_rate * eta * lyapunov_normalized
         selected = {
             "r0": r0,
@@ -806,9 +943,17 @@ class BalanceXK(suite_base.Task):
             "r3": r3,
             "lyapunov": lyapunov,
             "lyapunov_rate": lyapunov_rate,
+            "xk_closed_loop_lyapunov_rate": xk_closed_loop_lyapunov_rate,
+            "selected_lyapunov_rate": selected_lyapunov_rate,
             "lyapunov_scale": lyapunov_scale,
             "lyapunov_normalized": lyapunov_normalized,
             "lyapunov_rate_normalized": lyapunov_rate_normalized,
+            "xk_closed_loop_lyapunov_rate_normalized": (
+                xk_closed_loop_lyapunov_rate_normalized
+            ),
+            "selected_lyapunov_rate_normalized": (
+                selected_lyapunov_rate_normalized
+            ),
             "energy_rate": energy_rate,
             "elbow_acceleration": float(qacc[1]),
             "applied_torque": float(actuator_force[1]),
@@ -831,9 +976,14 @@ def swingup_xk(
     reward_kind: str = "r0",
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
+    k_v: float = DEFAULT_LYAPUNOV_K_V,
     eta: Optional[float] = None,
     discount_rate: Optional[float] = None,
+    lyapunov_rate_source: str = "actual",
     failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
+    elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
+    elbow_rate_limit: float = ELBOW_RATE_LIMIT,
+    shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
 ):
     """Construct ``acrobot-swingup-xk``.
 
@@ -842,11 +992,11 @@ def swingup_xk(
     can always confirm which plant it is holding.  ``reward_kind`` chooses the
     training reward.  ``r2`` and ``r3`` additionally require an explicit
     ``eta`` shaping time scale, and ``r3`` requires the physical
-    ``discount_rate`` used by CT-SAC.  By default, the action-independent
-    absorbing-failure rate is the configured reward's finite lower envelope;
-    ``failure_reward_rate`` can explicitly override it for reproduction.  The
-    task still records the selected endpoint reward for diagnostics when the
-    wrapper emits the failure rate at a cap.
+    ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
+    actual action-dependent derivative or the counterfactual Xin--Kaneda
+    closed-loop surrogate.  The three state limits are instance kwargs and are
+    also used to derive the absorbing failure rate's finite lower envelope;
+    ``failure_reward_rate`` can explicitly override it for reproduction.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -862,11 +1012,16 @@ def swingup_xk(
         reward_kind=reward_kind,
         k_d=k_d,
         k_p=k_p,
+        k_v=k_v,
         eta=eta,
         discount_rate=discount_rate,
+        lyapunov_rate_source=lyapunov_rate_source,
         failure_reward_rate=failure_reward_rate,
         torque_limit=torque_limit,
         damping=damping,
+        elbow_angle_limit=elbow_angle_limit,
+        elbow_rate_limit=elbow_rate_limit,
+        shoulder_rate_scale_limit=shoulder_rate_scale_limit,
     )
     return control.Environment(
         physics,

@@ -1,6 +1,9 @@
 """Contract tests for the Acrobot-XK CT-SAC reward-arm matrix."""
 
+import csv
+import math
 import unittest
+from pathlib import Path
 
 from common.utils import load_ct_hyperparams_from_table
 
@@ -40,12 +43,72 @@ FIXED_ONE_MS_TEMP1_MODES = {
     ).items()
 }
 
+PREVIOUS_ELBOW_RATE_LIMIT = 4.0 * math.pi
+NEW_ELBOW_RATE_LIMIT = PREVIOUS_ELBOW_RATE_LIMIT * math.sqrt(2.0)
+LATEST_HIGH_RATE_MODES = {
+    f"{mode}_q2dot4sqrt2pi": expected
+    for mode, expected in FIXED_ONE_MS_TEMP1_MODES.items()
+}
+XK_CLOSED_LOOP_MODES = {}
+for cap_label, cap in (
+    ("q2dot4pi", PREVIOUS_ELBOW_RATE_LIMIT),
+    ("q2dot4sqrt2pi", NEW_ELBOW_RATE_LIMIT),
+):
+    for mode, (reward_kind, eta) in FIXED_ONE_MS_TEMP1_MODES.items():
+        if reward_kind == "r0":
+            continue
+        discount_rate = 0.1 if "_h10s_" in mode else 0.5
+        XK_CLOSED_LOOP_MODES[f"{mode}_xkdot_{cap_label}"] = (
+            reward_kind,
+            eta,
+            discount_rate,
+            cap,
+        )
+    for horizon, eta_label, eta, discount_rate in (
+        ("h10s", "0p35", 0.35, 0.1),
+        ("h2s", "0p31", 0.31, 0.5),
+    ):
+        mode = (
+            f"xk_r3_eta{eta_label}_fixed1ms_{horizon}_temp1_"
+            f"xkdot_{cap_label}"
+        )
+        XK_CLOSED_LOOP_MODES[mode] = ("r3", eta, discount_rate, cap)
+
 
 def _load(mode):
     return load_ct_hyperparams_from_table("ct_sac", ENV_ID, mode)
 
 
 class TestAcrobotXKCTSACConfig(unittest.TestCase):
+    def test_every_acrobot_xk_mode_evaluates_every_100k_steps(self):
+        table = (
+            Path(__file__).parents[1]
+            / "benchmarks"
+            / "hyperparams"
+            / "ct_sac.csv"
+        )
+        with table.open(newline="") as handle:
+            modes = [
+                row
+                for row in csv.DictReader(handle)
+                if row["env_id"] == ENV_ID
+            ]
+
+        self.assertTrue(modes)
+        self.assertEqual(
+            len(modes),
+            len({row["mode"] for row in modes}),
+            "Acrobot-XK mode names must be unique",
+        )
+        self.assertEqual(
+            {
+                row["mode"]: row["log_eval_freq"]
+                for row in modes
+                if int(row["log_eval_freq"]) != 100_000
+            },
+            {},
+        )
+
     def test_training_arms_differ_only_in_reward_task_parameters(self):
         reference = None
         for mode, (reward_kind, eta) in REWARD_MODES.items():
@@ -254,6 +317,110 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 self.assertEqual(model, base_model)
                 self.assertEqual(algo, base_algo)
                 self.assertEqual(log, base_log)
+
+    def test_latest_temperature_one_arms_have_higher_rate_cap_variants(self):
+        self.assertEqual(len(LATEST_HIGH_RATE_MODES), 28)
+        for mode, expected in LATEST_HIGH_RATE_MODES.items():
+            with self.subTest(mode=mode):
+                total, env, model, algo, log = _load(mode)
+                base_mode = mode.removesuffix("_q2dot4sqrt2pi")
+                (
+                    base_total,
+                    base_env,
+                    base_model,
+                    base_algo,
+                    base_log,
+                ) = _load(base_mode)
+
+                task = dict(env["task_kwargs"])
+                self.assertEqual(
+                    (task["reward_kind"], task.get("eta")), expected
+                )
+                self.assertAlmostEqual(
+                    task.pop("elbow_angle_limit"),
+                    PREVIOUS_ELBOW_RATE_LIMIT,
+                )
+                self.assertAlmostEqual(
+                    task.pop("elbow_rate_limit"), NEW_ELBOW_RATE_LIMIT
+                )
+                self.assertEqual(task.pop("shoulder_rate_scale_limit"), 2)
+
+                self.assertEqual(total, base_total)
+                self.assertEqual(task, base_env["task_kwargs"])
+                env = dict(env)
+                base_env = dict(base_env)
+                env.pop("task_kwargs")
+                base_env.pop("task_kwargs")
+                self.assertEqual(env, base_env)
+                self.assertEqual(model, base_model)
+                self.assertEqual(algo, base_algo)
+                self.assertEqual(log, base_log)
+
+    def test_xk_closed_loop_reward_matrix_covers_both_rate_caps(self):
+        self.assertEqual(len(XK_CLOSED_LOOP_MODES), 56)
+        counts = {"r1": 0, "r2": 0, "r3": 0}
+        for mode, expected in XK_CLOSED_LOOP_MODES.items():
+            reward_kind, eta, discount_rate, elbow_rate_limit = expected
+            with self.subTest(mode=mode):
+                total, env, model, algo, log = _load(mode)
+                task = env["task_kwargs"]
+                counts[reward_kind] += 1
+
+                self.assertEqual(total, 1_000_000)
+                self.assertEqual(task["reward_kind"], reward_kind)
+                self.assertEqual(task.get("eta"), eta)
+                self.assertEqual(
+                    task["lyapunov_rate_source"], "xk_closed_loop"
+                )
+                self.assertEqual(task["k_v"], 66.3)
+                self.assertAlmostEqual(
+                    task["elbow_angle_limit"], PREVIOUS_ELBOW_RATE_LIMIT
+                )
+                self.assertAlmostEqual(
+                    task["elbow_rate_limit"], elbow_rate_limit
+                )
+                self.assertEqual(task["shoulder_rate_scale_limit"], 2)
+                self.assertTrue(task["release_start"])
+                self.assertEqual(task["damping"], 0)
+                self.assertEqual(task["torque_limit"], 20)
+                self.assertNotIn("failure_reward_rate", task)
+                if reward_kind == "r3":
+                    self.assertEqual(task["discount_rate"], discount_rate)
+                else:
+                    self.assertNotIn("discount_rate", task)
+
+                self.assertEqual(env["time_sampling"], "uniform")
+                self.assertEqual(env["dt"], 0.001)
+                self.assertEqual(env["physics_dt"], 0.001)
+                self.assertEqual(env["max_steps"], 20_000)
+                self.assertEqual(env["episode_duration"], 20)
+                self.assertEqual(algo["discount_rate"], discount_rate)
+                self.assertEqual(algo["target_reference_dt"], 0.001)
+                self.assertEqual(algo["alpha"], "auto_1.0")
+                self.assertEqual(str(algo["reward_is_rate"]).lower(), "true")
+                self.assertEqual(model["periodic_obs_indices"], (0,))
+                self.assertEqual(log["eval_freq"], 100_000)
+
+        self.assertEqual(counts, {"r1": 4, "r2": 24, "r3": 28})
+
+    def test_xk_closed_loop_r3_includes_eta_sweep_optima(self):
+        for cap_label in ("q2dot4pi", "q2dot4sqrt2pi"):
+            with self.subTest(cap=cap_label, horizon="h10s"):
+                mode = (
+                    "xk_r3_eta0p35_fixed1ms_h10s_temp1_xkdot_"
+                    + cap_label
+                )
+                _, env, _, algo, _ = _load(mode)
+                self.assertEqual(env["task_kwargs"]["eta"], 0.35)
+                self.assertEqual(algo["discount_rate"], 0.1)
+            with self.subTest(cap=cap_label, horizon="h2s"):
+                mode = (
+                    "xk_r3_eta0p31_fixed1ms_h2s_temp1_xkdot_"
+                    + cap_label
+                )
+                _, env, _, algo, _ = _load(mode)
+                self.assertEqual(env["task_kwargs"]["eta"], 0.31)
+                self.assertEqual(algo["discount_rate"], 0.5)
 
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")

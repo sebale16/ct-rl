@@ -50,6 +50,16 @@ class TestAcrobotXKTermination(unittest.TestCase):
                 )
                 self.assertIsNone(self.env.task.last_termination_reason)
 
+    def test_elbow_rate_limit_allows_speeds_beyond_two_pi(self):
+        self.assertEqual(ELBOW_RATE_LIMIT, 4.0 * np.pi)
+        for sign in (-1.0, 1.0):
+            with self.subTest(sign=sign):
+                self._set_state(qd2=sign * (2.0 * np.pi + 0.2))
+                self.assertIsNone(
+                    self.env.task.get_termination(self.env.physics)
+                )
+                self.assertIsNone(self.env.task.last_termination_reason)
+
     def test_each_limit_terminates_at_either_sign(self):
         omega_s = float(self.env.task._rate_scale)
         cases = (
@@ -82,6 +92,89 @@ class TestAcrobotXKTermination(unittest.TestCase):
         )
         self.assertIsNone(self.env.task.get_termination(self.env.physics))
         self.assertIsNone(self.env.task.last_termination_reason)
+
+    def test_custom_limits_are_instance_kwargs_at_exact_boundaries(self):
+        limits = {
+            "elbow_angle_limit": 1.5,
+            "elbow_rate_limit": 2.5,
+            "shoulder_rate_scale_limit": 0.75,
+        }
+        env = swingup_xk(random=1, release_start=True, **limits)
+        env.reset()
+        task = env.task
+        self.assertEqual(task.elbow_angle_limit, 1.5)
+        self.assertEqual(task.elbow_rate_limit, 2.5)
+        self.assertEqual(task.shoulder_rate_scale_limit, 0.75)
+        shoulder_limit = 0.75 * task._rate_scale
+
+        cases = (
+            ([0.0, 1.5, 0.0, 0.0], TERMINATION_ELBOW_ANGLE),
+            ([0.0, 0.0, 0.0, -2.5], TERMINATION_ELBOW_RATE),
+            ([0.0, 0.0, shoulder_limit, 0.0], TERMINATION_SHOULDER_RATE),
+        )
+        for state, reason in cases:
+            with self.subTest(reason=reason):
+                env.physics.data.qpos[:] = state[:2]
+                env.physics.data.qvel[:] = state[2:]
+                env.physics.forward()
+                self.assertEqual(task.get_termination(env.physics), 0.0)
+                self.assertEqual(task.last_termination_reason, reason)
+
+        env.physics.data.qpos[:] = [
+            0.0,
+            np.nextafter(task.elbow_angle_limit, 0.0),
+        ]
+        env.physics.data.qvel[:] = [
+            np.nextafter(shoulder_limit, 0.0),
+            np.nextafter(task.elbow_rate_limit, 0.0),
+        ]
+        env.physics.forward()
+        self.assertIsNone(task.get_termination(env.physics))
+
+    def test_two_tasks_keep_independent_elbow_rate_limits(self):
+        low = swingup_xk(random=2, elbow_rate_limit=2.0)
+        high = swingup_xk(random=3, elbow_rate_limit=4.0)
+        low.reset()
+        high.reset()
+        for env in (low, high):
+            env.physics.data.qpos[:] = [0.0, 0.0]
+            env.physics.data.qvel[:] = [0.0, 3.0]
+            env.physics.forward()
+        self.assertEqual(low.task.get_termination(low.physics), 0.0)
+        self.assertIsNone(high.task.get_termination(high.physics))
+
+    def test_termination_limit_kwargs_must_be_positive_and_finite(self):
+        names = (
+            "elbow_angle_limit",
+            "elbow_rate_limit",
+            "shoulder_rate_scale_limit",
+        )
+        for name in names:
+            for value in (0.0, -1.0, float("nan"), float("inf")):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, name):
+                        swingup_xk(**{name: value})
+
+    def test_custom_cap_changes_automatic_failure_reward_bound(self):
+        low = swingup_xk(
+            reward_kind="r1",
+            elbow_rate_limit=ELBOW_RATE_LIMIT,
+        )
+        high = swingup_xk(
+            reward_kind="r1",
+            elbow_rate_limit=ELBOW_RATE_LIMIT * np.sqrt(2.0),
+        )
+        low.reset()
+        high.reset()
+        self.assertEqual(low.task.elbow_rate_limit, ELBOW_RATE_LIMIT)
+        self.assertAlmostEqual(
+            high.task.elbow_rate_limit,
+            ELBOW_RATE_LIMIT * np.sqrt(2.0),
+        )
+        self.assertLess(
+            high.task.failure_reward_rate,
+            low.task.failure_reward_rate,
+        )
 
     def test_elbow_angle_limit_uses_the_unwrapped_coordinate(self):
         self._set_state(q2=ELBOW_ANGLE_LIMIT + 0.2)

@@ -8,6 +8,7 @@ import torch as th
 from benchmarks.run_ct_rl import (
     ACROBOT_XK_ENV_ID,
     ACROBOT_XK_EVAL_SEEDS,
+    _align_acrobot_xk_eval_termination_limits,
     _primary_eval_schedule,
     _resolved_eval_mode,
 )
@@ -52,6 +53,49 @@ class TestAcrobotXKEvalProtocol(unittest.TestCase):
         self.assertEqual(count, 32)
         self.assertEqual(episode_seeds, ACROBOT_XK_EVAL_SEEDS)
         self.assertEqual(episode_seeds, tuple(range(20000, 20032)))
+
+    def test_callback_eval_preserves_each_arms_termination_envelope(self):
+        train = {
+            "task_kwargs": {
+                "reward_kind": "r3",
+                "elbow_angle_limit": 4.0 * np.pi,
+                "elbow_rate_limit": 4.0 * np.pi * np.sqrt(2.0),
+                "shoulder_rate_scale_limit": 2.0,
+            }
+        }
+        fixed_eval = {
+            "dt": 0.001,
+            "task_kwargs": {
+                "reward_kind": "r0",
+                "release_start": True,
+            },
+        }
+
+        aligned = _align_acrobot_xk_eval_termination_limits(
+            ACROBOT_XK_ENV_ID, train, fixed_eval
+        )
+
+        self.assertIsNot(aligned, fixed_eval)
+        self.assertEqual(aligned["task_kwargs"]["reward_kind"], "r0")
+        self.assertTrue(aligned["task_kwargs"]["release_start"])
+        self.assertEqual(
+            aligned["task_kwargs"]["elbow_rate_limit"],
+            4.0 * np.pi * np.sqrt(2.0),
+        )
+        self.assertEqual(
+            aligned["task_kwargs"]["elbow_angle_limit"], 4.0 * np.pi
+        )
+        self.assertEqual(
+            aligned["task_kwargs"]["shoulder_rate_scale_limit"], 2.0
+        )
+        self.assertNotIn("elbow_rate_limit", fixed_eval["task_kwargs"])
+
+    def test_callback_eval_does_not_change_other_environments(self):
+        eval_kwargs = {"task_kwargs": {"reward_kind": "r0"}}
+        result = _align_acrobot_xk_eval_termination_limits(
+            "cartpole-swingup", {"task_kwargs": {}}, eval_kwargs
+        )
+        self.assertIs(result, eval_kwargs)
 
     def test_evaluator_reseeds_each_episode_and_does_not_add_a_final_reset(self):
         env = _OneStepEnv()

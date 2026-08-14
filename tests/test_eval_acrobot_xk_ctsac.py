@@ -84,6 +84,11 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
                 "eta": 0.05,
                 "k_d": 35.8,
                 "k_p": 61.2,
+                "k_v": 66.3,
+                "lyapunov_rate_source": "xk_closed_loop",
+                "elbow_angle_limit": 4.0 * np.pi,
+                "elbow_rate_limit": 4.0 * np.pi * np.sqrt(2.0),
+                "shoulder_rate_scale_limit": 2.0,
                 "uniform_start": True,
                 "damping": 0.3,
                 "torque_limit": 7.0,
@@ -95,12 +100,31 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertEqual(task["eta"], 0.2)
         self.assertEqual(task["k_d"], 35.8)
         self.assertEqual(task["k_p"], 61.2)
+        self.assertEqual(task["k_v"], 66.3)
+        self.assertEqual(task["lyapunov_rate_source"], "xk_closed_loop")
+        self.assertEqual(task["elbow_angle_limit"], 4.0 * np.pi)
+        self.assertEqual(
+            task["elbow_rate_limit"], 4.0 * np.pi * np.sqrt(2.0)
+        )
+        self.assertEqual(task["shoulder_rate_scale_limit"], 2.0)
         self.assertTrue(task["release_start"])
         self.assertFalse(task["uniform_start"])
         self.assertFalse(task["paper_start"])
         self.assertEqual(task["damping"], 0.0)
         self.assertEqual(task["torque_limit"], 20.0)
         self.assertNotIn("failure_reward_rate", task)
+        r0_override = build_task_kwargs(
+            env_kwargs,
+            RewardMetadata("r0", None),
+            EvaluationProtocol(seeds=(1,)),
+        )
+        self.assertNotIn("lyapunov_rate_source", r0_override)
+        self.assertNotIn("k_v", r0_override)
+        self.assertEqual(r0_override["elbow_angle_limit"], 4.0 * np.pi)
+        self.assertEqual(
+            r0_override["elbow_rate_limit"], 4.0 * np.pi * np.sqrt(2.0)
+        )
+        self.assertEqual(r0_override["shoulder_rate_scale_limit"], 2.0)
         with self.assertRaises(ValueError):
             RewardMetadata("r2", None)
         with self.assertRaises(ValueError):
@@ -225,7 +249,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             )
             env = Mock()
             env._env.physics = object()
-            env._env.task.failure_reward_rate = -61.1757779491
+            env._env.task.failure_reward_rate = -152.9423545121
             env._env.task.failure_reward_rate_source = "reward_lower_bound"
             model = SimpleNamespace(device=th.device("cpu"))
 
@@ -276,7 +300,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
             )
             self.assertEqual(
                 result.summary["task_metadata"]["failure_reward_rate"],
-                -61.1757779491,
+                -152.9423545121,
             )
             self.assertEqual(
                 result.summary["task_metadata"]["failure_reward_rate_source"],

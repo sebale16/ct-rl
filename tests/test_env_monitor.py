@@ -132,6 +132,14 @@ class TestRolloutInfoKeys(unittest.TestCase):
         self.assertIn("acrobot_energy_norm", keys)
         self.assertIn("acrobot_coordination_loss", keys)
 
+    def test_xk_arms_log_both_actual_and_selected_lyapunov_rates(self):
+        from benchmarks.run_ct_rl import rollout_info_keys
+
+        keys = rollout_info_keys("acrobot-swingup-xk")
+        self.assertIn("acrobot_xk_lyapunov_rate", keys)
+        self.assertIn("acrobot_xk_xk_closed_loop_lyapunov_rate", keys)
+        self.assertIn("acrobot_xk_selected_lyapunov_rate", keys)
+
     def test_other_tasks_get_no_diagnostics(self):
         from benchmarks.run_ct_rl import rollout_info_keys
 
