@@ -448,6 +448,19 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
 
         self.assertEqual(counts, {"r1": 4, "r2": 24, "r3": 28})
 
+    def test_r0_q2dot4pi_baselines_match_named_discount_horizons(self):
+        for horizon, discount_rate in (("h2s", 0.5), ("h10s", 0.1)):
+            mode = f"xk_r0_fixed1ms_{horizon}_temp1_q2dot4pi"
+            with self.subTest(mode=mode):
+                _, env, _, algo, _ = _load(mode)
+                task = env["task_kwargs"]
+                self.assertEqual(task["reward_kind"], "r0")
+                self.assertNotIn("discount_rate", task)
+                self.assertEqual(algo["discount_rate"], discount_rate)
+                self.assertAlmostEqual(
+                    task["elbow_rate_limit"], PREVIOUS_ELBOW_RATE_LIMIT
+                )
+
     def test_xk_closed_loop_r3_includes_eta_sweep_optima(self):
         for cap_label in ("q2dot4pi", "q2dot4sqrt2pi"):
             with self.subTest(cap=cap_label, horizon="h10s"):

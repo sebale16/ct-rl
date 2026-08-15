@@ -9,6 +9,7 @@ from benchmarks.run_ct_rl import (
     ACROBOT_XK_ENV_ID,
     ACROBOT_XK_EVAL_SEEDS,
     _align_acrobot_xk_eval_termination_limits,
+    _configure_acrobot_xk_start_distributions,
     _primary_eval_schedule,
     _resolved_eval_mode,
 )
@@ -54,6 +55,120 @@ class TestAcrobotXKEvalProtocol(unittest.TestCase):
         self.assertEqual(episode_seeds, ACROBOT_XK_EVAL_SEEDS)
         self.assertEqual(episode_seeds, tuple(range(20000, 20032)))
 
+    def test_uniform_training_start_keeps_evaluation_near_hanging(self):
+        train = {
+            "dt": 0.002,
+            "task_kwargs": {
+                "reward_kind": "r2",
+                "eta": 0.1,
+                "uniform_start": False,
+                "paper_start": False,
+                "release_start": True,
+            },
+        }
+        fixed_eval = {
+            "dt": 0.001,
+            "task_kwargs": {
+                "reward_kind": "r0",
+                "uniform_start": True,
+                "paper_start": False,
+                "release_start": False,
+            },
+        }
+        original_train = {
+            "dt": 0.002,
+            "task_kwargs": {
+                "reward_kind": "r2",
+                "eta": 0.1,
+                "uniform_start": False,
+                "paper_start": False,
+                "release_start": True,
+            },
+        }
+        original_eval = {
+            "dt": 0.001,
+            "task_kwargs": {
+                "reward_kind": "r0",
+                "uniform_start": True,
+                "paper_start": False,
+                "release_start": False,
+            },
+        }
+
+        configured_train, configured_eval = (
+            _configure_acrobot_xk_start_distributions(
+                ACROBOT_XK_ENV_ID,
+                train,
+                fixed_eval,
+                uniform_training_start=True,
+            )
+        )
+
+        self.assertEqual(train, original_train)
+        self.assertEqual(fixed_eval, original_eval)
+        self.assertIsNot(configured_train, train)
+        self.assertIsNot(configured_train["task_kwargs"], train["task_kwargs"])
+        self.assertIsNot(configured_eval, fixed_eval)
+        self.assertIsNot(
+            configured_eval["task_kwargs"], fixed_eval["task_kwargs"]
+        )
+        self.assertEqual(configured_train["task_kwargs"]["reward_kind"], "r2")
+        self.assertEqual(configured_train["task_kwargs"]["eta"], 0.1)
+        self.assertTrue(configured_train["task_kwargs"]["uniform_start"])
+        self.assertFalse(configured_train["task_kwargs"]["paper_start"])
+        self.assertFalse(configured_train["task_kwargs"]["release_start"])
+        self.assertTrue(configured_eval["task_kwargs"]["release_start"])
+        self.assertFalse(configured_eval["task_kwargs"]["uniform_start"])
+        self.assertFalse(configured_eval["task_kwargs"]["paper_start"])
+
+    def test_start_override_rejects_non_xk_uniform_training(self):
+        train = {"task_kwargs": {"uniform_start": False}}
+        fixed_eval = {"task_kwargs": {"uniform_start": True}}
+
+        same_train, same_eval = _configure_acrobot_xk_start_distributions(
+            "cartpole-swingup",
+            train,
+            fixed_eval,
+            uniform_training_start=False,
+        )
+        self.assertIs(same_train, train)
+        self.assertIs(same_eval, fixed_eval)
+        with self.assertRaisesRegex(ValueError, "acrobot-swingup-xk"):
+            _configure_acrobot_xk_start_distributions(
+                "cartpole-swingup",
+                train,
+                fixed_eval,
+                uniform_training_start=True,
+            )
+
+    def test_disabled_uniform_start_leaves_xk_training_reset_unchanged(self):
+        train = {
+            "task_kwargs": {
+                "release_start": True,
+                "release_angle_range": (0.1, 0.2),
+            }
+        }
+        fixed_eval = {"task_kwargs": {"uniform_start": True}}
+
+        configured_train, configured_eval = (
+            _configure_acrobot_xk_start_distributions(
+                ACROBOT_XK_ENV_ID,
+                train,
+                fixed_eval,
+                uniform_training_start=False,
+            )
+        )
+
+        self.assertEqual(configured_train, train)
+        self.assertTrue(configured_train["task_kwargs"]["release_start"])
+        self.assertEqual(
+            configured_train["task_kwargs"]["release_angle_range"],
+            (0.1, 0.2),
+        )
+        self.assertTrue(configured_eval["task_kwargs"]["release_start"])
+        self.assertFalse(configured_eval["task_kwargs"]["uniform_start"])
+        self.assertFalse(configured_eval["task_kwargs"]["paper_start"])
+
     def test_callback_eval_preserves_each_arms_termination_envelope(self):
         train = {
             "task_kwargs": {
@@ -96,6 +211,29 @@ class TestAcrobotXKEvalProtocol(unittest.TestCase):
             "cartpole-swingup", {"task_kwargs": {}}, eval_kwargs
         )
         self.assertIs(result, eval_kwargs)
+
+    def test_callback_eval_forces_release_start_without_configured_caps(self):
+        train = {"task_kwargs": {"reward_kind": "r0"}}
+        fixed_eval = {
+            "dt": 0.001,
+            "task_kwargs": {
+                "reward_kind": "r0",
+                "uniform_start": True,
+                "paper_start": False,
+                "release_start": False,
+            },
+        }
+
+        aligned = _align_acrobot_xk_eval_termination_limits(
+            ACROBOT_XK_ENV_ID, train, fixed_eval
+        )
+
+        self.assertIsNot(aligned, fixed_eval)
+        self.assertTrue(aligned["task_kwargs"]["release_start"])
+        self.assertFalse(aligned["task_kwargs"]["uniform_start"])
+        self.assertFalse(aligned["task_kwargs"]["paper_start"])
+        self.assertTrue(fixed_eval["task_kwargs"]["uniform_start"])
+        self.assertFalse(fixed_eval["task_kwargs"]["release_start"])
 
     def test_evaluator_reseeds_each_episode_and_does_not_add_a_final_reset(self):
         env = _OneStepEnv()

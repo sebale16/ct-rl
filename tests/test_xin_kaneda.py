@@ -473,6 +473,39 @@ class TestEnvironment(unittest.TestCase):
             obs[2:], np.asarray(env._env.physics.data.qvel), atol=1e-12
         )
 
+    def test_uniform_reset_covers_joint_configurations_at_rest(self):
+        env = DMCContinuousEnv(
+            "acrobot",
+            "swingup-xk",
+            seed=0,
+            raw_state_obs=True,
+            dt=0.002,
+            task_kwargs=dict(uniform_start=True),
+        )
+        self.addCleanup(env.close)
+
+        starts = []
+        for seed in range(32):
+            env.reset(seed=seed)
+            qpos = np.asarray(env._env.physics.data.qpos, dtype=np.float64)
+            qvel = np.asarray(env._env.physics.data.qvel, dtype=np.float64)
+            self.assertTrue(np.all(qpos >= -np.pi))
+            self.assertTrue(np.all(qpos < np.pi))
+            np.testing.assert_array_equal(qvel, np.zeros(2, dtype=np.float64))
+            starts.append(qpos.copy())
+
+        starts = np.asarray(starts)
+        # Each generalized angle, not only the shoulder angle, spans a broad
+        # portion of its full-circle training distribution.
+        self.assertTrue(np.all(np.ptp(starts, axis=0) > 1.5 * np.pi))
+
+        first, _ = env.reset(seed=7)
+        second, _ = env.reset(seed=7)
+        np.testing.assert_array_equal(first, second)
+        np.testing.assert_array_equal(
+            env._env.physics.data.qvel, np.zeros(2, dtype=np.float64)
+        )
+
     def test_release_reset_is_the_shared_evaluation_distribution(self):
         # The protocol recorded in docs/reward_shaping_for_acrobot_swingup.md:
         # straight chain, released from rest, shoulder displaced from hanging by

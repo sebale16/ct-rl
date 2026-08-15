@@ -189,7 +189,7 @@ def _align_acrobot_xk_eval_termination_limits(
     train_env_kwargs: dict,
     eval_env_kwargs: dict,
 ) -> dict:
-    """Evaluate each XK arm under the termination envelope it trained on."""
+    """Fix XK evaluation to near-hanging starts and its training cap envelope."""
     if env_id != ACROBOT_XK_ENV_ID:
         return eval_env_kwargs
 
@@ -199,14 +199,58 @@ def _align_acrobot_xk_eval_termination_limits(
         for key in ACROBOT_XK_TERMINATION_TASK_KEYS
         if key in train_task
     }
-    if not configured_limits:
-        return eval_env_kwargs
-
     aligned = dict(eval_env_kwargs)
     eval_task = dict(aligned.get("task_kwargs", {}) or {})
+    eval_task.update(
+        uniform_start=False,
+        paper_start=False,
+        release_start=True,
+    )
     eval_task.update(configured_limits)
     aligned["task_kwargs"] = eval_task
     return aligned
+
+
+def _configure_acrobot_xk_start_distributions(
+    env_id: str,
+    train_env_kwargs: dict,
+    eval_env_kwargs: dict,
+    *,
+    uniform_training_start: bool,
+) -> tuple[dict, dict]:
+    """Optionally use full-configuration training while keeping fixed eval.
+
+    ``uniform_start`` is an existing XK task reset that samples both joint
+    angles independently over ``[-pi, pi)`` and sets both joint velocities to
+    zero.  It is mutually exclusive with the paper and near-hanging release
+    resets, so enabling the runner override clears both of those flags.
+    Evaluation is always routed through the fixed near-hanging release reset.
+    """
+    if env_id != ACROBOT_XK_ENV_ID:
+        if uniform_training_start:
+            raise ValueError(
+                "Acrobot-XK uniform training starts are only supported for "
+                f"env_id={ACROBOT_XK_ENV_ID!r}"
+            )
+        return train_env_kwargs, eval_env_kwargs
+
+    configured_train = train_env_kwargs
+    if uniform_training_start:
+        configured_train = dict(train_env_kwargs)
+        train_task = dict(configured_train.get("task_kwargs", {}) or {})
+        train_task.update(
+            uniform_start=True,
+            paper_start=False,
+            release_start=False,
+        )
+        configured_train["task_kwargs"] = train_task
+
+    configured_eval = _align_acrobot_xk_eval_termination_limits(
+        env_id,
+        configured_train,
+        eval_env_kwargs,
+    )
+    return configured_train, configured_eval
 
 
 def _primary_eval_schedule(
@@ -415,6 +459,7 @@ def run_algorithm(
     init_weights: str | None = None,
     best_model_gate: str | None = None,
     eval_hanging: bool = False,
+    xk_uniform_train_start: bool = False,
     curriculum_steps: int | None = None,
     curriculum_success_threshold: float = 0.8,
     curriculum_consecutive_evals: int = 1,
@@ -462,8 +507,11 @@ def run_algorithm(
     else:
         eval_env_kwargs = env_kwargs.copy()
 
-    eval_env_kwargs = _align_acrobot_xk_eval_termination_limits(
-        env_id, env_kwargs, eval_env_kwargs
+    env_kwargs, eval_env_kwargs = _configure_acrobot_xk_start_distributions(
+        env_id,
+        env_kwargs,
+        eval_env_kwargs,
+        uniform_training_start=xk_uniform_train_start,
     )
 
     if env_id.startswith("trading") and eval_range is not None:
@@ -1243,6 +1291,13 @@ def parse_args():
         "uniform-start primary eval. For acrobot v4.1/v5.",
     )
     parser.add_argument(
+        "--xk_uniform_train_start",
+        action="store_true",
+        help="For acrobot-swingup-xk training, sample both joint angles over "
+        "the full [-pi, pi) configuration range with zero joint velocities. "
+        "Evaluation remains on the fixed near-hanging release starts.",
+    )
+    parser.add_argument(
         "--curriculum_steps",
         type=int,
         default=None,
@@ -1403,6 +1458,7 @@ def main():
                 init_weights=args.init_weights,
                 best_model_gate=args.best_model_gate,
                 eval_hanging=args.eval_hanging,
+                xk_uniform_train_start=args.xk_uniform_train_start,
                 curriculum_steps=args.curriculum_steps,
                 curriculum_success_threshold=(
                     args.curriculum_success_threshold

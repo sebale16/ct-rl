@@ -1078,8 +1078,11 @@ def swingup_xk(
 
     ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
     from the stock model; both are recoverable from the built model, so a caller
-    can always confirm which plant it is holding.  ``reward_kind`` chooses the
-    training reward.  For r1--r3, ``reward_base`` chooses the historical
+    can always confirm which plant it is holding.  ``uniform_start=True`` samples
+    both joint angles over ``[-pi, pi)`` and releases them at exactly zero joint
+    velocity; it is mutually exclusive with ``paper_start`` and the near-hanging
+    ``release_start``.  ``reward_kind`` chooses the training reward.  For
+    r1--r3, ``reward_base`` chooses the historical
     ``-V / V_down`` state term or substitutes ``r0`` while retaining the
     original-V shaping terms.  ``r2`` and ``r3`` additionally require an
     explicit ``eta`` shaping time scale, and ``r3`` requires the physical
