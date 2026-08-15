@@ -18,7 +18,6 @@ from environment.acrobot_xk import (
     HOMOCLINIC_ANGLE_TOLERANCE,
     LOWER_BOUND_TERMINATION_REWARD_SOURCE,
     SHOULDER_RATE_SCALE_LIMIT,
-    TERMINATION_REWARD_SOURCE,
     UPRIGHT_SHOULDER,
     reward_rate_lower_bound,
     swingup_xk,
@@ -546,66 +545,47 @@ class TestAcrobotXKRewards(unittest.TestCase):
                     places=8,
                 )
 
-    def test_task_uses_endpoint_reward_source_without_fixed_rate(self):
-        env = self._env("r1")
-        self.assertIsNone(env.task.failure_reward_rate)
-        self.assertEqual(
-            env.task.failure_reward_rate_source, TERMINATION_REWARD_SOURCE
-        )
-
-    def test_r3_termination_source_tracks_nonpositivity_guarantee(self):
-        endpoint_cases = (
+    def test_task_always_resolves_the_lower_bound_as_its_failure_rate(self):
+        cases = (
+            {"reward_kind": "r0"},
+            {"reward_kind": "r1"},
+            {"reward_kind": "r1", "reward_base": "r0"},
+            {"reward_kind": "r2", "eta": 0.1},
             {
+                "reward_kind": "r2",
+                "reward_base": "r0",
+                "eta": 0.1,
+                "lyapunov_rate_source": "xk_closed_loop",
+            },
+            {
+                "reward_kind": "r3",
                 "eta": 0.0,
                 "discount_rate": 0.5,
                 "reward_base": "r0",
                 "lyapunov_rate_source": "actual",
             },
             {
+                "reward_kind": "r3",
                 "eta": 0.1,
                 "discount_rate": 0.1,
                 "reward_base": "lyapunov",
                 "lyapunov_rate_source": "xk_closed_loop",
             },
             {
-                "eta": 0.1,
-                "discount_rate": 0.0,
-                "reward_base": "r0",
-                "lyapunov_rate_source": "xk_closed_loop",
-            },
-        )
-        lower_bound_cases = (
-            {
+                "reward_kind": "r3",
                 "eta": 0.01,
                 "discount_rate": 0.1,
                 "reward_base": "r0",
                 "lyapunov_rate_source": "actual",
             },
-            {
-                "eta": 0.01,
-                "discount_rate": 0.1,
-                "reward_base": "r0",
-                "lyapunov_rate_source": "xk_closed_loop",
-            },
-            {
-                "eta": 0.3,
-                "discount_rate": 0.1,
-                "reward_base": "lyapunov",
-                "lyapunov_rate_source": "xk_closed_loop",
-            },
         )
-        for kwargs in endpoint_cases:
-            with self.subTest(source="endpoint", kwargs=kwargs):
-                env = self._env("r3", **kwargs)
-                self.assertIsNone(env.task.failure_reward_rate)
-                self.assertEqual(
-                    env.task.failure_reward_rate_source,
-                    TERMINATION_REWARD_SOURCE,
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                reward_kind = kwargs.pop("reward_kind")
+                env = self._env(reward_kind, **kwargs)
+                expected = reward_rate_lower_bound(
+                    reward_kind, **kwargs
                 )
-        for kwargs in lower_bound_cases:
-            with self.subTest(source="lower_bound", kwargs=kwargs):
-                env = self._env("r3", **kwargs)
-                expected = reward_rate_lower_bound("r3", **kwargs)
                 self.assertAlmostEqual(
                     env.task.failure_reward_rate, expected, places=12
                 )

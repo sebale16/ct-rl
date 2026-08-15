@@ -1339,11 +1339,12 @@ class CTSAC(OffPolicyAlgorithm):
     def _terminal_cap_target(self, rewards: th.Tensor) -> th.Tensor:
         """Use the emitted cap reward once with no post-termination tail.
 
-        The environment has already resolved the appropriate terminal reward:
-        normally ``r(x', u)``, or the conservative lower envelope for an r3
-        construction that is not guaranteed non-positive.  A cap is a true
-        terminal transition, so neither a learned value nor an analytical
-        absorbing continuation belongs in its target.
+        The environment has already resolved the terminal reward to the
+        configured reward's finite lower envelope -- the minimum reward
+        attainable anywhere in the capped state/action closure, so a cap can
+        never be preferable to any admissible ordinary transition.  A cap is
+        a true terminal transition, so neither a learned value nor an
+        analytical absorbing continuation belongs in its target.
         """
         with th.no_grad():
             target = self._target_reward_term(rewards)

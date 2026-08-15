@@ -795,37 +795,29 @@ class DMCContinuousEnv(ContinuousEnv):
         info.update(self._acrobot_reward_info(update=True))
         info.update(self._curriculum_task_info())
 
-        # A state-cap failure is a true terminal transition.  Normally it emits
-        # the selected post-action endpoint reward once.  A task may instead
-        # resolve a fixed reward for an r3 construction that is not guaranteed
-        # non-positive, preventing a positive shaping term from rewarding cap
-        # termination.  The diagnostic rate and source describe that one
-        # emitted reward; there is no post-termination continuation.
+        # A state-cap failure is a true terminal transition.  It emits the
+        # task's reward-rate lower envelope once as the terminal reward -- the
+        # minimum reward attainable anywhere in the capped state/action
+        # closure, so a cap can never be preferable to any admissible ordinary
+        # transition -- and there is no post-termination continuation.
         termination_reason = getattr(task, "last_termination_reason", None)
         if termination_reason is not None:
-            fixed_failure_rate = getattr(task, "failure_reward_rate", None)
-            failure_rate = float(
-                reward if fixed_failure_rate is None else fixed_failure_rate
-            )
-            if not np.isfinite(failure_rate):
+            failure_rate = getattr(task, "failure_reward_rate", None)
+            if failure_rate is None or not np.isfinite(failure_rate):
                 raise RuntimeError(
-                    "Acrobot-XK terminal endpoint reward rate must be finite"
+                    "Acrobot-XK cap failure has no resolved failure reward rate"
                 )
+            failure_rate = float(failure_rate)
             info["absorbing_failure"] = 1.0
             info["absorbing_failure_reward_rate"] = failure_rate
             info["absorbing_failure_reward_rate_source"] = str(
-                getattr(
-                    task,
-                    "failure_reward_rate_source",
-                    "terminal_endpoint_reward",
-                )
+                getattr(task, "failure_reward_rate_source", "reward_lower_bound")
             )
-            if fixed_failure_rate is not None:
-                if "acrobot_xk_reward" in info:
-                    info["acrobot_xk_unpenalized_reward"] = info[
-                        "acrobot_xk_reward"
-                    ]
-                reward = failure_rate
+            if "acrobot_xk_reward" in info:
+                info["acrobot_xk_unpenalized_reward"] = info[
+                    "acrobot_xk_reward"
+                ]
+            reward = failure_rate
 
         return obs, reward, terminated, truncated, info, float(actual_dt)
 

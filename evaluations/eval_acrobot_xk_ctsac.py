@@ -560,13 +560,9 @@ def evaluate_checkpoint(
     rows: list[dict[str, Any]] = []
     try:
         effective_task_kwargs = dict(task_kwargs)
-        failure_reward_rate = getattr(
-            env._env.task, "failure_reward_rate", None
+        effective_task_kwargs["failure_reward_rate"] = float(
+            env._env.task.failure_reward_rate
         )
-        if failure_reward_rate is not None:
-            effective_task_kwargs["failure_reward_rate"] = float(
-                failure_reward_rate
-            )
         effective_task_kwargs["failure_reward_rate_source"] = str(
             env._env.task.failure_reward_rate_source
         )

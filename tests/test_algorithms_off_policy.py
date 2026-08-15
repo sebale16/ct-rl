@@ -120,7 +120,7 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
                     "absorbing_failure": 1.0,
                     "absorbing_failure_reward_rate": -1.0,
                     "absorbing_failure_reward_rate_source": (
-                        "terminal_endpoint_reward"
+                        "reward_lower_bound"
                     ),
                 }
             ],
@@ -148,7 +148,7 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
                     "absorbing_failure": 1.0,
                     "absorbing_failure_reward_rate": rate,
                     "absorbing_failure_reward_rate_source": (
-                        "terminal_endpoint_reward"
+                        "reward_lower_bound"
                     ),
                 }
                 agent._store_transition(
