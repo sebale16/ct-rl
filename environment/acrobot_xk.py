@@ -65,12 +65,14 @@ Here ``V_down = V(x_down) = E_s^2 / 2`` is the Lyapunov value at hanging rest.
 The common linear scale preserves the shape and units of every Lyapunov term;
 the state, rate, and torque caps make their ranges finite without clipping.
 ``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
-``r3`` also requires the physical discount rate ``lambda``.  A cap failure uses
-the selected reward's finite lower envelope as its constant absorbing reward
-rate, so resetting early cannot replace a worse ordinary reward with a milder
-terminal value.  These rewards are training signals only: the analytical
-controller ignores them, and comparisons are made with the seven
-reward-independent metrics recomputed from state, physical time, and torque.
+``r3`` also requires the physical discount rate ``lambda``.  On a cap crossing,
+the selected reward at the post-action endpoint is emitted and frozen over the
+unexecuted episode remainder.  The exception is an ``r3`` construction that is
+not guaranteed to remain non-positive: it uses the configured reward's finite
+lower envelope so a positive shaping term cannot reward termination.  These
+rewards are training signals only: the analytical controller ignores them, and
+comparisons are made with the seven reward-independent metrics recomputed from
+state, physical time, and torque.
 """
 
 from __future__ import annotations
@@ -114,6 +116,8 @@ SHOULDER_RATE_SCALE_LIMIT = 2.0
 TERMINATION_ELBOW_ANGLE = "elbow_angle_limit"
 TERMINATION_ELBOW_RATE = "elbow_rate_limit"
 TERMINATION_SHOULDER_RATE = "shoulder_rate_limit"
+TERMINATION_REWARD_SOURCE = "terminal_endpoint_reward"
+LOWER_BOUND_TERMINATION_REWARD_SOURCE = "reward_lower_bound"
 
 # Reset used by the swing-up arms: near hanging, matching the paper's own
 # initial condition, which sits a small angle off the downward equilibrium.
@@ -130,9 +134,6 @@ DEFAULT_LYAPUNOV_K_V = 66.3
 LYAPUNOV_RATE_SOURCES = frozenset(("actual", "xk_closed_loop"))
 REWARD_BASES = frozenset(("lyapunov", "r0"))
 DEFAULT_REWARD_BASE = "lyapunov"
-# ``None`` selects the finite lower envelope of the configured reward.  An
-# explicit negative scalar remains accepted for reproducing historical runs.
-DEFAULT_FAILURE_REWARD_RATE = None
 REWARD_KINDS = frozenset(("r0", "r1", "r2", "r3"))
 
 # Xin--Kaneda's grouped constants, derived from the physical constants above.
@@ -239,12 +240,14 @@ def reward_rate_lower_bound(
     elbow_rate_limit: float = ELBOW_RATE_LIMIT,
     shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
 ) -> float:
-    """Return a conservative minimum reward rate on the capped domain.
+    """Return a diagnostic conservative reward-rate lower envelope.
 
     The calculation uses the closure of the nonterminal state/action limits.
     It is deliberately an envelope rather than a sampled endpoint minimum: a
-    cap failure must never be preferable merely because two individually worst
-    reward terms cannot be attained at exactly the same state.
+    single state need not attain all individually worst terms simultaneously.
+    Termination uses this envelope only for r3 constructions that are not
+    guaranteed non-positive; all other rewards use their actual post-action
+    endpoint.
     """
     kind = str(reward_kind).strip().lower()
     if kind not in REWARD_KINDS:
@@ -387,6 +390,40 @@ def reward_rate_lower_bound(
         coefficient = max(1.0 - lambda_value * eta_value, 0.0)
     return -float(coefficient * lyapunov_max + eta_value * lyapunov_rate_abs)
 
+
+def _r3_reward_is_guaranteed_nonpositive(
+    *,
+    reward_base: str,
+    k_d: float,
+    k_v: float,
+    eta: float,
+    discount_rate: float,
+    lyapunov_rate_source: str,
+) -> bool:
+    """Certify r3 non-positivity from its analytic coefficients.
+
+    The actual directional derivative has no sign guarantee under a learned
+    action unless ``eta == 0``.  With the Xin--Kaneda surrogate, the historical
+    Lyapunov base is non-positive exactly when every quadratic coefficient is
+    non-positive.  For the r0 base, a positive ``lambda * eta * V`` can expose
+    the unwrapped elbow potential where r0 wraps the angle; with zero discount,
+    only the elbow-rate coefficient remains to check.
+    """
+    if eta == 0.0:
+        return True
+    if lyapunov_rate_source == "actual":
+        return False
+    if reward_base == "lyapunov":
+        state_coefficient = 1.0 - discount_rate * eta
+        return (
+            state_coefficient >= 0.0
+            and eta * k_v <= 0.5 * state_coefficient * k_d
+        )
+    return (
+        discount_rate * eta == 0.0
+        and eta * k_v / _V_DOWN <= 1.0 / _OMEGA_S**2
+    )
+
 # The reward-independent homoclinic tube from the experiment protocol.
 HOMOCLINIC_ENERGY_TOLERANCE = 0.05
 HOMOCLINIC_ANGLE_TOLERANCE = 0.025
@@ -526,7 +563,6 @@ class BalanceXK(suite_base.Task):
         eta: Optional[float] = None,
         discount_rate: Optional[float] = None,
         lyapunov_rate_source: str = "actual",
-        failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
         torque_limit: float = DEFAULT_TORQUE_LIMIT,
         damping: float = 0.0,
         elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
@@ -641,7 +677,17 @@ class BalanceXK(suite_base.Task):
                 "energy and elbow-angle terms retain negative reward "
                 "coefficients"
             )
-        if failure_reward_rate is None:
+        unsafe_r3 = self.reward_kind == "r3" and not (
+            _r3_reward_is_guaranteed_nonpositive(
+                reward_base=self.reward_base,
+                k_d=self.k_d,
+                k_v=self.k_v,
+                eta=self.eta,
+                discount_rate=self.discount_rate,
+                lyapunov_rate_source=self.lyapunov_rate_source,
+            )
+        )
+        if unsafe_r3:
             self.failure_reward_rate = reward_rate_lower_bound(
                 self.reward_kind,
                 reward_base=self.reward_base,
@@ -657,18 +703,12 @@ class BalanceXK(suite_base.Task):
                 elbow_rate_limit=self.elbow_rate_limit,
                 shoulder_rate_scale_limit=self.shoulder_rate_scale_limit,
             )
-            self.failure_reward_rate_source = "reward_lower_bound"
+            self.failure_reward_rate_source = (
+                LOWER_BOUND_TERMINATION_REWARD_SOURCE
+            )
         else:
-            self.failure_reward_rate = float(failure_reward_rate)
-            if (
-                not np.isfinite(self.failure_reward_rate)
-                or self.failure_reward_rate >= 0.0
-            ):
-                raise ValueError(
-                    "failure_reward_rate must be finite and < 0, got "
-                    f"{failure_reward_rate}"
-                )
-            self.failure_reward_rate_source = "explicit"
+            self.failure_reward_rate = None
+            self.failure_reward_rate_source = TERMINATION_REWARD_SOURCE
         self._energy_hang: Optional[float] = None
         self._energy_span: Optional[float] = None
         self._rate_scale: Optional[float] = None
@@ -1029,7 +1069,6 @@ def swingup_xk(
     eta: Optional[float] = None,
     discount_rate: Optional[float] = None,
     lyapunov_rate_source: str = "actual",
-    failure_reward_rate: Optional[float] = DEFAULT_FAILURE_REWARD_RATE,
     elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
     elbow_rate_limit: float = ELBOW_RATE_LIMIT,
     shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
@@ -1045,9 +1084,11 @@ def swingup_xk(
     explicit ``eta`` shaping time scale, and ``r3`` requires the physical
     ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
     actual action-dependent derivative or the counterfactual Xin--Kaneda
-    closed-loop surrogate.  The three state limits are instance kwargs and are
-    also used to derive the absorbing failure rate's finite lower envelope;
-    ``failure_reward_rate`` can explicitly override it for reproduction.
+    closed-loop surrogate.  The three state limits are instance kwargs.  A cap
+    crossing normally uses the selected reward at its post-action endpoint as
+    both the emitted terminal reward rate and frozen continuation rate.  An r3
+    construction that is not guaranteed non-positive instead uses its finite
+    lower envelope so termination cannot receive a positive shaping reward.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -1068,7 +1109,6 @@ def swingup_xk(
         eta=eta,
         discount_rate=discount_rate,
         lyapunov_rate_source=lyapunov_rate_source,
-        failure_reward_rate=failure_reward_rate,
         torque_limit=torque_limit,
         damping=damping,
         elbow_angle_limit=elbow_angle_limit,
