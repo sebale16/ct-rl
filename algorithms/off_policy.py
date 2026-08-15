@@ -260,6 +260,8 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
         next_t = np.asarray(next_t).reshape(-1)
 
         cap_failure = np.zeros_like(episode_end, dtype=np.float32)
+        # These legacy replay/checkpoint columns remain zero for compatibility;
+        # cap terminals no longer have an analytical reward tail.
         failure_reward_rate = np.zeros_like(episode_end, dtype=np.float32)
         failure_remaining_time = np.zeros_like(episode_end, dtype=np.float32)
 
@@ -280,22 +282,10 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 ):
                     continue
                 cap_failure[i] = 1.0
-                rate = float(info["absorbing_failure_reward_rate"])
-                remaining = float(info["absorbing_failure_remaining_seconds"])
-                if not np.isfinite(rate):
-                    raise ValueError(
-                        "absorbing failure reward rate must be finite"
-                    )
-                if not np.isfinite(remaining) or remaining < 0.0:
-                    raise ValueError(
-                        "absorbing failure remaining time must be finite and >= 0"
-                    )
                 if not episode_end[i] or not objective_done[i]:
                     raise ValueError(
-                        "an absorbing failure must also be a true episode termination"
+                        "a cap failure must also be a true episode termination"
                     )
-                failure_reward_rate[i] = rate
-                failure_remaining_time[i] = remaining
         elif isinstance(infos, dict):
             if episode_end[0] and "terminal_observation" in infos:
                 next_obs[0] = infos["terminal_observation"]
@@ -303,22 +293,10 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                     next_t[0] = infos["terminal_next_t"]
             if bool(infos.get("absorbing_failure", False)):
                 cap_failure[0] = 1.0
-                rate = float(infos["absorbing_failure_reward_rate"])
-                remaining = float(infos["absorbing_failure_remaining_seconds"])
-                if not np.isfinite(rate):
-                    raise ValueError(
-                        "absorbing failure reward rate must be finite"
-                    )
-                if not np.isfinite(remaining) or remaining < 0.0:
-                    raise ValueError(
-                        "absorbing failure remaining time must be finite and >= 0"
-                    )
                 if not episode_end[0] or not objective_done[0]:
                     raise ValueError(
-                        "an absorbing failure must also be a true episode termination"
+                        "a cap failure must also be a true episode termination"
                     )
-                failure_reward_rate[0] = rate
-                failure_remaining_time[0] = remaining
 
         self.replay_buffer.add(
             obs=obs,

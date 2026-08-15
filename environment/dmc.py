@@ -795,20 +795,14 @@ class DMCContinuousEnv(ContinuousEnv):
         info.update(self._acrobot_reward_info(update=True))
         info.update(self._curriculum_task_info())
 
-        # A state-cap failure stops and resets immediately, but CT-SAC still
-        # needs a defined return over the unexecuted portion of this finite
-        # episode.  Normally the selected post-action endpoint reward is frozen
-        # as the absorbing rate.  A task may resolve a fixed rate for an r3
-        # construction that is not guaranteed non-positive, preventing a
-        # positive shaping term from rewarding cap termination.  The learner
-        # applies its physical discount rate analytically.
+        # A state-cap failure is a true terminal transition.  Normally it emits
+        # the selected post-action endpoint reward once.  A task may instead
+        # resolve a fixed reward for an r3 construction that is not guaranteed
+        # non-positive, preventing a positive shaping term from rewarding cap
+        # termination.  The diagnostic rate and source describe that one
+        # emitted reward; there is no post-termination continuation.
         termination_reason = getattr(task, "last_termination_reason", None)
         if termination_reason is not None:
-            if self.episode_duration is None:
-                raise RuntimeError(
-                    "Acrobot-XK cap failures require a finite "
-                    "episode_duration to define their analytical continuation"
-                )
             fixed_failure_rate = getattr(task, "failure_reward_rate", None)
             failure_rate = float(
                 reward if fixed_failure_rate is None else fixed_failure_rate
@@ -817,9 +811,6 @@ class DMCContinuousEnv(ContinuousEnv):
                 raise RuntimeError(
                     "Acrobot-XK terminal endpoint reward rate must be finite"
                 )
-            remaining = max(
-                0.0, float(self.episode_duration) - float(self._elapsed_time)
-            )
             info["absorbing_failure"] = 1.0
             info["absorbing_failure_reward_rate"] = failure_rate
             info["absorbing_failure_reward_rate_source"] = str(
@@ -829,7 +820,6 @@ class DMCContinuousEnv(ContinuousEnv):
                     "terminal_endpoint_reward",
                 )
             )
-            info["absorbing_failure_remaining_seconds"] = remaining
             if fixed_failure_rate is not None:
                 if "acrobot_xk_reward" in info:
                     info["acrobot_xk_unpenalized_reward"] = info[

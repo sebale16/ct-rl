@@ -225,13 +225,35 @@ class TestAcrobotXKTermination(unittest.TestCase):
             TERMINATION_REWARD_SOURCE,
         )
         self.assertNotIn("acrobot_xk_unpenalized_reward", info)
-        self.assertAlmostEqual(
-            info["absorbing_failure_remaining_seconds"], 0.999, places=12
-        )
+        self.assertNotIn("absorbing_failure_remaining_seconds", info)
 
         _, reset_info = env.reset(seed=4)
         self.assertIsNone(env._env.task.last_termination_reason)
         self.assertNotIn("acrobot_xk_termination_reason", reset_info)
+
+    def test_cap_terminal_reward_does_not_require_episode_horizon(self):
+        env = DMCContinuousEnv(
+            "acrobot",
+            "swingup-xk",
+            seed=7,
+            raw_state_obs=True,
+            dt=0.001,
+            physics_dt=0.001,
+            task_kwargs={"release_start": True},
+        )
+        self.addCleanup(env.close)
+        env.reset(seed=7)
+        env._env.physics.data.qpos[1] = ELBOW_ANGLE_LIMIT + 0.2
+        env._env.physics.data.qvel[:] = 0.0
+        env._env.physics.forward()
+
+        transition = env.step_dt(np.zeros(1, dtype=np.float32))
+        self.assertTrue(transition[6])
+        self.assertFalse(transition[7])
+        self.assertEqual(transition[8]["absorbing_failure"], 1.0)
+        self.assertNotIn(
+            "absorbing_failure_remaining_seconds", transition[8]
+        )
 
     def test_each_reward_uses_its_selected_cap_endpoint_rate(self):
         cases = (
@@ -362,7 +384,7 @@ class TestAcrobotXKTermination(unittest.TestCase):
             actual_r3[8]["absorbing_failure_reward_rate"], actual_expected
         )
 
-    def test_ordinary_horizon_truncation_has_no_failure_continuation(self):
+    def test_ordinary_horizon_truncation_has_no_cap_failure_metadata(self):
         env = DMCContinuousEnv(
             "acrobot",
             "swingup-xk",
@@ -407,7 +429,11 @@ class TestAcrobotXKTermination(unittest.TestCase):
         self.assertEqual(float(transition[8]["discount"]), 0.0)
         self.assertEqual(transition[8]["absorbing_failure"], 1.0)
         self.assertEqual(
-            transition[8]["absorbing_failure_remaining_seconds"], 0.0
+            transition[8]["absorbing_failure_reward_rate_source"],
+            TERMINATION_REWARD_SOURCE,
+        )
+        self.assertNotIn(
+            "absorbing_failure_remaining_seconds", transition[8]
         )
 
 

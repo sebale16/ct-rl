@@ -66,13 +66,14 @@ The common linear scale preserves the shape and units of every Lyapunov term;
 the state, rate, and torque caps make their ranges finite without clipping.
 ``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
 ``r3`` also requires the physical discount rate ``lambda``.  On a cap crossing,
-the selected reward at the post-action endpoint is emitted and frozen over the
-unexecuted episode remainder.  The exception is an ``r3`` construction that is
-not guaranteed to remain non-positive: it uses the configured reward's finite
-lower envelope so a positive shaping term cannot reward termination.  These
-rewards are training signals only: the analytical controller ignores them, and
-comparisons are made with the seven reward-independent metrics recomputed from
-state, physical time, and torque.
+the selected reward at the post-action endpoint is emitted once and the episode
+ends without a synthetic remaining-horizon tail.  The exception is an ``r3``
+construction that is not guaranteed to remain non-positive: its terminal
+transition uses the configured reward's finite lower envelope so a positive
+shaping term cannot reward termination.  These rewards are training signals
+only: the analytical controller ignores them, and comparisons are made with
+the seven reward-independent metrics recomputed from state, physical time, and
+torque.
 """
 
 from __future__ import annotations
@@ -1085,10 +1086,11 @@ def swingup_xk(
     ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
     actual action-dependent derivative or the counterfactual Xin--Kaneda
     closed-loop surrogate.  The three state limits are instance kwargs.  A cap
-    crossing normally uses the selected reward at its post-action endpoint as
-    both the emitted terminal reward rate and frozen continuation rate.  An r3
-    construction that is not guaranteed non-positive instead uses its finite
-    lower envelope so termination cannot receive a positive shaping reward.
+    crossing normally emits the selected reward at its post-action endpoint
+    once, with no reward accumulated over the unexecuted episode remainder.  An
+    r3 construction that is not guaranteed non-positive instead emits its
+    finite lower envelope so termination cannot receive a positive shaping
+    reward.
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
