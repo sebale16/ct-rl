@@ -155,7 +155,7 @@ class TestAcrobotXKCTSACEvaluator(unittest.TestCase):
         self.assertEqual(task["reward_kind"], "r3")
         self.assertEqual(task["eta"], 0.3)
         self.assertEqual(task["discount_rate"], 0.2)
-        self.assertEqual(task["failure_reward_rate"], -2.5)
+        self.assertNotIn("failure_reward_rate", task)
         self.assertIn("discount_rate", OUTPUT_FIELDS)
 
         with self.assertRaisesRegex(ValueError, "requires.*discount"):

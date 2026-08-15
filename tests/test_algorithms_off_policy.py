@@ -107,7 +107,7 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
         agent._store_transition(
             obs=obs,
             action=action,
-            reward=np.array([-2.0], dtype=np.float32),
+            reward=np.array([-1.0], dtype=np.float32),
             done=np.array([True]),
             next_obs=reset_obs.copy(),
             t=np.array([0.02], dtype=np.float64),
@@ -131,3 +131,35 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
         self.assertAlmostEqual(
             float(buf.failure_remaining_times[1, 0]), 19.96, places=5
         )
+
+    def test_store_accepts_zero_and_positive_endpoint_continuation_rates(self):
+        for rate, vector_info in ((0.0, False), (2.5, True)):
+            with self.subTest(rate=rate, vector_info=vector_info):
+                agent = self._agent()
+                obs_dim = agent.env.observation_space.shape[0]
+                act_dim = agent.env.action_space.shape[0]
+                obs = np.zeros((1, obs_dim), dtype=np.float32)
+                terminal_obs = np.ones(obs_dim, dtype=np.float32)
+                info = {
+                    "terminal_observation": terminal_obs,
+                    "terminal_next_t": 0.02,
+                    "absorbing_failure": 1.0,
+                    "absorbing_failure_reward_rate": rate,
+                    "absorbing_failure_remaining_seconds": 0.08,
+                }
+                agent._store_transition(
+                    obs=obs,
+                    action=np.zeros((1, act_dim), dtype=np.float32),
+                    reward=np.array([rate], dtype=np.float32),
+                    done=np.array([True]),
+                    next_obs=np.zeros_like(obs),
+                    t=np.array([0.0]),
+                    next_t=np.array([0.0]),
+                    infos=[info] if vector_info else info,
+                    terminated=np.array([True]),
+                    truncated=np.array([False]),
+                )
+                self.assertEqual(agent.replay_buffer.cap_failures[0, 0], 1.0)
+                self.assertEqual(
+                    agent.replay_buffer.failure_reward_rates[0, 0], rate
+                )

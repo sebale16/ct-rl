@@ -282,9 +282,9 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 cap_failure[i] = 1.0
                 rate = float(info["absorbing_failure_reward_rate"])
                 remaining = float(info["absorbing_failure_remaining_seconds"])
-                if not np.isfinite(rate) or rate >= 0.0:
+                if not np.isfinite(rate):
                     raise ValueError(
-                        "absorbing failure reward rate must be finite and < 0"
+                        "absorbing failure reward rate must be finite"
                     )
                 if not np.isfinite(remaining) or remaining < 0.0:
                     raise ValueError(
@@ -305,9 +305,9 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 cap_failure[0] = 1.0
                 rate = float(infos["absorbing_failure_reward_rate"])
                 remaining = float(infos["absorbing_failure_remaining_seconds"])
-                if not np.isfinite(rate) or rate >= 0.0:
+                if not np.isfinite(rate):
                     raise ValueError(
-                        "absorbing failure reward rate must be finite and < 0"
+                        "absorbing failure reward rate must be finite"
                     )
                 if not np.isfinite(remaining) or remaining < 0.0:
                     raise ValueError(

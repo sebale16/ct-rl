@@ -928,9 +928,17 @@ class CTSAC(OffPolicyAlgorithm):
             target = self.dynamics_target_model.state_dict()
             if source.keys() != target.keys():
                 raise RuntimeError("live and target dynamics state dictionaries differ")
+            fixed_contact_buffers = {
+                "_contact_response_dt",
+                "_contact_time_constant",
+                "_contact_transition_width",
+            }
             for name, target_value in target.items():
                 source_value = source[name].to(target_value.device)
-                if target_value.is_floating_point():
+                if (
+                    target_value.is_floating_point()
+                    and name not in fixed_contact_buffers
+                ):
                     target_value.mul_(1.0 - tau).add_(source_value, alpha=tau)
                 else:
                     target_value.copy_(source_value)
@@ -1344,8 +1352,8 @@ class CTSAC(OffPolicyAlgorithm):
         r"""Analytical cap target over the unexecuted episode remainder.
 
         For reference interval ``T``, realized duration ``h``, physical
-        discount rate ``lambda``, remaining time ``R`` and constant absorbing
-        failure rate ``r_F``, the known endpoint value is
+        discount rate ``lambda``, remaining time ``R`` and resolved terminal
+        reward rate ``r_F``, the frozen absorbing value is
 
         ``G_F = r_F (1-exp(-lambda R))/lambda``
 
@@ -1355,11 +1363,14 @@ class CTSAC(OffPolicyAlgorithm):
 
         ``y_F = T r_F + exp(-lambda T) G_F``.
 
-        The cap endpoint and unexecuted tail both use the action-independent
-        failure rate.  The selected environment reward is retained only as a
-        diagnostic, and no dummy absorbing transitions are inserted in replay.
-        For r3 this safety terminal deliberately omits a terminal-potential
-        jump; exact PBRS equivalence is therefore not claimed at finite caps.
+        The realized cap interval uses its emitted terminal reward and the
+        unexecuted tail freezes that same rate.  Normally this is the selected
+        endpoint reward ``r(x', u)``; an r3 construction that is not guaranteed
+        non-positive instead emits its conservative lower envelope.  No dummy
+        absorbing transitions are inserted in replay.  Endpoint-conditioned
+        actual-Vdot rewards depend on the action that produced ``x'``.  This
+        terminal convention does not include an r3 terminal-potential jump, so
+        exact PBRS equivalence is not claimed at finite caps.
         """
         with th.no_grad():
             dt_seconds = _duration_column(dt, rewards, name="dt")
@@ -1385,9 +1396,6 @@ class CTSAC(OffPolicyAlgorithm):
                 rewards,
                 name="failure_remaining_times",
             )
-            if bool(th.any(rates >= 0.0)):
-                raise ValueError("failure reward rates must be strictly negative")
-
             discount_log = -self.discount_rate * dt_seconds
             gamma_dt = th.exp(discount_log)
             if self.discount_rate == 0.0:
@@ -1418,9 +1426,10 @@ class CTSAC(OffPolicyAlgorithm):
                     - value_current
                 ) / ratio
 
-            # r_F is always a physical reward rate, independent of the legacy
-            # ``reward_is_rate`` switch used by ordinary environments.
-            reward_term = rates * reference_dt
+            # Acrobot-XK emits a physical reward rate.  Use the observed
+            # terminal reward for the realized interval; ``rates`` is its
+            # frozen copy for the unexecuted absorbing continuation.
+            reward_term = rewards * reference_dt
             target = reward_term + future
             self._require_finite_target_components(
                 (

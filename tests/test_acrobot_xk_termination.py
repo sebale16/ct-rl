@@ -11,10 +11,13 @@ from environment.acrobot_xk import (
     DEFAULT_TORQUE_LIMIT,
     ELBOW_ANGLE_LIMIT,
     ELBOW_RATE_LIMIT,
+    LOWER_BOUND_TERMINATION_REWARD_SOURCE,
     SHOULDER_RATE_SCALE_LIMIT,
     TERMINATION_ELBOW_ANGLE,
     TERMINATION_ELBOW_RATE,
+    TERMINATION_REWARD_SOURCE,
     TERMINATION_SHOULDER_RATE,
+    reward_rate_lower_bound,
     swingup_xk,
 )
 from environment.dmc import DMCContinuousEnv
@@ -34,6 +37,24 @@ class TestAcrobotXKTermination(unittest.TestCase):
         self.env.physics.data.qpos[:] = [-0.5 * np.pi, q2]
         self.env.physics.data.qvel[:] = [qd1, qd2]
         self.env.physics.forward()
+
+    def _terminal_transition(self, task_kwargs, state, *, seed):
+        env = DMCContinuousEnv(
+            "acrobot",
+            "swingup-xk",
+            seed=seed,
+            raw_state_obs=True,
+            dt=0.001,
+            physics_dt=0.001,
+            episode_duration=1.0,
+            task_kwargs=task_kwargs,
+        )
+        self.addCleanup(env.close)
+        env.reset(seed=seed)
+        env._env.physics.data.qpos[:] = state[:2]
+        env._env.physics.data.qvel[:] = state[2:]
+        env._env.physics.forward()
+        return env.step_dt(np.zeros(1, dtype=np.float32))
 
     def test_default_gear_is_twenty_newton_metres(self):
         gear = float(np.asarray(self.env.physics.model.actuator_gear)[0, 0])
@@ -155,27 +176,6 @@ class TestAcrobotXKTermination(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, name):
                         swingup_xk(**{name: value})
 
-    def test_custom_cap_changes_automatic_failure_reward_bound(self):
-        low = swingup_xk(
-            reward_kind="r1",
-            elbow_rate_limit=ELBOW_RATE_LIMIT,
-        )
-        high = swingup_xk(
-            reward_kind="r1",
-            elbow_rate_limit=ELBOW_RATE_LIMIT * np.sqrt(2.0),
-        )
-        low.reset()
-        high.reset()
-        self.assertEqual(low.task.elbow_rate_limit, ELBOW_RATE_LIMIT)
-        self.assertAlmostEqual(
-            high.task.elbow_rate_limit,
-            ELBOW_RATE_LIMIT * np.sqrt(2.0),
-        )
-        self.assertLess(
-            high.task.failure_reward_rate,
-            low.task.failure_reward_rate,
-        )
-
     def test_elbow_angle_limit_uses_the_unwrapped_coordinate(self):
         self._set_state(q2=ELBOW_ANGLE_LIMIT + 0.2)
         self.assertEqual(self.env.task.get_termination(self.env.physics), 0.0)
@@ -215,15 +215,16 @@ class TestAcrobotXKTermination(unittest.TestCase):
             info["acrobot_xk_termination_reason"], TERMINATION_ELBOW_ANGLE
         )
         self.assertEqual(info["absorbing_failure"], 1.0)
-        expected_failure_rate = env._env.task.failure_reward_rate
+        expected_failure_rate = info["acrobot_xk_reward"]
         self.assertAlmostEqual(
             info["absorbing_failure_reward_rate"], expected_failure_rate
         )
         self.assertAlmostEqual(reward, expected_failure_rate)
-        self.assertIn("acrobot_xk_reward", info)
         self.assertEqual(
-            info["acrobot_xk_unpenalized_reward"], info["acrobot_xk_reward"]
+            info["absorbing_failure_reward_rate_source"],
+            TERMINATION_REWARD_SOURCE,
         )
+        self.assertNotIn("acrobot_xk_unpenalized_reward", info)
         self.assertAlmostEqual(
             info["absorbing_failure_remaining_seconds"], 0.999, places=12
         )
@@ -231,6 +232,135 @@ class TestAcrobotXKTermination(unittest.TestCase):
         _, reset_info = env.reset(seed=4)
         self.assertIsNone(env._env.task.last_termination_reason)
         self.assertNotIn("acrobot_xk_termination_reason", reset_info)
+
+    def test_each_reward_uses_its_selected_cap_endpoint_rate(self):
+        cases = (
+            {"reward_kind": "r0"},
+            {"reward_kind": "r1", "reward_base": "r0"},
+            {
+                "reward_kind": "r2",
+                "reward_base": "r0",
+                "eta": 0.3,
+                "lyapunov_rate_source": "actual",
+            },
+            {
+                "reward_kind": "r2",
+                "reward_base": "r0",
+                "eta": 0.3,
+                "lyapunov_rate_source": "xk_closed_loop",
+            },
+            {
+                "reward_kind": "r3",
+                "reward_base": "r0",
+                "eta": 0.0,
+                "discount_rate": 0.5,
+                "lyapunov_rate_source": "actual",
+            },
+            {
+                "reward_kind": "r3",
+                "reward_base": "lyapunov",
+                "eta": 0.1,
+                "discount_rate": 0.1,
+                "lyapunov_rate_source": "xk_closed_loop",
+            },
+        )
+        terminal_state = np.array([0.5 * np.pi, ELBOW_ANGLE_LIMIT, 0.0, 0.0])
+        for seed, task_kwargs in enumerate(cases, start=20):
+            with self.subTest(task_kwargs=task_kwargs):
+                transition = self._terminal_transition(
+                    task_kwargs, terminal_state, seed=seed
+                )
+                reward, terminated, truncated, info = (
+                    transition[3],
+                    transition[6],
+                    transition[7],
+                    transition[8],
+                )
+                self.assertTrue(terminated)
+                self.assertFalse(truncated)
+                self.assertAlmostEqual(reward, info["acrobot_xk_reward"])
+                self.assertAlmostEqual(
+                    reward, info["absorbing_failure_reward_rate"]
+                )
+
+    def test_unsafe_r3_replaces_positive_endpoint_with_lower_bound(self):
+        upright = [0.5 * np.pi, ELBOW_ANGLE_LIMIT, 0.0, 0.0]
+        hanging = [-0.5 * np.pi, ELBOW_ANGLE_LIMIT, 0.0, 0.0]
+        upright_r0 = self._terminal_transition(
+            {"reward_kind": "r0"}, upright, seed=30
+        )
+        hanging_r0 = self._terminal_transition(
+            {"reward_kind": "r0"}, hanging, seed=31
+        )
+        self.assertNotAlmostEqual(upright_r0[3], hanging_r0[3], places=6)
+
+        task_kwargs = {
+            "reward_kind": "r3",
+            "reward_base": "r0",
+            "eta": 1.0,
+            "discount_rate": 0.5,
+            "lyapunov_rate_source": "xk_closed_loop",
+        }
+        bounded_r3 = self._terminal_transition(
+            task_kwargs,
+            upright,
+            seed=32,
+        )
+        info = bounded_r3[8]
+        self.assertGreater(info["acrobot_xk_reward"], 0.0)
+        self.assertEqual(
+            info["acrobot_xk_unpenalized_reward"], info["acrobot_xk_reward"]
+        )
+        expected = reward_rate_lower_bound(
+            "r3",
+            reward_base="r0",
+            eta=1.0,
+            discount_rate=0.5,
+            lyapunov_rate_source="xk_closed_loop",
+        )
+        self.assertLess(expected, 0.0)
+        self.assertAlmostEqual(
+            bounded_r3[3], expected
+        )
+        self.assertAlmostEqual(
+            info["absorbing_failure_reward_rate"], expected
+        )
+        self.assertEqual(
+            info["absorbing_failure_reward_rate_source"],
+            LOWER_BOUND_TERMINATION_REWARD_SOURCE,
+        )
+        bounded_hanging = self._terminal_transition(
+            task_kwargs, hanging, seed=34
+        )
+        self.assertNotAlmostEqual(
+            info["acrobot_xk_reward"],
+            bounded_hanging[8]["acrobot_xk_reward"],
+            places=6,
+        )
+        self.assertAlmostEqual(bounded_hanging[3], expected)
+
+        actual_kwargs = {
+            "reward_kind": "r3",
+            "reward_base": "r0",
+            "eta": 0.01,
+            "discount_rate": 0.1,
+            "lyapunov_rate_source": "actual",
+        }
+        actual_r3 = self._terminal_transition(
+            actual_kwargs, upright, seed=33
+        )
+        actual_expected = reward_rate_lower_bound(
+            "r3",
+            reward_base="r0",
+            eta=0.01,
+            discount_rate=0.1,
+            lyapunov_rate_source="actual",
+        )
+        self.assertGreater(actual_r3[8]["acrobot_xk_reward"], 0.0)
+        self.assertAlmostEqual(actual_r3[3], actual_expected)
+        self.assertAlmostEqual(
+            actual_r3[8]["absorbing_failure_reward_rate"], actual_expected
+        )
 
     def test_ordinary_horizon_truncation_has_no_failure_continuation(self):
         env = DMCContinuousEnv(
@@ -250,6 +380,7 @@ class TestAcrobotXKTermination(unittest.TestCase):
         self.assertTrue(transition[7])
         self.assertNotIn("absorbing_failure", transition[8])
         self.assertNotIn("absorbing_failure_reward_rate", transition[8])
+        self.assertNotIn("absorbing_failure_reward_rate_source", transition[8])
         self.assertNotIn("absorbing_failure_remaining_seconds", transition[8])
 
     def test_state_cap_takes_precedence_over_simultaneous_step_limit(self):

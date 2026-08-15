@@ -90,7 +90,7 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
         failure_rate = th.tensor([[-1.0]], dtype=th.float64)
         dt = th.tensor([[reference_dt]], dtype=th.float64)
         continuation = -(-math.expm1(-rate * float(remaining))) / rate
-        expected = reference_dt * failure_rate + math.exp(
+        expected = reference_dt * reward + math.exp(
             -rate * reference_dt
         ) * continuation
 
@@ -117,21 +117,19 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
             target_reference_dt=reference_dt,
             reward_is_rate=True,
         )
-        obs = th.zeros((2, agent.env.observation_space.shape[0]), dtype=th.float64)
-        rewards = th.tensor([[-0.25], [-0.5]], dtype=th.float64)
+        obs = th.zeros((3, agent.env.observation_space.shape[0]), dtype=th.float64)
+        rewards = th.tensor([[-0.25], [0.0], [0.5]], dtype=th.float64)
+        endpoint_rates = th.tensor([[-1.0], [0.0], [2.0]], dtype=th.float64)
+        remaining = th.tensor([[3.0], [4.0], [0.0]], dtype=th.float64)
         actual = agent._absorbing_failure_target(
             obs,
             rewards,
-            th.full((2, 1), reference_dt, dtype=th.float64),
-            th.tensor([[-1.0], [-1.0]], dtype=th.float64),
-            th.tensor([[3.0], [0.0]], dtype=th.float64),
+            th.full((3, 1), reference_dt, dtype=th.float64),
+            endpoint_rates,
+            remaining,
             th.tensor(0.1),
         )
-        expected = reference_dt * th.tensor(
-            [[-1.0], [-1.0]], dtype=th.float64
-        ) + th.tensor(
-            [[-3.0], [0.0]], dtype=th.float64
-        )
+        expected = reference_dt * rewards + endpoint_rates * remaining
         th.testing.assert_close(actual, expected, rtol=0.0, atol=1e-15)
 
     def test_irregular_cap_target_reanchors_to_known_endpoint(self):
@@ -148,7 +146,7 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
         remaining = th.tensor([[4.0]], dtype=th.float64)
         value_current = th.tensor([[7.0]], dtype=th.float64)
         continuation = -(-math.expm1(-rate * 4.0)) / rate
-        expected = -reference_dt + value_current + (
+        expected = -0.4 * reference_dt + value_current + (
             math.exp(-rate * 0.002) * continuation - value_current
         ) / 2.0
         with patch.object(agent, "_state_value", return_value=value_current) as state_value:
@@ -207,7 +205,7 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
         ):
             actual = agent._critic_target(batch, th.tensor(0.1))
         continuation = -(-math.expm1(-rate * 2.0)) / rate
-        expected_cap = -reference_dt + math.exp(
+        expected_cap = -0.75 * reference_dt + math.exp(
             -rate * reference_dt
         ) * continuation
         th.testing.assert_close(

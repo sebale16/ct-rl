@@ -317,8 +317,6 @@ def build_task_kwargs(
         release_angle_range=protocol.release_angle_range,
         **reward.task_values(),
     )
-    if "failure_reward_rate" in configured:
-        task["failure_reward_rate"] = configured["failure_reward_rate"]
     return task
 
 
@@ -562,9 +560,13 @@ def evaluate_checkpoint(
     rows: list[dict[str, Any]] = []
     try:
         effective_task_kwargs = dict(task_kwargs)
-        effective_task_kwargs["failure_reward_rate"] = float(
-            env._env.task.failure_reward_rate
+        failure_reward_rate = getattr(
+            env._env.task, "failure_reward_rate", None
         )
+        if failure_reward_rate is not None:
+            effective_task_kwargs["failure_reward_rate"] = float(
+                failure_reward_rate
+            )
         effective_task_kwargs["failure_reward_rate_source"] = str(
             env._env.task.failure_reward_rate_source
         )

@@ -796,10 +796,12 @@ class DMCContinuousEnv(ContinuousEnv):
         info.update(self._curriculum_task_info())
 
         # A state-cap failure stops and resets immediately, but CT-SAC still
-        # needs the return of the action-independent absorbing failure state
-        # over the unexecuted portion of this finite episode.  Store only the
-        # primitive rate and remaining physical time here; the learner applies
-        # its own physical discount rate analytically in the critic target.
+        # needs a defined return over the unexecuted portion of this finite
+        # episode.  Normally the selected post-action endpoint reward is frozen
+        # as the absorbing rate.  A task may resolve a fixed rate for an r3
+        # construction that is not guaranteed non-positive, preventing a
+        # positive shaping term from rewarding cap termination.  The learner
+        # applies its physical discount rate analytically.
         termination_reason = getattr(task, "last_termination_reason", None)
         if termination_reason is not None:
             if self.episode_duration is None:
@@ -807,27 +809,33 @@ class DMCContinuousEnv(ContinuousEnv):
                     "Acrobot-XK cap failures require a finite "
                     "episode_duration to define their analytical continuation"
                 )
-            failure_rate_value = getattr(task, "failure_reward_rate", None)
-            if failure_rate_value is None:
+            fixed_failure_rate = getattr(task, "failure_reward_rate", None)
+            failure_rate = float(
+                reward if fixed_failure_rate is None else fixed_failure_rate
+            )
+            if not np.isfinite(failure_rate):
                 raise RuntimeError(
-                    "Acrobot-XK cap failure has no resolved failure reward rate"
+                    "Acrobot-XK terminal endpoint reward rate must be finite"
                 )
-            failure_rate = float(failure_rate_value)
             remaining = max(
                 0.0, float(self.episode_duration) - float(self._elapsed_time)
             )
             info["absorbing_failure"] = 1.0
             info["absorbing_failure_reward_rate"] = failure_rate
+            info["absorbing_failure_reward_rate_source"] = str(
+                getattr(
+                    task,
+                    "failure_reward_rate_source",
+                    "terminal_endpoint_reward",
+                )
+            )
             info["absorbing_failure_remaining_seconds"] = remaining
-            # The cap endpoint is the first sample of the absorbing failure
-            # state, so its emitted reward rate is action-independent as well.
-            # ``acrobot_xk_reward`` in info still retains the selected r0--r3
-            # endpoint value for diagnostics.
-            if "acrobot_xk_reward" in info:
-                info["acrobot_xk_unpenalized_reward"] = info[
-                    "acrobot_xk_reward"
-                ]
-            reward = failure_rate
+            if fixed_failure_rate is not None:
+                if "acrobot_xk_reward" in info:
+                    info["acrobot_xk_unpenalized_reward"] = info[
+                        "acrobot_xk_reward"
+                    ]
+                reward = failure_rate
 
         return obs, reward, terminated, truncated, info, float(actual_dt)
 
