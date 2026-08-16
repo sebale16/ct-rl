@@ -67,12 +67,12 @@ the state, rate, and torque caps make their ranges finite without clipping.
 ``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
 ``r3`` also requires the physical discount rate ``lambda``.  On a cap crossing,
 the selected reward's finite lower envelope -- the minimum reward attainable
-anywhere in the capped state/action closure -- is emitted once as the terminal
-reward, so a cap can never be preferable to any admissible ordinary
-transition; the episode ends without a synthetic remaining-horizon tail.
-These rewards are training signals only: the analytical controller ignores
-them, and comparisons are made with the seven reward-independent metrics
-recomputed from state, physical time, and torque.
+anywhere in the capped state/action closure -- is emitted as the terminal
+reward and frozen over the unexecuted episode remainder.  CT-SAC sums that
+remaining-horizon return analytically, so a cap can never be preferable to any
+admissible ordinary transition.  These rewards are training signals only: the
+analytical controller ignores them, and comparisons are made with the seven
+reward-independent metrics recomputed from state, physical time, and torque.
 """
 
 from __future__ import annotations
@@ -1037,9 +1037,9 @@ def swingup_xk(
     ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
     actual action-dependent derivative or the counterfactual Xin--Kaneda
     closed-loop surrogate.  The three state limits are instance kwargs.  A cap
-    crossing emits the selected reward's finite lower envelope once as the
-    terminal reward -- the minimum reward attainable anywhere in the capped
-    state/action closure -- with no reward accumulated over the unexecuted
+    crossing emits the selected reward's finite lower envelope as the terminal
+    reward -- the minimum reward attainable anywhere in the capped state/action
+    closure -- and freezes that rate so CT-SAC sums it over the unexecuted
     episode remainder.
     """
     physics = mujoco.Physics.from_xml_string(

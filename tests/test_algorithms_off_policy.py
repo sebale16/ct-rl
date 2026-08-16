@@ -102,9 +102,9 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
         np.testing.assert_array_equal(buf.next_observations[0, 0], terminal_obs)
         self.assertAlmostEqual(float(buf.dt[0, 0]), 0.02, places=7)
 
-        # A cap is both a true terminal and an episode boundary.  Its selected
-        # terminal reward is already in the ordinary reward field; the info
-        # metadata is diagnostic and does not create a synthetic reward tail.
+        # A cap is both a true terminal and an episode boundary.  Its minimum
+        # reward is in the ordinary reward field, while the same frozen rate
+        # and the unused horizon define the analytical continuation.
         agent._store_transition(
             obs=obs,
             action=action,
@@ -122,6 +122,7 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
                     "absorbing_failure_reward_rate_source": (
                         "reward_lower_bound"
                     ),
+                    "absorbing_failure_remaining_seconds": 19.96,
                 }
             ],
             terminated=np.array([True]),
@@ -131,11 +132,13 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
         self.assertEqual(buf.episode_ends[1, 0], 1.0)
         self.assertEqual(buf.cap_failures[1, 0], 1.0)
         self.assertEqual(buf.rewards[1, 0], -1.0)
-        self.assertEqual(buf.failure_reward_rates[1, 0], 0.0)
-        self.assertEqual(buf.failure_remaining_times[1, 0], 0.0)
+        self.assertEqual(buf.failure_reward_rates[1, 0], -1.0)
+        self.assertAlmostEqual(
+            float(buf.failure_remaining_times[1, 0]), 19.96, places=5
+        )
 
-    def test_store_keeps_cap_reward_and_zeroes_legacy_tail_fields(self):
-        for rate, vector_info in ((0.0, False), (2.5, True)):
+    def test_store_keeps_cap_reward_and_tail_metadata(self):
+        for rate, vector_info in ((0.0, False), (-2.5, True)):
             with self.subTest(rate=rate, vector_info=vector_info):
                 agent = self._agent()
                 obs_dim = agent.env.observation_space.shape[0]
@@ -150,6 +153,7 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
                     "absorbing_failure_reward_rate_source": (
                         "reward_lower_bound"
                     ),
+                    "absorbing_failure_remaining_seconds": 0.08,
                 }
                 agent._store_transition(
                     obs=obs,
@@ -166,8 +170,10 @@ class TestOffPolicyAlgorithms(AlgorithmTest):
                 self.assertEqual(agent.replay_buffer.cap_failures[0, 0], 1.0)
                 self.assertEqual(agent.replay_buffer.rewards[0, 0], rate)
                 self.assertEqual(
-                    agent.replay_buffer.failure_reward_rates[0, 0], 0.0
+                    agent.replay_buffer.failure_reward_rates[0, 0], rate
                 )
-                self.assertEqual(
-                    agent.replay_buffer.failure_remaining_times[0, 0], 0.0
+                self.assertAlmostEqual(
+                    float(agent.replay_buffer.failure_remaining_times[0, 0]),
+                    0.08,
+                    places=7,
                 )

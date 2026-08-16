@@ -795,24 +795,34 @@ class DMCContinuousEnv(ContinuousEnv):
         info.update(self._acrobot_reward_info(update=True))
         info.update(self._curriculum_task_info())
 
-        # A state-cap failure is a true terminal transition.  It emits the
-        # task's reward-rate lower envelope once as the terminal reward -- the
-        # minimum reward attainable anywhere in the capped state/action
-        # closure, so a cap can never be preferable to any admissible ordinary
-        # transition -- and there is no post-termination continuation.
+        # A state-cap failure stops and resets immediately, but CT-SAC still
+        # needs a defined return over the unexecuted portion of the finite
+        # episode.  The task's reward-rate lower envelope -- the minimum reward
+        # attainable anywhere in the capped state/action closure -- is emitted
+        # on the terminal transition and frozen over that remainder.  The
+        # learner applies its physical discount rate analytically.
         termination_reason = getattr(task, "last_termination_reason", None)
         if termination_reason is not None:
+            if self.episode_duration is None:
+                raise RuntimeError(
+                    "Acrobot-XK cap failures require a finite "
+                    "episode_duration to define their analytical continuation"
+                )
             failure_rate = getattr(task, "failure_reward_rate", None)
             if failure_rate is None or not np.isfinite(failure_rate):
                 raise RuntimeError(
                     "Acrobot-XK cap failure has no resolved failure reward rate"
                 )
             failure_rate = float(failure_rate)
+            remaining = max(
+                0.0, float(self.episode_duration) - float(self._elapsed_time)
+            )
             info["absorbing_failure"] = 1.0
             info["absorbing_failure_reward_rate"] = failure_rate
             info["absorbing_failure_reward_rate_source"] = str(
                 getattr(task, "failure_reward_rate_source", "reward_lower_bound")
             )
+            info["absorbing_failure_remaining_seconds"] = remaining
             if "acrobot_xk_reward" in info:
                 info["acrobot_xk_unpenalized_reward"] = info[
                     "acrobot_xk_reward"

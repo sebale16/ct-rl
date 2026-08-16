@@ -13,6 +13,18 @@ from environment import DMCContinuousEnv
 from models.actor_q_critic import ActorQCriticModel
 
 
+def _absorbing_continuation(rate: th.Tensor, remaining: th.Tensor, discount_rate: float) -> th.Tensor:
+    """Reference G_F = rate * (1-exp(-discount_rate*remaining))/discount_rate.
+
+    Mirrors ``CTSAC._absorbing_failure_target``'s frozen-rate integral so
+    tests can state expectations from the documented contract rather than
+    from the implementation itself.
+    """
+    if discount_rate == 0.0:
+        return rate * remaining
+    return rate * (-th.expm1(-discount_rate * remaining) / discount_rate)
+
+
 class TestCTSACPhysicalDiscounting(unittest.TestCase):
     def _agent(self, **kwargs):
         env = DMCContinuousEnv(
@@ -76,72 +88,106 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
         self.assertAlmostEqual(agent.gamma, discount, places=15)
         self.assertAlmostEqual(agent.beta, rate * reference_dt, places=15)
 
-    def test_cap_target_uses_terminal_reward_once(self):
+    def test_cap_target_sums_the_frozen_rate_over_the_remaining_horizon(self):
         reference_dt = 0.001
+        discount_rate = 0.1
         agent = self._agent(
-            discount_rate=0.1,
+            discount_rate=discount_rate,
             target_reference_dt=reference_dt,
             reward_is_rate=True,
         )
         rewards = th.tensor([[-0.75], [0.0], [0.5]], dtype=th.float64)
-        expected = reference_dt * rewards
+        remaining = th.tensor([[2.0], [3.0], [0.0]], dtype=th.float64)
+        obs = th.zeros((3, agent.env.observation_space.shape[0]), dtype=th.float64)
+        continuation = _absorbing_continuation(rewards, remaining, discount_rate)
+        expected = reference_dt * rewards + math.exp(
+            -discount_rate * reference_dt
+        ) * continuation
 
-        # A true terminal cap has no learned or analytical continuation.
+        # The nominal (dt == T) row re-anchors algebraically, so it must
+        # never read a learned value.
         with patch.object(
             agent,
             "_state_value",
             side_effect=AssertionError("cap target read a learned value"),
         ):
-            actual = agent._terminal_cap_target(rewards)
+            actual = agent._absorbing_failure_target(
+                obs,
+                rewards,
+                th.full_like(rewards, reference_dt),
+                rewards,
+                remaining,
+                th.tensor(0.1),
+            )
         th.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
 
-    def test_cap_target_interval_reward_mode_does_not_rescale(self):
+    def test_cap_target_interval_reward_mode_sums_undiscounted(self):
+        reference_dt = 0.001
         agent = self._agent(
             discount_rate=0.0,
-            target_reference_dt=0.001,
+            target_reference_dt=reference_dt,
             reward_is_rate=False,
         )
         rewards = th.tensor([[-0.25], [0.0], [0.5]], dtype=th.float64)
-        actual = agent._terminal_cap_target(rewards)
-        th.testing.assert_close(actual, rewards, rtol=0.0, atol=0.0)
+        rates = th.tensor([[-0.25], [0.0], [0.5]], dtype=th.float64)
+        remaining = th.tensor([[4.0], [0.0], [2.0]], dtype=th.float64)
+        obs = th.zeros((3, agent.env.observation_space.shape[0]), dtype=th.float64)
+        # At zero discount, continuation is a literal rate * remaining-time
+        # sum, and the one-time interval reward is left unscaled.
+        expected = rewards + rates * remaining
+        actual = agent._absorbing_failure_target(
+            obs,
+            rewards,
+            th.full_like(rewards, reference_dt),
+            rates,
+            remaining,
+            th.tensor(0.1),
+        )
+        th.testing.assert_close(actual, expected, rtol=0.0, atol=1e-12)
 
-    def test_irregular_cap_transition_has_no_reanchor_or_legacy_tail(self):
+    def test_irregular_cap_transition_reanchors_through_the_absorbing_value(self):
         reference_dt = 0.001
+        discount_rate = 0.1
         agent = self._agent(
-            discount_rate=0.1,
+            discount_rate=discount_rate,
             target_reference_dt=reference_dt,
             reward_is_rate=True,
         )
         obs_dim = agent.env.observation_space.shape[0]
         act_dim = agent.env.action_space.shape[0]
+        dt = th.tensor([[0.002]], dtype=th.float64)
+        rewards = th.tensor([[-0.4]], dtype=th.float64)
+        rate = th.tensor([[-50.0]], dtype=th.float64)
+        remaining = th.tensor([[4.0]], dtype=th.float64)
         batch = ReplayBatch(
-            observations=th.full((1, obs_dim), float("nan")),
+            observations=th.zeros((1, obs_dim), dtype=th.float64),
             actions=th.zeros((1, act_dim)),
             next_observations=th.full((1, obs_dim), float("nan")),
-            rewards=th.tensor([[-0.4]], dtype=th.float64),
+            rewards=rewards,
             dones=th.ones((1, 1)),
             episode_ends=th.ones((1, 1)),
             cap_failures=th.ones((1, 1)),
-            # Old checkpoints may retain these compatibility fields.  Their
-            # values must not recreate a post-termination continuation.
-            failure_reward_rates=th.tensor([[-123.0]], dtype=th.float64),
-            failure_remaining_times=th.tensor([[4.0]], dtype=th.float64),
+            failure_reward_rates=rate,
+            failure_remaining_times=remaining,
             t=th.zeros((1, 1)),
-            next_t=th.tensor([[0.002]], dtype=th.float64),
-            dt=th.tensor([[0.002]], dtype=th.float64),
+            next_t=dt,
+            dt=dt,
         )
+        # h != T re-anchors through the current-state value, exactly like an
+        # ordinary irregular transition -- only the endpoint (G_F, not a
+        # learned V(s')) differs from the model-free path.
+        value_current = th.tensor([[9.0]], dtype=th.float64)
         with patch.object(
-            agent,
-            "_state_value",
-            side_effect=AssertionError("cap target read a learned value"),
-        ):
+            agent, "_state_value", return_value=value_current
+        ) as call:
             actual = agent._critic_target(batch, th.tensor(0.1))
-        th.testing.assert_close(
-            actual,
-            th.tensor([[-0.4 * reference_dt]], dtype=th.float64),
-            rtol=0.0,
-            atol=0.0,
-        )
+        call.assert_called_once()
+        gamma_dt = math.exp(-discount_rate * 0.002)
+        continuation = _absorbing_continuation(rate, remaining, discount_rate)
+        ratio = 0.002 / reference_dt
+        future = value_current + (gamma_dt * continuation - value_current) / ratio
+        expected = reference_dt * rewards + future
+        th.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
 
     def test_mixed_batch_splits_caps_before_regular_target_evaluation(self):
         reference_dt = 0.001
@@ -186,7 +232,12 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
             ),
         ):
             actual = agent._critic_target(batch, th.tensor(0.1))
-        expected_cap = -0.75 * reference_dt
+        cap_rate = th.tensor([[-1.0]], dtype=actual.dtype)
+        cap_remaining = th.tensor([[2.0]], dtype=actual.dtype)
+        continuation = _absorbing_continuation(cap_rate, cap_remaining, rate)
+        expected_cap = -0.75 * reference_dt + math.exp(
+            -rate * reference_dt
+        ) * continuation.item()
         th.testing.assert_close(
             actual,
             th.tensor([[expected_cap], [123.0]]),

@@ -1278,11 +1278,11 @@ class CTSAC(OffPolicyAlgorithm):
         """Build one target batch without bootstrapping through cap failures.
 
         Ordinary rows retain the configured model-free/model-based target.
-        Cap rows use their emitted reward once, exactly like any other true
-        terminal transition, and are never passed through a learned endpoint
-        value or dynamics target.  Splitting before target evaluation is
-        important: merely overwriting afterward would still let a non-finite
-        learned terminal value poison the batch.
+        Cap rows take a separate analytical route over the unexecuted episode
+        remainder and are never passed through a learned endpoint value or
+        dynamics target.  Splitting before target evaluation is important:
+        merely overwriting afterward would still let a non-finite learned
+        terminal value poison the batch.
         """
         cap_mask = batch.cap_failures.reshape(-1) > 0.5
         regular_mask = ~cap_mask
@@ -1295,8 +1295,13 @@ class CTSAC(OffPolicyAlgorithm):
                 raise ValueError(
                     "cap-failure replay rows must be true terminal episode ends"
                 )
-            target[cap_mask] = self._terminal_cap_target(
-                batch.rewards[cap_mask]
+            target[cap_mask] = self._absorbing_failure_target(
+                batch.observations[cap_mask],
+                batch.rewards[cap_mask],
+                batch.dt[cap_mask],
+                batch.failure_reward_rates[cap_mask],
+                batch.failure_remaining_times[cap_mask],
+                alpha_tensor,
             )
 
         if bool(th.any(regular_mask)):
@@ -1336,19 +1341,98 @@ class CTSAC(OffPolicyAlgorithm):
         )
         return target.detach()
 
-    def _terminal_cap_target(self, rewards: th.Tensor) -> th.Tensor:
-        """Use the emitted cap reward once with no post-termination tail.
+    def _absorbing_failure_target(
+        self,
+        obs: th.Tensor,
+        rewards: th.Tensor,
+        dt: th.Tensor,
+        failure_reward_rates: th.Tensor,
+        failure_remaining_times: th.Tensor,
+        alpha_tensor: th.Tensor,
+    ) -> th.Tensor:
+        r"""Analytical cap target over the unexecuted episode remainder.
 
-        The environment has already resolved the terminal reward to the
-        configured reward's finite lower envelope -- the minimum reward
-        attainable anywhere in the capped state/action closure, so a cap can
-        never be preferable to any admissible ordinary transition.  A cap is
-        a true terminal transition, so neither a learned value nor an
-        analytical absorbing continuation belongs in its target.
+        For reference interval ``T``, realized duration ``h``, physical
+        discount rate ``lambda``, remaining time ``R`` and the configured
+        reward's finite lower envelope ``r_F``, the frozen absorbing value is
+
+        ``G_F = r_F (1-exp(-lambda R))/lambda``
+
+        (or ``r_F R`` at zero discount).  It replaces the learned ``V(s')`` in
+        the CT finite-difference target.  At the regular ``h == T`` interval,
+        the current-value anchor cancels exactly:
+
+        ``y_F = T r_F + exp(-lambda T) G_F``.
+
+        The lower envelope is both the emitted reward on the realized cap
+        interval and the rate frozen over the unexecuted remainder.  No dummy
+        absorbing transitions are inserted in replay.
         """
         with th.no_grad():
-            target = self._target_reward_term(rewards)
-            self._require_finite_target_component("terminal_cap_target", target)
+            dt_seconds = _duration_column(dt, rewards, name="dt")
+            if bool(th.any(dt_seconds <= 0.0)):
+                raise ValueError("dt values must be strictly positive")
+            rates = th.as_tensor(
+                failure_reward_rates,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            )
+            if rates.numel() == 1:
+                rates = rates.reshape(1, 1).expand(rewards.shape[0], 1)
+            elif rates.numel() == rewards.shape[0]:
+                rates = rates.reshape(rewards.shape[0], 1)
+            else:
+                raise ValueError(
+                    "failure_reward_rates must contain one value per row"
+                )
+            if not bool(th.all(th.isfinite(rates))):
+                raise ValueError("failure reward rates must be finite")
+            remaining = _duration_column(
+                failure_remaining_times,
+                rewards,
+                name="failure_remaining_times",
+            )
+            gamma_dt = th.exp(-self.discount_rate * dt_seconds)
+            if self.discount_rate == 0.0:
+                continuation = rates * remaining
+            else:
+                continuation = rates * (
+                    -th.expm1(-self.discount_rate * remaining)
+                    / self.discount_rate
+                )
+
+            reference_dt = rewards.new_tensor(self.target_reference_dt)
+            nominal = (dt_seconds == reference_dt).reshape(-1)
+            future = th.empty_like(rewards)
+            if bool(th.any(nominal)):
+                future[nominal] = gamma_dt[nominal] * continuation[nominal]
+            irregular = ~nominal
+            if bool(th.any(irregular)):
+                # V(s) is the existing CT re-anchor for h != T.  It is not a
+                # learned terminal bootstrap; the endpoint is still G_F.
+                value_current = self._state_value(
+                    obs[irregular], alpha_tensor
+                )
+                ratio = dt_seconds[irregular] / reference_dt
+                future[irregular] = value_current + (
+                    gamma_dt[irregular] * continuation[irregular]
+                    - value_current
+                ) / ratio
+
+            reward_term = self._target_reward_term(rewards)
+            target = reward_term + future
+            self._require_finite_target_components(
+                (
+                    ("failure_reward_rate", rates),
+                    ("failure_remaining_time", remaining),
+                    ("failure_continuation", continuation),
+                    ("failure_target", target),
+                )
+            )
+            self.logger.record(
+                "train/failure_continuation_max_abs",
+                continuation.abs().max().item(),
+            )
             return target.detach()
 
     @property

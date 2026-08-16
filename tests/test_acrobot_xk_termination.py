@@ -226,13 +226,15 @@ class TestAcrobotXKTermination(unittest.TestCase):
         self.assertEqual(
             info["acrobot_xk_unpenalized_reward"], info["acrobot_xk_reward"]
         )
-        self.assertNotIn("absorbing_failure_remaining_seconds", info)
+        self.assertAlmostEqual(
+            info["absorbing_failure_remaining_seconds"], 0.999, places=12
+        )
 
         _, reset_info = env.reset(seed=4)
         self.assertIsNone(env._env.task.last_termination_reason)
         self.assertNotIn("acrobot_xk_termination_reason", reset_info)
 
-    def test_cap_terminal_reward_does_not_require_episode_horizon(self):
+    def test_cap_terminal_reward_requires_finite_episode_horizon(self):
         env = DMCContinuousEnv(
             "acrobot",
             "swingup-xk",
@@ -248,13 +250,8 @@ class TestAcrobotXKTermination(unittest.TestCase):
         env._env.physics.data.qvel[:] = 0.0
         env._env.physics.forward()
 
-        transition = env.step_dt(np.zeros(1, dtype=np.float32))
-        self.assertTrue(transition[6])
-        self.assertFalse(transition[7])
-        self.assertEqual(transition[8]["absorbing_failure"], 1.0)
-        self.assertNotIn(
-            "absorbing_failure_remaining_seconds", transition[8]
-        )
+        with self.assertRaisesRegex(RuntimeError, "finite episode_duration"):
+            env.step_dt(np.zeros(1, dtype=np.float32))
 
     def test_each_reward_uses_the_lower_bound_as_its_cap_terminal_rate(self):
         cases = (
@@ -317,6 +314,11 @@ class TestAcrobotXKTermination(unittest.TestCase):
                 self.assertEqual(
                     info["acrobot_xk_unpenalized_reward"],
                     info["acrobot_xk_reward"],
+                )
+                self.assertAlmostEqual(
+                    info["absorbing_failure_remaining_seconds"],
+                    0.999,
+                    places=12,
                 )
 
     def test_the_lower_bound_replaces_the_actual_endpoint_reward(self):
@@ -406,8 +408,8 @@ class TestAcrobotXKTermination(unittest.TestCase):
             transition[8]["absorbing_failure_reward_rate_source"],
             LOWER_BOUND_TERMINATION_REWARD_SOURCE,
         )
-        self.assertNotIn(
-            "absorbing_failure_remaining_seconds", transition[8]
+        self.assertEqual(
+            transition[8]["absorbing_failure_remaining_seconds"], 0.0
         )
 
 

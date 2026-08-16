@@ -142,9 +142,8 @@ class ReplayBuffer(BaseBuffer):
     ``done`` is the terminal mask for the learning objective. ``episode_end``
     records every reset boundary, including time-limit truncations that should
     continue bootstrapping. ``cap_failure`` identifies cap-triggered terminal
-    rows. The two failure-value arrays are retained only for old checkpoint
-    compatibility; new transitions leave them zero and critic targets ignore
-    them.
+    rows; its reward-rate and remaining-time fields define the analytical
+    return over the unexecuted portion of the finite episode.
     """
 
     def __init__(
