@@ -28,35 +28,45 @@ behaviour that a symlog plot used to approximate gets an exact, monotone
 stretch instead.  The transform is undefined once ``reward >= 0``, which
 happens routinely at larger eta (the ``-eta * Vdotbar`` term can overshoot
 past zero), so before transforming, reward is clipped from above to a
-ceiling.  The ceiling is the LQR-region-edge value of ``r1`` alone (``r0``
-or ``-Vbar``, mean inside the eq. 74 LQR switching set, ``|x|_zeta < 0.04``,
-or -- on the rollouts here, where that set is never entered -- ``r1`` at the
-single recorded sample closest to it).  It deliberately excludes the
-``-eta * Vdotbar`` shaping term: that term grows with eta and is not itself
-a state-proximity measure, so using the full eta-dependent reward as the
-ceiling would make the ceiling collapse toward 0 at large eta, saturating
-almost every sample and making "sustained settling" spuriously instant --
-an artifact of the ceiling rather than genuine convergence.  Every sample
-whose raw reward would be "better than the r1 LQR edge" is clamped down to
-it before the log, so ``ln(1/-reward)`` stays finite; the ceiling, and
-hence the maximum the transform can take, is fixed for the whole sweep
-(one value per ``--reward-base``, independent of eta and reward kind).
+ceiling: the largest ``r1`` (``r0`` or ``-Vbar``) ever reaches anywhere
+along the fixed, eta-independent rollout (``reward_ceiling``).  ``r1`` is
+the pure state-proximity term the reward is built from, so its own maximum
+is as close to the target as this trajectory ever gets -- the same sense in
+which the eq. 74 LQR switching residual (``|x|_zeta < 0.04``,
+``evaluations/acrobot_homoclinic_metrics.py``) is never satisfied on these
+rollouts either (see ``compute_region_masks``).  The ceiling deliberately
+excludes the ``-eta * Vdotbar`` shaping term: using the full eta-dependent
+reward as the ceiling would make it collapse toward 0 as eta grows,
+saturating almost every sample and making "sustained settling" spuriously
+instant -- an artifact of the ceiling, not genuine convergence.
 
-"Converged" now means the transformed reward remains at or above
+Since the trajectory never enters the LQR region, no eta should be able to
+make the reward claim it did: a sample only counts as genuinely entering it
+if raw reward clears the ceiling by more than ``VIOLATION_TOLERANCE``, which
+filters the floating-point-scale (~1e-8-1e-6) same-sample knife edge every
+eta > 0 trips exactly at the ceiling-defining instant, without also passing
+substantial, growing overshoot elsewhere.  ``never_enters_lqr_level`` is
+that per-eta boolean, and it is *not* satisfied by every eta or reward: past
+a reward- and base-dependent point, "sustained settling" would otherwise
+collapse toward 0 s purely because reward sits above the ceiling for nearly
+the whole episode, not because the trajectory converges faster.  "Best eta"
+is chosen only among eta with ``never_enters_lqr_level`` True; other eta are
+still swept and plotted (hatched) for context.
+
+"Converged" means the transformed reward remains at or above
 ``ln(1/--settling-tolerance)`` (equivalently: raw reward within
 ``--settling-tolerance`` of 0 from below, or clipped) for every subsequent
 sample through the end of the episode.  This sustained-settling definition
-rejects transient crossings.  The saturated-sample fraction (how often raw
-reward had to be clipped to the ceiling) is reported alongside it, replacing
-the old positive-reward fraction.
+rejects transient crossings.
 
 For each eta, the script also splits *transformed* reward samples by two
 state-space regions: the LQR switching set above and the looser homoclinic
 tube (``TubeSpec`` defaults, a superset of the LQR set on the trajectories
-observed here).  The eta chosen as "best" is the fastest-settling eta among
-those where the mean transformed reward inside the LQR set (or its edge
-proxy) exceeds the mean over the whole tube -- which, given the clipping
-above, holds by construction whenever the LQR set is never entered.
+observed here).  The eta chosen as "best" is, among the eligible eta above,
+the fastest-settling one where the mean transformed reward inside the LQR
+set (or its edge proxy) exceeds the mean over the whole tube -- which, given
+the clipping above, holds by construction whenever the LQR set is never
+entered.
 
 Example
 -------
@@ -350,45 +360,56 @@ def _censored_quantile(
     return float(np.quantile(values, quantile))
 
 
-CEILING_EPSILON = 1e-6  # keeps ln(1/-reward) finite even if the LQR-edge
-# reward itself is >= 0 (a possibility in principle, not observed here).
+CEILING_EPSILON = 1e-6  # keeps ln(1/-reward) finite even if r1's own max is
+# ever >= 0 (a possibility in principle, not observed here).
+
+# A raw reward sample counts as "entering the LQR region" only once it clears
+# the ceiling by more than this.  The ceiling is realized exactly by some
+# sample (r1's own global max), so *any* eta > 0 perturbs reward at that same
+# sample by -eta*Vdotbar there; if Vdotbar happens to be negative at that one
+# instant, any eta > 0 trips a same-sample violation by a floating-point-
+# scale amount (~1e-8 to 1e-6 on these rollouts) that has nothing to do with
+# genuine, growing overshoot elsewhere in the episode.  This tolerance
+# separates that measure-zero knife edge from real exceedance.
+VIOLATION_TOLERANCE = 1e-3
 
 
-def lqr_edge_ceiling(
-    terms: RecordedTerms, masks: RegionMasks, reward_base: str
-) -> tuple[float, float]:
-    """The LQR-region-edge reward, and the resulting clip ceiling.
+def reward_ceiling(terms: RecordedTerms, reward_base: str) -> float:
+    """The largest ``r1`` ever reaches along the (eta-independent) rollout.
 
-    Deliberately built from ``r1`` alone (``r0`` or ``-Vbar``, whichever
-    ``reward_base`` selects) rather than the full eta-dependent reward: r1 is
-    the pure state-distance term the LQR/tube regions are themselves defined
-    on, and unlike the ``-eta * Vdotbar`` shaping term it is bounded (<= 0
-    always) and does not grow with eta.  Using the full reward instead would
-    make the ceiling itself explode or collapse toward 0 as eta grows,
-    saturating the transform almost everywhere and making "sustained
-    settling" spuriously instantaneous -- an artifact of the ceiling, not
-    genuine convergence.  Returns one ``(edge_reward, ceiling)`` pair for the
-    whole sweep: it does not vary with eta or reward kind.
+    ``r1`` (``r0`` or ``-Vbar``) is the pure state-proximity term the reward
+    is built from; its own maximum is as close to the target as the fixed
+    analytical trajectory ever gets, in the same sense the eq. 74 LQR
+    switching residual is never satisfied on these rollouts (see
+    ``compute_region_masks``) -- both describe "as close as this trajectory
+    gets," using each metric's own weighting.  Reward is clipped to this
+    ceiling before the ln(1/-reward) transform; it is also the "never enters
+    the LQR region" reference: since the trajectory itself never gets there,
+    no eta should be able to make the reward claim otherwise (see
+    ``VIOLATION_TOLERANCE`` and ``never_enters_lqr_level`` in ``analyze``).
+    It does not vary with eta or reward kind -- one value per reward base.
     """
     r1 = r1_values(terms, reward_base)
-    lqr_values = r1[masks.lqr]
-    edge_reward = (
-        float(np.mean(lqr_values))
-        if lqr_values.size
-        else float(r1.reshape(-1)[masks.edge_flat_index])
-    )
-    return edge_reward, min(edge_reward, -CEILING_EPSILON)
+    return float(r1.max())
 
 
-def transform_reward(reward: np.ndarray, ceiling: float) -> tuple[np.ndarray, float]:
+def transform_reward(
+    reward: np.ndarray, ceiling: float, violation_tolerance: float = VIOLATION_TOLERANCE
+) -> tuple[np.ndarray, float, bool]:
     """``ln(1/-reward)``, reward first clipped to ``ceiling``.
 
-    Returns ``(transformed, saturated_fraction)``.
+    Returns ``(transformed, exceedance_fraction, never_enters_lqr_level)``.
+    ``exceedance_fraction`` is measured against the raw ceiling (samples
+    that had to be clipped at all); ``never_enters_lqr_level`` additionally
+    requires clearing ``violation_tolerance`` to ignore the same-sample
+    knife-edge described above.
     """
-    clipped = np.minimum(reward, ceiling)
+    clip_value = min(ceiling, -CEILING_EPSILON)
+    clipped = np.minimum(reward, clip_value)
     transformed = -np.log(-clipped)
-    saturated_fraction = float(np.mean(reward > ceiling))
-    return transformed, saturated_fraction
+    exceedance_fraction = float(np.mean(reward > clip_value))
+    never_enters_lqr_level = bool(not np.any(reward > ceiling + violation_tolerance))
+    return transformed, exceedance_fraction, never_enters_lqr_level
 
 
 def analyze(
@@ -401,17 +422,19 @@ def analyze(
     duration: float,
     dt: float,
     reward_base: str,
-    edge_reward: float,
     ceiling: float,
+    violation_tolerance: float = VIOLATION_TOLERANCE,
 ) -> list[dict[str, float]]:
     """Return one convergence-and-region-constraint summary row per eta."""
     rows: list[dict[str, float]] = []
     tail = terms.time >= max(0.0, duration - 2.0)
     settle_threshold = -np.log(tolerance)
-    lqr_ceiling_transformed = float(-np.log(-ceiling))
+    lqr_ceiling_transformed = float(-np.log(-min(ceiling, -CEILING_EPSILON)))
     for eta in etas:
         reward = reward_values(kind, terms, eta, discount_rate, reward_base)
-        transformed, saturated_fraction = transform_reward(reward, ceiling)
+        transformed, exceedance_fraction, never_enters = transform_reward(
+            reward, ceiling, violation_tolerance
+        )
         settling = sustained_settling_times(terms.time, transformed, settle_threshold)
         tube_values = transformed[masks.tube]
         tube_mean = float(np.mean(tube_values)) if tube_values.size else float("nan")
@@ -437,12 +460,12 @@ def analyze(
                 "settling_p10": _censored_quantile(settling, 0.10, duration, dt),
                 "settling_p50": _censored_quantile(settling, 0.50, duration, dt),
                 "settling_p90": _censored_quantile(settling, 0.90, duration, dt),
-                "saturated_fraction": saturated_fraction,
+                "exceedance_fraction": exceedance_fraction,
+                "never_enters_lqr_level": never_enters,
                 "mean_reward": float(
                     np.mean(np.trapezoid(transformed, terms.time, axis=1) / duration)
                 ),
                 "tail_reward": float(np.mean(transformed[:, tail])),
-                "lqr_edge_reward_raw": edge_reward,
                 "ceiling_raw": ceiling,
                 "lqr_mean_reward": lqr_mean,
                 "tube_mean_reward": tube_mean,
@@ -452,22 +475,13 @@ def analyze(
     return rows
 
 
-DEFAULT_SATURATION_CAP = 0.5  # exclude eta where more than half the episode
-# sits at the clip ceiling from "best eta" -- past that point, "sustained
-# settling" collapses to ~0 s because -eta * Vdotbar keeps raw reward above
-# the ceiling for nearly the whole rollout, not because the trajectory
-# genuinely converges faster.  That is degenerate ceiling saturation, not
-# convergence, so it is excluded from ranking (though still plotted).
-
-
-def _best_row(
-    rows: list[dict[str, float]], saturation_cap: float = DEFAULT_SATURATION_CAP
-) -> dict[str, float]:
-    """Fastest 90th-percentile settling among etas with LQR-set transformed
-    reward > tube transformed reward, restricted to eta whose saturated
-    fraction is at most ``saturation_cap``; falls back to the unconstrained
-    fastest eta over all rows if none qualify."""
-    candidates = [row for row in rows if row["saturated_fraction"] <= saturation_cap]
+def _best_row(rows: list[dict[str, float]]) -> dict[str, float]:
+    """Fastest 90th-percentile settling among etas that never enter the LQR
+    region (``never_enters_lqr_level``, beyond the floating-point-scale
+    knife edge at the ceiling-defining sample -- see ``VIOLATION_TOLERANCE``)
+    and whose LQR-set transformed reward exceeds the tube's; falls back to
+    the unconstrained fastest eta over all rows if none qualify."""
+    candidates = [row for row in rows if row["never_enters_lqr_level"]]
     pool = candidates if candidates else rows
     return min(
         pool,
@@ -565,13 +579,13 @@ def draw(
 
     for row_index, (kind, discount_rate, rows) in enumerate(panels):
         trajectory_ax, convergence_ax, region_ax = axes[row_index]
-        best = _best_row(rows, args.saturation_cap)
+        best = _best_row(rows)
         best_eta = best["eta"]
         display_etas = np.unique(np.append(display_etas_base, best_eta))
 
         for eta in display_etas:
             reward = reward_values(kind, terms, eta, discount_rate, args.reward_base)
-            transformed, _ = transform_reward(reward, ceiling)
+            transformed, _, _ = transform_reward(reward, ceiling, args.violation_tolerance)
             median = np.median(transformed, axis=0)
             is_best = np.isclose(eta, best_eta, atol=0.5 * args.eta_step)
             trajectory_ax.plot(
@@ -627,13 +641,15 @@ def draw(
         p10 = np.asarray([item["settling_p10"] for item in rows])
         p50 = np.asarray([item["settling_p50"] for item in rows])
         p90 = np.asarray([item["settling_p90"] for item in rows])
-        saturated = 100.0 * np.asarray(
-            [item["saturated_fraction"] for item in rows]
+        exceedance = 100.0 * np.asarray(
+            [item["exceedance_fraction"] for item in rows]
         )
         satisfied_mask = np.asarray(
             [item["lqr_reward_exceeds_tube"] for item in rows], dtype=bool
         )
-        excluded_mask = saturated > 100.0 * args.saturation_cap
+        excluded_mask = ~np.asarray(
+            [item["never_enters_lqr_level"] for item in rows], dtype=bool
+        )
         half_step = 0.5 * args.eta_step
         for start, end in _true_runs(satisfied_mask):
             convergence_ax.axvspan(
@@ -691,7 +707,8 @@ def draw(
         convergence_ax.set_title(
             rf"Sustained $\ln(1/-\mathrm{{reward}})\geq\ln(1/{args.settling_tolerance:g})$ "
             "(median, 10--90%; green = constraint met;\n"
-            rf"hatched = saturated $>{100.0 * args.saturation_cap:g}\%$, excluded from ranking)",
+            r"hatched = enters the LQR region ($>$" + f"{args.violation_tolerance:g}"
+            r" past ceiling), excluded from ranking)",
             color=INK,
             fontsize=10.0,
         )
@@ -709,23 +726,23 @@ def draw(
         )
         convergence_ax.legend(loc="upper right", frameon=False, fontsize=8)
 
-        saturated_ax = convergence_ax.twinx()
-        saturated_ax.plot(
+        exceedance_ax = convergence_ax.twinx()
+        exceedance_ax.plot(
             eta_values,
-            saturated,
+            exceedance,
             color=MUTED,
             lw=1.15,
             ls="--",
             alpha=0.8,
         )
-        saturated_ax.set_ylim(bottom=0.0)
-        saturated_ax.set_ylabel(
-            "saturated samples (%)\n(reward $\\geq$ LQR-edge ceiling)",
+        exceedance_ax.set_ylim(bottom=0.0)
+        exceedance_ax.set_ylabel(
+            "samples clipped (%)\n(reward $\\geq$ ceiling)",
             color=MUTED,
             labelpad=10,
         )
-        saturated_ax.tick_params(axis="y", colors=MUTED)
-        saturated_ax.grid(False)
+        exceedance_ax.tick_params(axis="y", colors=MUTED)
+        exceedance_ax.grid(False)
 
         lqr_means = np.asarray([item["lqr_mean_reward"] for item in rows])
         tube_means = np.asarray([item["tube_mean_reward"] for item in rows])
@@ -778,8 +795,8 @@ def draw(
             region_ax.text(
                 0.5,
                 0.06,
-                "LQR set never entered; the LQR curve is the reward at the\n"
-                "closest-approach sample, used as the clipping ceiling",
+                "LQR set never entered; the LQR curve is the max r1 (state\n"
+                "proximity alone) ever reaches, used as the clipping ceiling",
                 transform=region_ax.transAxes,
                 ha="center",
                 va="bottom",
@@ -840,10 +857,10 @@ def write_summary(
         "settling_p10",
         "settling_p50",
         "settling_p90",
-        "saturated_fraction",
+        "exceedance_fraction",
+        "never_enters_lqr_level",
         "mean_reward",
         "tail_reward",
-        "lqr_edge_reward_raw",
         "ceiling_raw",
         "lqr_mean_reward",
         "tube_mean_reward",
@@ -876,19 +893,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--eta-max",
         type=float,
-        default=1.0,
-        help="sweep eta over [0, eta-max]; widen if the fastest-settling eta "
-        "lands on the eta=eta-max boundary",
+        default=2.0,
+        help="sweep eta over [0, eta-max]; widen if the fastest-settling "
+        "eligible eta (never_enters_lqr_level) lands on the eta=eta-max "
+        "boundary",
     )
     parser.add_argument("--settling-tolerance", type=float, default=0.01)
     parser.add_argument(
-        "--saturation-cap",
+        "--violation-tolerance",
         type=float,
-        default=DEFAULT_SATURATION_CAP,
-        help="exclude eta whose saturated-sample fraction exceeds this from "
-        "'best eta' ranking -- past that point, -eta*Vdotbar keeps reward "
-        "clipped for most of the episode and 'sustained settling' reflects "
-        "ceiling saturation, not genuine convergence",
+        default=VIOLATION_TOLERANCE,
+        help="how far raw reward may clear the r1 ceiling before an eta "
+        "counts as entering the LQR region and is excluded from 'best eta' "
+        "ranking -- filters the floating-point-scale same-sample knife edge "
+        "every eta > 0 trips exactly at the ceiling-defining instant",
     )
     parser.add_argument(
         "--lqr-threshold",
@@ -916,6 +934,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "eta_max",
         "settling_tolerance",
         "lqr_threshold",
+        "violation_tolerance",
     ):
         if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0.0:
             parser.error(f"--{name.replace('_', '-')} must be finite and > 0")
@@ -923,8 +942,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--starts must be > 0")
     if args.eta_step > args.eta_max:
         parser.error("--eta-step must be <= --eta-max")
-    if not np.isfinite(args.saturation_cap) or not (0.0 < args.saturation_cap <= 1.0):
-        parser.error("--saturation-cap must be in (0, 1]")
     return args
 
 
@@ -932,11 +949,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     terms = collect_terms(args)
     masks = compute_region_masks(terms, args.lqr_threshold, TubeSpec())
-    edge_reward, ceiling = lqr_edge_ceiling(terms, masks, args.reward_base)
+    ceiling = reward_ceiling(terms, args.reward_base)
     print(
-        f"LQR-edge ceiling ({args.reward_base} base): r1={edge_reward:.6g}, "
-        f"clip ceiling={ceiling:.6g}, ln(1/-ceiling)={-np.log(-ceiling):.4f}; "
-        f"saturation cap for 'best eta' ranking: {100.0 * args.saturation_cap:g}%"
+        f"reward ceiling ({args.reward_base} base): max(r1)={ceiling:.6g}, "
+        f"ln(1/-ceiling)={-np.log(-min(ceiling, -CEILING_EPSILON)):.4f}; "
+        f"violation tolerance for 'never enters LQR region': "
+        f"{args.violation_tolerance:.4g}"
     )
     etas = np.linspace(
         0.0, args.eta_max, int(round(args.eta_max / args.eta_step)) + 1
@@ -961,8 +979,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.duration,
                 args.dt,
                 args.reward_base,
-                edge_reward,
                 ceiling,
+                args.violation_tolerance,
             ),
         )
         for kind, discount_rate in panel_specs
@@ -972,14 +990,19 @@ def main(argv: list[str] | None = None) -> int:
     draw(terms, masks, ceiling, panels, args)
 
     for kind, discount_rate, rows in panels:
-        best = _best_row(rows, args.saturation_cap)
+        best = _best_row(rows)
         label = _row_label_plain(kind, discount_rate, args.reward_base)
         tag = "constraint met" if best["lqr_reward_exceeds_tube"] else "constraint UNMET"
+        never_enters_tag = (
+            "never enters LQR region"
+            if best["never_enters_lqr_level"]
+            else "WARNING: enters LQR region (no eligible eta found)"
+        )
         print(
             f"{label}: fastest 90th-percentile sustained settling "
-            f"eta={best['eta']:.2f} ({tag}), T50={best['settling_p50']:.3f} s, "
-            f"T90={best['settling_p90']:.3f} s, "
-            f"saturated={100.0 * best['saturated_fraction']:.2f}%, "
+            f"eta={best['eta']:.2f} ({tag}; {never_enters_tag}), "
+            f"T50={best['settling_p50']:.3f} s, T90={best['settling_p90']:.3f} s, "
+            f"exceedance={100.0 * best['exceedance_fraction']:.2f}%, "
             f"mean ln(1/-reward) LQR-edge={best['lqr_mean_reward']:.4f} vs "
             f"tube={best['tube_mean_reward']:.4f}"
         )
