@@ -118,6 +118,9 @@ GOOD_BAND = "#38a169"
 REWARD_BASES = ("lyapunov", "r0")
 DEFAULT_REWARD_BASE = "lyapunov"  # matches environment.acrobot_xk.DEFAULT_REWARD_BASE
 
+LYAPUNOV_RATE_SOURCES = ("actual", "xk_closed_loop")
+DEFAULT_LYAPUNOV_RATE_SOURCE = "actual"  # matches environment.acrobot_xk default
+
 
 @dataclass(frozen=True)
 class RecordedTerms:
@@ -126,7 +129,8 @@ class RecordedTerms:
     time: np.ndarray
     r0: np.ndarray
     lyapunov_normalized: np.ndarray
-    lyapunov_rate_normalized: np.ndarray
+    lyapunov_rate_normalized: np.ndarray  # actual Vdot: real applied force/qacc
+    xk_closed_loop_lyapunov_rate_normalized: np.ndarray  # counterfactual -k_v*qdot2^2
     state: np.ndarray  # (episodes, len(time), 4): [q1, q2, qdot1, qdot2], paper frame
     params: AcrobotParams
 
@@ -138,25 +142,52 @@ def r1_values(terms: RecordedTerms, reward_base: str) -> np.ndarray:
     return -terms.lyapunov_normalized
 
 
-def r2_values(terms: RecordedTerms, eta: float, reward_base: str) -> np.ndarray:
+def selected_lyapunov_rate_normalized(
+    terms: RecordedTerms, lyapunov_rate_source: str
+) -> np.ndarray:
+    """``Vdotbar``: the actual derivative, or the Xin-Kaneda closed-loop
+    counterfactual ``-k_v * qdot2^2``, per ``lyapunov_rate_source``.
+
+    The counterfactual assumes the ideal closed-loop law regardless of what
+    torque the analytical controller actually applied, and unlike the
+    actual derivative it is <= 0 everywhere (a negative-semidefinite
+    surrogate), so ``-eta * Vdotbar`` never cancels r1 -- it only adds.
+    """
+    if lyapunov_rate_source == "xk_closed_loop":
+        return terms.xk_closed_loop_lyapunov_rate_normalized
+    return terms.lyapunov_rate_normalized
+
+
+def r2_values(
+    terms: RecordedTerms,
+    eta: float,
+    reward_base: str,
+    lyapunov_rate_source: str = DEFAULT_LYAPUNOV_RATE_SOURCE,
+) -> np.ndarray:
     """Evaluate the implemented normalized ``r2`` (no discount-rate term)."""
     eta = float(eta)
-    return r1_values(terms, reward_base) - eta * terms.lyapunov_rate_normalized
+    vdot = selected_lyapunov_rate_normalized(terms, lyapunov_rate_source)
+    return r1_values(terms, reward_base) - eta * vdot
 
 
 def r3_values(
-    terms: RecordedTerms, eta: float, discount_rate: float, reward_base: str
+    terms: RecordedTerms,
+    eta: float,
+    discount_rate: float,
+    reward_base: str,
+    lyapunov_rate_source: str = DEFAULT_LYAPUNOV_RATE_SOURCE,
 ) -> np.ndarray:
     """Evaluate the implemented normalized ``r3`` on recorded terms.
 
     The discount-rate correction always retains the original Lyapunov
     ``Vbar``, regardless of ``reward_base`` -- only r1's leading term
-    switches (``environment/acrobot_xk.py:xk_reward_terms``).
+    switches, and the derivative term is whichever ``lyapunov_rate_source``
+    selects (``environment/acrobot_xk.py:xk_reward_terms``).
     """
     eta = float(eta)
     discount_rate = float(discount_rate)
     return (
-        r2_values(terms, eta, reward_base)
+        r2_values(terms, eta, reward_base, lyapunov_rate_source)
         + discount_rate * eta * terms.lyapunov_normalized
     )
 
@@ -167,13 +198,14 @@ def reward_values(
     eta: float,
     discount_rate: Optional[float],
     reward_base: str = DEFAULT_REWARD_BASE,
+    lyapunov_rate_source: str = DEFAULT_LYAPUNOV_RATE_SOURCE,
 ) -> np.ndarray:
     if kind == "r2":
-        return r2_values(terms, eta, reward_base)
+        return r2_values(terms, eta, reward_base, lyapunov_rate_source)
     if kind == "r3":
         if discount_rate is None:
             raise ValueError("r3 requires a discount_rate")
-        return r3_values(terms, eta, discount_rate, reward_base)
+        return r3_values(terms, eta, discount_rate, reward_base, lyapunov_rate_source)
     raise ValueError(f"unknown reward kind {kind!r}")
 
 
@@ -210,6 +242,7 @@ def collect_terms(args: argparse.Namespace) -> RecordedTerms:
     all_r0: list[np.ndarray] = []
     all_v: list[np.ndarray] = []
     all_vdot: list[np.ndarray] = []
+    all_vdot_closed_loop: list[np.ndarray] = []
     all_state: list[np.ndarray] = []
     params: Optional[AcrobotParams] = None
 
@@ -228,6 +261,9 @@ def collect_terms(args: argparse.Namespace) -> RecordedTerms:
             r0_values = [float(initial["r0"])]
             values = [float(initial["lyapunov_normalized"])]
             rates = [float(initial["lyapunov_rate_normalized"])]
+            rates_closed_loop = [
+                float(initial["xk_closed_loop_lyapunov_rate_normalized"])
+            ]
             states = [np.asarray(obs, dtype=np.float64).reshape(4).copy()]
             termination_reason = None
 
@@ -242,6 +278,9 @@ def collect_terms(args: argparse.Namespace) -> RecordedTerms:
                 r0_values.append(float(info["acrobot_xk_r0"]))
                 values.append(float(info["acrobot_xk_lyapunov_normalized"]))
                 rates.append(float(info["acrobot_xk_lyapunov_rate_normalized"]))
+                rates_closed_loop.append(
+                    float(info["acrobot_xk_xk_closed_loop_lyapunov_rate_normalized"])
+                )
                 states.append(np.asarray(obs, dtype=np.float64).reshape(4).copy())
                 if terminated:
                     termination_reason = info.get(
@@ -268,6 +307,7 @@ def collect_terms(args: argparse.Namespace) -> RecordedTerms:
             all_r0.append(np.asarray(r0_values, dtype=np.float64))
             all_v.append(np.asarray(values, dtype=np.float64))
             all_vdot.append(np.asarray(rates, dtype=np.float64))
+            all_vdot_closed_loop.append(np.asarray(rates_closed_loop, dtype=np.float64))
             all_state.append(np.stack(states, axis=0))
             if controller.saturated_steps:
                 raise RuntimeError(
@@ -291,14 +331,18 @@ def collect_terms(args: argparse.Namespace) -> RecordedTerms:
     r0 = np.stack(all_r0)
     values = np.stack(all_v)
     rates = np.stack(all_vdot)
+    rates_closed_loop = np.stack(all_vdot_closed_loop)
     state = np.stack(all_state)
     if abs(float(rates[:, 0].max())) > 1e-12:
-        raise RuntimeError("release-start Vdot(0) should be zero")
+        raise RuntimeError("release-start actual Vdot(0) should be zero")
+    if abs(float(rates_closed_loop[:, 0].max())) > 1e-12:
+        raise RuntimeError("release-start closed-loop Vdot(0) should be zero")
     return RecordedTerms(
         time=reference_time,
         r0=r0,
         lyapunov_normalized=values,
         lyapunov_rate_normalized=rates,
+        xk_closed_loop_lyapunov_rate_normalized=rates_closed_loop,
         state=state,
         params=params,
     )
@@ -424,6 +468,7 @@ def analyze(
     reward_base: str,
     ceiling: float,
     violation_tolerance: float = VIOLATION_TOLERANCE,
+    lyapunov_rate_source: str = DEFAULT_LYAPUNOV_RATE_SOURCE,
 ) -> list[dict[str, float]]:
     """Return one convergence-and-region-constraint summary row per eta."""
     rows: list[dict[str, float]] = []
@@ -431,7 +476,9 @@ def analyze(
     settle_threshold = -np.log(tolerance)
     lqr_ceiling_transformed = float(-np.log(-min(ceiling, -CEILING_EPSILON)))
     for eta in etas:
-        reward = reward_values(kind, terms, eta, discount_rate, reward_base)
+        reward = reward_values(
+            kind, terms, eta, discount_rate, reward_base, lyapunov_rate_source
+        )
         transformed, exceedance_fraction, never_enters = transform_reward(
             reward, ceiling, violation_tolerance
         )
@@ -449,6 +496,7 @@ def analyze(
             {
                 "kind": kind,
                 "reward_base": reward_base,
+                "lyapunov_rate_source": lyapunov_rate_source,
                 "discount_rate": float("nan") if discount_rate is None else float(discount_rate),
                 "discount_horizon": (
                     float("nan") if discount_rate is None else 1.0 / float(discount_rate)
@@ -535,22 +583,39 @@ def _base_tag_plain(reward_base: str) -> str:
     return "r0 base" if reward_base == "r0" else "-Vbar base"
 
 
-def _row_label(kind: str, discount_rate: Optional[float], reward_base: str) -> str:
+def _rate_tag_plain(lyapunov_rate_source: str) -> str:
+    return "closed-loop Vdot" if lyapunov_rate_source == "xk_closed_loop" else "actual Vdot"
+
+
+def _row_label(
+    kind: str,
+    discount_rate: Optional[float],
+    reward_base: str,
+    lyapunov_rate_source: str,
+) -> str:
     base = _base_tag(reward_base)
+    rate = _rate_tag_plain(lyapunov_rate_source)
     if kind == "r2":
-        return rf"$r_2$ ($\eta$-shaping only, no discount rate; {base})"
+        return rf"$r_2$ ($\eta$-shaping only, no discount rate; {base}, {rate})"
     return (
         rf"$r_3$: $\lambda={discount_rate:g}\,\mathrm{{s}}^{{-1}}$ "
-        rf"($1/\lambda={1.0 / discount_rate:g}$ s; {base})"
+        rf"($1/\lambda={1.0 / discount_rate:g}$ s; {base}, {rate})"
     )
 
 
-def _row_label_plain(kind: str, discount_rate: Optional[float], reward_base: str) -> str:
+def _row_label_plain(
+    kind: str,
+    discount_rate: Optional[float],
+    reward_base: str,
+    lyapunov_rate_source: str,
+) -> str:
     base = _base_tag_plain(reward_base)
+    rate = _rate_tag_plain(lyapunov_rate_source)
     if kind == "r2":
-        return f"r2 (eta-shaping only, no discount rate; {base})"
+        return f"r2 (eta-shaping only, no discount rate; {base}, {rate})"
     return (
-        f"r3: lambda={discount_rate:g} /s (1/lambda={1.0 / discount_rate:g} s; {base})"
+        f"r3: lambda={discount_rate:g} /s (1/lambda={1.0 / discount_rate:g} s; "
+        f"{base}, {rate})"
     )
 
 
@@ -584,7 +649,7 @@ def draw(
         display_etas = np.unique(np.append(display_etas_base, best_eta))
 
         for eta in display_etas:
-            reward = reward_values(kind, terms, eta, discount_rate, args.reward_base)
+            reward = reward_values(kind, terms, eta, discount_rate, args.reward_base, args.lyapunov_rate_source)
             transformed, _, _ = transform_reward(reward, ceiling, args.violation_tolerance)
             median = np.median(transformed, axis=0)
             is_best = np.isclose(eta, best_eta, atol=0.5 * args.eta_step)
@@ -618,9 +683,10 @@ def draw(
         trajectory_ax.set_xlim(0.0, args.duration)
         trajectory_ax.set_ylabel(r"median $\ln(1/-\mathrm{reward})$")
         trajectory_ax.set_title(
-            f"Reward through the episodes: {_row_label(kind, discount_rate, args.reward_base)}",
+            "Reward through the episodes:\n"
+            f"{_row_label(kind, discount_rate, args.reward_base, args.lyapunov_rate_source)}",
             color=INK,
-            fontsize=11.0,
+            fontsize=10.4,
         )
         satisfied_tag = (
             "constraint met" if best["lqr_reward_exceeds_tube"] else "constraint UNMET"
@@ -811,7 +877,8 @@ def draw(
     axes[-1, 2].set_xlabel(r"shaping time scale $\eta$ (s)")
     figure.suptitle(
         f"Acrobot r2/r3 eta sweep under the Xin–Kaneda analytical controller "
-        f"({_base_tag_plain(args.reward_base)}, reward transformed by "
+        f"({_base_tag_plain(args.reward_base)}, "
+        f"{_rate_tag_plain(args.lyapunov_rate_source)}, reward transformed by "
         r"$\ln(1/-\mathrm{reward})$" + ")\n"
         f"{args.starts} fixed release seeds, {args.duration:g} s, "
         f"{1e3 * args.dt:g} ms control/physics step, "
@@ -822,7 +889,7 @@ def draw(
         y=0.998,
     )
     figure.subplots_adjust(
-        left=0.055, right=0.955, top=0.90, bottom=0.115, hspace=0.42, wspace=0.5
+        left=0.055, right=0.955, top=0.90, bottom=0.115, hspace=0.55, wspace=0.5
     )
     scalar = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
     colorbar_ax = figure.add_axes((0.06, 0.035, 0.40, 0.016))
@@ -848,6 +915,7 @@ def write_summary(
     fields = (
         "kind",
         "reward_base",
+        "lyapunov_rate_source",
         "discount_rate",
         "discount_horizon",
         "eta",
@@ -924,6 +992,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "environment/acrobot_xk.py:xk_reward_terms)"
         ),
     )
+    parser.add_argument(
+        "--lyapunov-rate-source",
+        choices=LYAPUNOV_RATE_SOURCES,
+        default=DEFAULT_LYAPUNOV_RATE_SOURCE,
+        help=(
+            "Vdotbar in r2/r3's -eta*Vdotbar term: 'actual' (environment "
+            "default; the real applied-force derivative) or "
+            "'xk_closed_loop', the Xin-Kaneda closed-loop counterfactual "
+            "-k_v*qdot2^2 (see environment/acrobot_xk.py:xk_reward_terms)"
+        ),
+    )
     parser.add_argument("--dpi", type=int, default=180)
     args = parser.parse_args(argv)
     for name in (
@@ -951,7 +1030,8 @@ def main(argv: list[str] | None = None) -> int:
     masks = compute_region_masks(terms, args.lqr_threshold, TubeSpec())
     ceiling = reward_ceiling(terms, args.reward_base)
     print(
-        f"reward ceiling ({args.reward_base} base): max(r1)={ceiling:.6g}, "
+        f"reward ceiling ({args.reward_base} base, "
+        f"{args.lyapunov_rate_source} Vdot): max(r1)={ceiling:.6g}, "
         f"ln(1/-ceiling)={-np.log(-min(ceiling, -CEILING_EPSILON)):.4f}; "
         f"violation tolerance for 'never enters LQR region': "
         f"{args.violation_tolerance:.4g}"
@@ -981,6 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.reward_base,
                 ceiling,
                 args.violation_tolerance,
+                args.lyapunov_rate_source,
             ),
         )
         for kind, discount_rate in panel_specs
@@ -991,7 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for kind, discount_rate, rows in panels:
         best = _best_row(rows)
-        label = _row_label_plain(kind, discount_rate, args.reward_base)
+        label = _row_label_plain(kind, discount_rate, args.reward_base, args.lyapunov_rate_source)
         tag = "constraint met" if best["lqr_reward_exceeds_tube"] else "constraint UNMET"
         never_enters_tag = (
             "never enters LQR region"
