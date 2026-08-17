@@ -493,6 +493,7 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 for row in csv.DictReader(handle)
                 if row["env_id"] == ENV_ID
                 and row["mode"].startswith("xk_r0base_")
+                and not row["mode"].endswith("_logrecip")
             ]
 
         self.assertEqual(len(R0_BASE_MODES), 100)
@@ -595,6 +596,92 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                     expected["horizon"], common
                 )
                 self.assertEqual(common, reference)
+
+    def test_log_reciprocal_reward_matrix_uses_requested_eta_sweeps(self):
+        table = (
+            Path(__file__).parents[1]
+            / "benchmarks"
+            / "hyperparams"
+            / "ct_sac.csv"
+        )
+        with table.open(newline="") as handle:
+            rows = [
+                row
+                for row in csv.DictReader(handle)
+                if row["env_id"] == ENV_ID
+                and row["mode"].endswith("_logrecip")
+            ]
+
+        self.assertEqual(len(rows), 138)
+        self.assertEqual(len(rows), len({row["mode"] for row in rows}))
+
+        expected_sweeps = {
+            ("lyapunov", "xk_closed_loop"): {0.1, 0.24, 0.28, 0.3},
+            ("r0", "actual"): {0.1, 0.3, 0.76, 0.84, 0.86, 1.0},
+            ("r0", "xk_closed_loop"): {
+                0.1,
+                0.3,
+                0.77,
+                0.85,
+                0.88,
+                1.0,
+            },
+        }
+        grouped_etas = {}
+        category_counts = Counter()
+        non_derivative = set()
+        for row in rows:
+            mode = row["mode"]
+            _, env, _, _, _ = _load(mode)
+            task = env["task_kwargs"]
+            self.assertEqual(task["reward_transform"], "log_reciprocal")
+            reward_kind = task["reward_kind"]
+            if reward_kind not in ("r2", "r3"):
+                non_derivative.add(mode)
+                continue
+
+            reward_base = task.get("reward_base", "lyapunov")
+            rate_source = task["lyapunov_rate_source"]
+            category = (reward_base, rate_source)
+            category_counts[category] += 1
+            horizon = "h10s" if "_h10s_" in mode else "h2s"
+            cap = (
+                "q2dot4sqrt2pi"
+                if "_q2dot4sqrt2pi_" in mode
+                else "q2dot4pi"
+            )
+            group = (category, reward_kind, horizon, cap)
+            grouped_etas.setdefault(group, set()).add(task["eta"])
+
+        self.assertEqual(
+            category_counts,
+            {
+                ("lyapunov", "xk_closed_loop"): 32,
+                ("r0", "actual"): 48,
+                ("r0", "xk_closed_loop"): 48,
+            },
+        )
+        self.assertEqual(len(grouped_etas), 24)
+        for (category, _, _, _), etas in grouped_etas.items():
+            self.assertEqual(etas, expected_sweeps[category])
+
+        self.assertEqual(
+            non_derivative,
+            {
+                "xk_r0_fixed1ms_h2s_temp1_q2dot4pi_logrecip",
+                "xk_r0_fixed1ms_h10s_temp1_q2dot4pi_logrecip",
+                *{
+                    f"xk_r1_fixed1ms_{horizon}_temp1_xkdot_{cap}_logrecip"
+                    for horizon in ("h10s", "h2s")
+                    for cap in ("q2dot4pi", "q2dot4sqrt2pi")
+                },
+                *{
+                    f"xk_r0base_r1_fixed1ms_{horizon}_temp1_{cap}_logrecip"
+                    for horizon in ("h10s", "h2s")
+                    for cap in ("q2dot4pi", "q2dot4sqrt2pi")
+                },
+            },
+        )
 
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")

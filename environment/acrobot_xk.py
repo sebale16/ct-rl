@@ -39,6 +39,12 @@ The task selects one of the four reward rates in
     r2(x, u) = [-V(x) - eta Vdot(x, u)] / V_down
     r3(x, u) = [-V(x) - eta Vdot(x, u) + lambda eta V(x)] / V_down
 
+The optional ``reward_transform="log_reciprocal"`` maps the selected reward
+family to ``log(1 / -r) = -log(-r)``.  A small floor on ``-r`` keeps the
+transform finite at the target and for shaped rewards that cross zero; the raw
+values remain available in the reward diagnostics under ``raw_r0`` through
+``raw_r3``.
+
 Historical runs retain these definitions through the default
 ``reward_base="lyapunov"``.  The ``reward_base="r0"`` experiment family keeps
 the same r1--r3 shaping structure but replaces only the leading
@@ -134,6 +140,9 @@ LYAPUNOV_RATE_SOURCES = frozenset(("actual", "xk_closed_loop"))
 REWARD_BASES = frozenset(("lyapunov", "r0"))
 DEFAULT_REWARD_BASE = "lyapunov"
 REWARD_KINDS = frozenset(("r0", "r1", "r2", "r3"))
+REWARD_TRANSFORMS = frozenset(("identity", "log_reciprocal"))
+DEFAULT_REWARD_TRANSFORM = "identity"
+LOG_RECIPROCAL_REWARD_FLOOR = 1e-6
 
 # Xin--Kaneda's grouped constants, derived from the physical constants above.
 _A1 = LINK1_INERTIA + LINK1_MASS * LINK1_COM**2 + LINK2_MASS * LINK1_LENGTH**2
@@ -222,8 +231,28 @@ def _elbow_acceleration_abs_bound(
     return float(np.nextafter(max(candidates) * (1.0 + 1e-10), np.inf))
 
 
+def _normalize_reward_transform(reward_transform: str) -> str:
+    transform = str(reward_transform).strip().lower()
+    if transform not in REWARD_TRANSFORMS:
+        choices = ", ".join(sorted(REWARD_TRANSFORMS))
+        raise ValueError(
+            f"reward_transform must be one of {{{choices}}}, got "
+            f"{reward_transform!r}"
+        )
+    return transform
+
+
+def _transform_reward(reward: float, reward_transform: str) -> float:
+    transform = _normalize_reward_transform(reward_transform)
+    reward = float(reward)
+    if transform == "identity":
+        return reward
+    reciprocal_argument = max(-reward, LOG_RECIPROCAL_REWARD_FLOOR)
+    return float(-np.log(reciprocal_argument))
+
+
 @lru_cache(maxsize=128)
-def reward_rate_lower_bound(
+def _raw_reward_rate_lower_bound(
     reward_kind: str,
     *,
     reward_base: str = DEFAULT_REWARD_BASE,
@@ -389,6 +418,43 @@ def reward_rate_lower_bound(
     return -float(coefficient * lyapunov_max + eta_value * lyapunov_rate_abs)
 
 
+@lru_cache(maxsize=256)
+def reward_rate_lower_bound(
+    reward_kind: str,
+    *,
+    reward_base: str = DEFAULT_REWARD_BASE,
+    reward_transform: str = DEFAULT_REWARD_TRANSFORM,
+    k_d: float = DEFAULT_LYAPUNOV_K_D,
+    k_p: float = DEFAULT_LYAPUNOV_K_P,
+    k_v: float = DEFAULT_LYAPUNOV_K_V,
+    eta: Optional[float] = None,
+    discount_rate: Optional[float] = None,
+    lyapunov_rate_source: str = "actual",
+    torque_limit: float = DEFAULT_TORQUE_LIMIT,
+    damping: float = 0.0,
+    elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
+    elbow_rate_limit: float = ELBOW_RATE_LIMIT,
+    shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
+) -> float:
+    """Return the selected reward's transformed terminal lower envelope."""
+    raw_bound = _raw_reward_rate_lower_bound(
+        reward_kind,
+        reward_base=reward_base,
+        k_d=k_d,
+        k_p=k_p,
+        k_v=k_v,
+        eta=eta,
+        discount_rate=discount_rate,
+        lyapunov_rate_source=lyapunov_rate_source,
+        torque_limit=torque_limit,
+        damping=damping,
+        elbow_angle_limit=elbow_angle_limit,
+        elbow_rate_limit=elbow_rate_limit,
+        shoulder_rate_scale_limit=shoulder_rate_scale_limit,
+    )
+    return _transform_reward(raw_bound, reward_transform)
+
+
 # The reward-independent homoclinic tube from the experiment protocol.
 HOMOCLINIC_ENERGY_TOLERANCE = 0.05
 HOMOCLINIC_ANGLE_TOLERANCE = 0.025
@@ -522,6 +588,7 @@ class BalanceXK(suite_base.Task):
         release_angle_range: tuple = RELEASE_ANGLE_RANGE,
         reward_kind: str = "r0",
         reward_base: str = DEFAULT_REWARD_BASE,
+        reward_transform: str = DEFAULT_REWARD_TRANSFORM,
         k_d: float = DEFAULT_LYAPUNOV_K_D,
         k_p: float = DEFAULT_LYAPUNOV_K_P,
         k_v: float = DEFAULT_LYAPUNOV_K_V,
@@ -574,6 +641,7 @@ class BalanceXK(suite_base.Task):
             raise ValueError(
                 "reward_base is only meaningful for reward_kind='r1'--'r3'"
             )
+        self.reward_transform = _normalize_reward_transform(reward_transform)
         self.k_d = float(k_d)
         self.k_p = float(k_p)
         self.k_v = float(k_v)
@@ -645,6 +713,7 @@ class BalanceXK(suite_base.Task):
         self.failure_reward_rate = reward_rate_lower_bound(
             self.reward_kind,
             reward_base=self.reward_base,
+            reward_transform=self.reward_transform,
             k_d=self.k_d,
             k_p=self.k_p,
             k_v=self.k_v,
@@ -960,23 +1029,39 @@ class BalanceXK(suite_base.Task):
         )
         eta = float(self.eta or 0.0)
         discount_rate = float(self.discount_rate or 0.0)
-        r0 = float(baseline["reward"])
+        raw_r0 = float(baseline["reward"])
         lyapunov_reward = -lyapunov_normalized
-        r1 = r0 if self.reward_base == "r0" else lyapunov_reward
-        r2 = r1 - eta * selected_lyapunov_rate_normalized
-        r3 = r2 + discount_rate * eta * lyapunov_normalized
+        raw_r1 = raw_r0 if self.reward_base == "r0" else lyapunov_reward
+        raw_r2 = raw_r1 - eta * selected_lyapunov_rate_normalized
+        raw_r3 = raw_r2 + discount_rate * eta * lyapunov_normalized
+        raw_rewards = {
+            "r0": raw_r0,
+            "r1": raw_r1,
+            "r2": raw_r2,
+            "r3": raw_r3,
+        }
+        rewards = {
+            name: _transform_reward(value, self.reward_transform)
+            for name, value in raw_rewards.items()
+        }
         selected = {
-            "r0": r0,
-            "r1": r1,
-            "r2": r2,
-            "r3": r3,
+            "r0": rewards["r0"],
+            "r1": rewards["r1"],
+            "r2": rewards["r2"],
+            "r3": rewards["r3"],
         }[self.reward_kind]
+        raw_selected = raw_rewards[self.reward_kind]
         return {
             "reward": float(selected),
-            "r0": r0,
-            "r1": r1,
-            "r2": r2,
-            "r3": r3,
+            "raw_reward": float(raw_selected),
+            "r0": rewards["r0"],
+            "r1": rewards["r1"],
+            "r2": rewards["r2"],
+            "r3": rewards["r3"],
+            "raw_r0": raw_r0,
+            "raw_r1": raw_r1,
+            "raw_r2": raw_r2,
+            "raw_r3": raw_r3,
             "lyapunov_reward": lyapunov_reward,
             "lyapunov": lyapunov,
             "lyapunov_rate": lyapunov_rate,
@@ -1012,6 +1097,7 @@ def swingup_xk(
     release_angle_range: tuple = RELEASE_ANGLE_RANGE,
     reward_kind: str = "r0",
     reward_base: str = DEFAULT_REWARD_BASE,
+    reward_transform: str = DEFAULT_REWARD_TRANSFORM,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
     k_v: float = DEFAULT_LYAPUNOV_K_V,
@@ -1036,7 +1122,9 @@ def swingup_xk(
     explicit ``eta`` shaping time scale, and ``r3`` requires the physical
     ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
     actual action-dependent derivative or the counterfactual Xin--Kaneda
-    closed-loop surrogate.  The three state limits are instance kwargs.  A cap
+    closed-loop surrogate.  ``reward_transform="log_reciprocal"`` applies
+    ``log(1 / -r)`` with a finite numerical floor.  The three state limits are
+    instance kwargs.  A cap
     crossing emits the selected reward's finite lower envelope as the terminal
     reward -- the minimum reward attainable anywhere in the capped state/action
     closure -- and freezes that rate so CT-SAC sums it over the unexecuted
@@ -1055,6 +1143,7 @@ def swingup_xk(
         release_angle_range=release_angle_range,
         reward_kind=reward_kind,
         reward_base=reward_base,
+        reward_transform=reward_transform,
         k_d=k_d,
         k_p=k_p,
         k_v=k_v,

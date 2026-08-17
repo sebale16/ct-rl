@@ -65,6 +65,54 @@ class TestAcrobotXKRewards(unittest.TestCase):
             terms["reward"], env.task.baseline_terms(env.physics)["reward"], 12
         )
 
+    def test_log_reciprocal_transform_preserves_raw_reward_diagnostics(self):
+        plain = self._env("r0")
+        transformed = self._env("r0", reward_transform="log_reciprocal")
+        state = np.array([-1.1, 0.4, 1.2, -0.7])
+        for env in (plain, transformed):
+            self._set_state_and_torque(env, state, torque=8.0)
+
+        plain_terms = plain.task.xk_reward_terms(plain.physics)
+        transformed_terms = transformed.task.xk_reward_terms(
+            transformed.physics
+        )
+        for kind in ("r0", "r1", "r2", "r3"):
+            raw = plain_terms[kind]
+            self.assertLess(raw, 0.0)
+            self.assertAlmostEqual(transformed_terms[f"raw_{kind}"], raw, 12)
+            self.assertAlmostEqual(
+                transformed_terms[kind], np.log(1.0 / -raw), 12
+            )
+        self.assertAlmostEqual(
+            transformed_terms["raw_reward"], plain_terms["reward"], 12
+        )
+
+    def test_log_reciprocal_transform_is_finite_at_zero(self):
+        env = self._env("r0", reward_transform="log_reciprocal")
+        self._set_state_and_torque(
+            env, [UPRIGHT_SHOULDER, 0.0, 0.0, 0.0], torque=0.0
+        )
+        terms = env.task.xk_reward_terms(env.physics)
+        self.assertAlmostEqual(terms["raw_reward"], 0.0, places=12)
+        self.assertTrue(np.isfinite(terms["reward"]))
+        self.assertAlmostEqual(terms["reward"], -np.log(1e-6), places=12)
+
+    def test_log_reciprocal_transform_validation_and_terminal_bound(self):
+        with self.assertRaisesRegex(ValueError, "reward_transform"):
+            self._env("r0", reward_transform="bad")
+
+        raw_bound = reward_rate_lower_bound("r0")
+        transformed_bound = reward_rate_lower_bound(
+            "r0", reward_transform="log_reciprocal"
+        )
+        self.assertAlmostEqual(
+            transformed_bound, np.log(1.0 / -raw_bound), places=12
+        )
+        env = self._env("r0", reward_transform="log_reciprocal")
+        self.assertAlmostEqual(
+            env.task.failure_reward_rate, transformed_bound, places=12
+        )
+
     def test_r1_is_published_lyapunov_function_scaled_by_hanging_rest(self):
         env = self._env("r1")
         params = xk.AcrobotParams.from_physics(env.physics)
