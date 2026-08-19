@@ -1,4 +1,5 @@
 import unittest
+import numpy as np
 import torch as th
 
 from environment import DMCContinuousEnv, VecContinuousEnv, Monitor
@@ -109,6 +110,138 @@ class TestCTSAC(unittest.TestCase):
             agent.learn(total_timesteps=20)
         except Exception as e:
             self.fail(f"agent.learn() with vectorized env raised an exception: {e}")
+
+
+class TestDemonstrationWarmStart(unittest.TestCase):
+    """CTSAC's replay-buffer warm start: an act(obs) -> action callable that
+    replaces the random-action warmup, e.g. an analytical controller filling
+    the buffer with the states it actually reaches."""
+
+    def setUp(self):
+        self.env = DMCContinuousEnv(
+            domain_name="cartpole",
+            task_name="swingup",
+            time_sampling="uniform",
+            dt=0.02,
+            episode_duration=0.1,
+        )
+        self.model = ActorQCriticModel(
+            observation_space=self.env.observation_space,
+            action_space=self.env.action_space,
+            q_net_arch=[16, 16],
+            pi_net_arch=[16, 16],
+        )
+        self.demo_action = self.env.action_space.low
+
+    def _agent(self, **kwargs):
+        return CTSAC(
+            env=self.env,
+            model=self.model,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=100,
+            seed=123,
+            **kwargs,
+        )
+
+    def test_unset_demonstration_policy_matches_base_class_default(self):
+        agent = self._agent()
+        self.assertIsNone(agent.demonstration_policy)
+        self.assertEqual(agent.demonstration_steps, agent.learning_starts)
+
+    def test_demonstration_policy_defaults_to_learning_starts_steps(self):
+        calls = []
+
+        def demo(obs):
+            calls.append(np.asarray(obs, dtype=np.float32).copy())
+            return self.demo_action
+
+        agent = self._agent(demonstration_policy=demo)
+        self.assertEqual(agent.demonstration_steps, agent.learning_starts)
+
+        obs = self.env.observation_space.sample()
+        for t in range(15):
+            agent.num_timesteps = t
+            action = agent._sample_action(obs)
+            if t < 10:
+                np.testing.assert_allclose(action, self.demo_action)
+
+        # Exactly the warmup steps (0..9) deferred to the demonstrator.
+        self.assertEqual(len(calls), 10)
+        np.testing.assert_allclose(calls[0], obs)
+
+    def test_demonstration_steps_overrides_learning_starts(self):
+        calls = []
+        agent = self._agent(
+            demonstration_policy=lambda obs: calls.append(1) or self.demo_action,
+            demonstration_steps=3,
+        )
+        obs = self.env.observation_space.sample()
+        for t in range(10):
+            agent.num_timesteps = t
+            agent._sample_action(obs)
+        self.assertEqual(len(calls), 3)
+
+    def test_negative_demonstration_steps_rejected(self):
+        with self.assertRaises(ValueError):
+            self._agent(
+                demonstration_policy=lambda obs: self.demo_action,
+                demonstration_steps=-1,
+            )
+
+    def test_learn_runs_with_demonstration_policy_and_calls_it_the_configured_count(
+        self,
+    ):
+        calls = []
+        agent = self._agent(
+            demonstration_policy=lambda obs: calls.append(1) or self.demo_action,
+            demonstration_steps=5,
+        )
+        try:
+            agent.learn(total_timesteps=15)
+        except Exception as e:
+            self.fail(f"agent.learn() with demonstration_policy raised: {e}")
+        # n_envs=1, so num_timesteps advances by 1 per _sample_action call:
+        # exactly the first `demonstration_steps` calls defer to the demo.
+        self.assertEqual(len(calls), 5)
+
+    def test_learn_runs_with_demonstration_policy_vectorized(self):
+        n_envs = 3
+        env_fns = [
+            lambda: Monitor(
+                DMCContinuousEnv("cartpole", "swingup", episode_duration=0.1, dt=0.02)
+            )
+            for _ in range(n_envs)
+        ]
+        vec_env = VecContinuousEnv(env_fns)
+        calls = []
+
+        def demo(obs):
+            calls.append(np.asarray(obs, dtype=np.float32).copy())
+            return vec_env.action_space.low
+
+        agent = CTSAC(
+            env=vec_env,
+            model="ActorQCriticModel",
+            model_kwargs={"q_net_arch": [16], "pi_net_arch": [16]},
+            learning_starts=6,
+            batch_size=8,
+            buffer_size=100,
+            seed=123,
+            demonstration_policy=demo,
+        )
+        try:
+            agent.learn(total_timesteps=12)
+        except Exception as e:
+            self.fail(
+                f"agent.learn() with vectorized demonstration_policy raised: {e}"
+            )
+        # num_timesteps advances by n_envs per call; demo is called once per
+        # env for each of the ceil(learning_starts / n_envs) qualifying steps.
+        expected_calls = -(-agent.learning_starts // n_envs) * n_envs
+        self.assertEqual(len(calls), expected_calls)
+        for obs in calls:
+            self.assertEqual(obs.shape, vec_env.observation_space.shape)
 
 
 class TestDynamicsPublication(unittest.TestCase):

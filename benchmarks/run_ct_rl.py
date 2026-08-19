@@ -321,6 +321,73 @@ def _select_structured_dof_layout(env, obs_dim: int, layout_cls):
     return layout_cls.raw_state(nv=int(obs_dim) // 2)
 
 
+def _build_demonstration_policy(
+    *,
+    algo: str,
+    env_id: str,
+    env_kwargs: dict,
+    train_env,
+    controller_name: str,
+):
+    """Build CT-SAC's ``demonstration_policy`` replay-buffer warm start.
+
+    ``controller_name='xin_kaneda'`` is the only supported source today: the
+    analytical Xin-Kaneda swing-up law from ``controllers/xin_kaneda.py``,
+    acting on ``acrobot-swingup-xk``'s raw ``[q1, q2, qdot1, qdot2]``
+    observation (the same ``frame="paper"`` convention the evaluation
+    protocol uses). Gains and torque limit come from the task's own
+    ``k_v``/``k_d``/``k_p``/``torque_limit`` when the reward config sets
+    them (matching the reward's Vdot term to the controller that generated
+    the demonstrations), and from the paper's Section-7 defaults otherwise.
+    """
+    if algo != "ct_sac":
+        raise ValueError(
+            f"demonstration_controller is only wired for algo='ct_sac', got "
+            f"algo={algo!r}"
+        )
+    if controller_name != "xin_kaneda":
+        raise ValueError(
+            f"demonstration_controller must be 'xin_kaneda', got "
+            f"{controller_name!r}"
+        )
+    if env_id != ACROBOT_XK_ENV_ID:
+        raise ValueError(
+            f"demonstration_controller='xin_kaneda' requires env_id="
+            f"{ACROBOT_XK_ENV_ID!r}, got {env_id!r}"
+        )
+
+    current = train_env.envs[0] if hasattr(train_env, "envs") and train_env.envs else train_env
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if hasattr(current, "raw_state_obs"):
+            break
+        current = getattr(current, "env", None)
+    if current is None or not getattr(current, "raw_state_obs", False):
+        raise ValueError(
+            "demonstration_controller='xin_kaneda' requires a single "
+            "raw_state_obs=True acrobot-swingup-xk env."
+        )
+
+    from controllers.xin_kaneda import AcrobotParams, Gains, XinKanedaController
+    from environment.acrobot_xk import (
+        DEFAULT_LYAPUNOV_K_D,
+        DEFAULT_LYAPUNOV_K_P,
+        DEFAULT_LYAPUNOV_K_V,
+        DEFAULT_TORQUE_LIMIT,
+    )
+
+    task_kwargs = env_kwargs.get("task_kwargs", {}) or {}
+    gains = Gains(
+        k_v=float(task_kwargs.get("k_v", DEFAULT_LYAPUNOV_K_V)),
+        k_d=float(task_kwargs.get("k_d", DEFAULT_LYAPUNOV_K_D)),
+        k_p=float(task_kwargs.get("k_p", DEFAULT_LYAPUNOV_K_P)),
+    )
+    torque_limit = float(task_kwargs.get("torque_limit", DEFAULT_TORQUE_LIMIT))
+    params = AcrobotParams.from_physics(current._env.physics)
+    return XinKanedaController(params, gains, torque_limit=torque_limit)
+
+
 def _pop_structured_model_kwargs(
     algo_kwargs: dict, *, contact_dt_default: float | None = None
 ) -> dict:
@@ -737,6 +804,21 @@ def run_algorithm(
             )
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")
+
+    # Optional: analytical-controller demonstration warm start (see
+    # algorithms.ct_sac.CTSAC's demonstration_policy / demonstration_steps).
+    # `algo_demonstration_steps`, if set, passes straight through in
+    # algo_kwargs already; only the controller name needs resolving into an
+    # actual act(obs) -> action object here.
+    demonstration_controller = algo_kwargs.pop("demonstration_controller", None)
+    if demonstration_controller:
+        algo_kwargs["demonstration_policy"] = _build_demonstration_policy(
+            algo=algo,
+            env_id=env_id,
+            env_kwargs=env_kwargs,
+            train_env=train_env,
+            controller_name=str(demonstration_controller).strip().lower(),
+        )
 
     # model_kwargs from CSV: q_net_arch, pi_net_arch, n_critics, activation_fn, ...
     # algo_kwargs from CSV: learning_rate, buffer_size, batch_size, gamma, tau, ...

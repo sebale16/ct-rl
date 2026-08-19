@@ -493,7 +493,11 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 for row in csv.DictReader(handle)
                 if row["env_id"] == ENV_ID
                 and row["mode"].startswith("xk_r0base_")
-                and not row["mode"].endswith("_logrecip")
+                # "_logrecip" anywhere, not just as a suffix: excludes both
+                # the logrecip matrix itself and its "_logrecip_xkdemo"
+                # demonstration-warm-start derivatives (see
+                # test_demonstration_controller_config).
+                and "_logrecip" not in row["mode"]
             ]
 
         self.assertEqual(len(R0_BASE_MODES), 100)

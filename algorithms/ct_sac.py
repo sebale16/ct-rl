@@ -4,7 +4,7 @@ import math
 import os
 import pathlib
 from copy import deepcopy
-from typing import Union, Optional, Dict, Any, Type
+from typing import Union, Optional, Dict, Any, Type, Callable
 import numpy as np
 import torch as th
 import torch.nn.functional as F
@@ -249,6 +249,15 @@ class CTSAC(OffPolicyAlgorithm):
     generator is evaluated analytically from a port-Hamiltonian drift b(x,a):
         (L^a V) = b . grad V + 1/2 Tr(sigma sigma^T Hess V)
     which removes the dependence on the sampled next state.
+
+    ``demonstration_policy``, if set, replaces the base class's random-action
+    warmup with a fixed ``act(obs) -> action`` law for the first
+    ``demonstration_steps`` calls to ``_sample_action`` (default: matching
+    ``learning_starts``), so the replay buffer starts from states that law
+    actually reaches -- e.g. the analytical Xin-Kaneda controller for
+    acrobot-swingup-xk (``benchmarks/run_ct_rl.py:_build_demonstration_policy``,
+    selected via ``algo_demonstration_controller=xin_kaneda`` in the
+    hyperparameter table).
     """
 
     def __init__(
@@ -309,6 +318,11 @@ class CTSAC(OffPolicyAlgorithm):
         discount_rate: Optional[float] = None,
         target_reference_dt: Optional[float] = None,
         reward_is_rate: bool = False,
+        # Demonstration warm start: replaces the random-action warmup with a
+        # fixed act(obs) -> action law (e.g. an analytical controller) so the
+        # replay buffer starts from states that law actually reaches.
+        demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        demonstration_steps: Optional[int] = None,
     ) -> None:
         if gamma is not None and discount_rate is not None:
             raise ValueError(
@@ -671,6 +685,28 @@ class CTSAC(OffPolicyAlgorithm):
                 "target_reanchor requires an explicit V-head so its endpoint and "
                 "finite-difference anchor are deterministic; configure "
                 "model_v_net_arch."
+            )
+
+        # Demonstration warm start: for the first `demonstration_steps` calls
+        # to _sample_action (default: learning_starts), _sample_action defers
+        # to `demonstration_policy` instead of the base class's random-action
+        # warmup, so the replay buffer starts from states the demonstrator
+        # actually reaches rather than a uniform random walk's states.
+        # Gradient updates are unaffected -- train() still only begins once
+        # num_timesteps > learning_starts, per the base class -- so
+        # demonstration_steps can be set independently (e.g. shorter, to hand
+        # off to the untrained policy sooner, or longer, to keep imitating
+        # while early gradient updates run against that data).
+        self.demonstration_policy = demonstration_policy
+        self.demonstration_steps = (
+            self.learning_starts
+            if demonstration_steps is None
+            else int(demonstration_steps)
+        )
+        if self.demonstration_steps < 0:
+            raise ValueError(
+                "demonstration_steps must be non-negative, got "
+                f"{demonstration_steps!r}"
             )
 
         # For logging how many gradient updates we’ve done
@@ -1056,6 +1092,46 @@ class CTSAC(OffPolicyAlgorithm):
                 if self.use_value_head:
                     self._value_updates = max(self._value_updates, self.value_warmup)
         return self
+
+    def _sample_action(self, obs: np.ndarray) -> np.ndarray:
+        """Defer to ``demonstration_policy`` during the demonstration warm start.
+
+        Falls through to the base class (random actions before
+        ``learning_starts``, the trained policy after) once
+        ``demonstration_policy`` is unset or ``num_timesteps`` reaches
+        ``demonstration_steps``.
+        """
+        if (
+            self.demonstration_policy is None
+            or self.num_timesteps >= self.demonstration_steps
+        ):
+            return super()._sample_action(obs)
+
+        is_vec_env = self.is_vec_env
+        n_envs = self.n_envs
+        obs_arr = np.asarray(obs, dtype=np.float32)
+        if is_vec_env:
+            if obs_arr.ndim == 1:
+                obs_arr = obs_arr[None, :]
+            assert (
+                obs_arr.shape[0] == n_envs
+            ), f"obs first dim must be n_envs={n_envs}, got {obs_arr.shape}"
+            action = np.stack(
+                [
+                    np.asarray(
+                        self.demonstration_policy(obs_arr[i]), dtype=np.float32
+                    ).reshape(self.action_dim)
+                    for i in range(n_envs)
+                ],
+                axis=0,
+            )
+        else:
+            if obs_arr.ndim > 1:
+                obs_arr = obs_arr[0]
+            action = np.asarray(
+                self.demonstration_policy(obs_arr), dtype=np.float32
+            ).reshape(self.action_dim)
+        return np.clip(action, self.env.action_space.low, self.env.action_space.high)
 
     def _policy_act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         obs_t = th.as_tensor(obs, device=self.device).float()
