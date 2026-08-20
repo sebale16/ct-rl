@@ -95,56 +95,49 @@ The peak migrates from $t \approx 4.4\ \mathrm{s}$ to $t \approx 7.9\ \mathrm{s}
 
 `tube-peak` passes there because $\rho \approx 3.4$ is *inside* $\mathcal H$ — the bottom of the swing, on the orbit. A criterion phrased on tube membership cannot separate the bottom of the swing from the top, which is the separation this check needs.
 
-## Recommended $\eta$: a ceiling-relative tolerance
+## Exact $\eta$: closed form for the closed-loop rate, none for the actual rate
 
-Replacing the absolute $10^{-3}$ with a tolerance scaled to $|\max_x r_1|$ restores the property directly — no sample may beat the unshaped ceiling by more than a set fraction of it:
+The rollout-and-scan above is a numerical stand-in for an algebraic fact. Writing $r_3^{\rm cl}$ out with $V$ substituted in full and $\dot{\bar V}$ replaced by the closed-loop surrogate,
 
-| config | tol $=100\%$ | $50\%$ | $10\%$ | $1\%$ |
-|---|---|---|---|---|
-| $-\bar V$, XK, $\lambda = 0.1$ | 0.2629 | 0.2624 | 0.2621 | 0.0775 |
-| $-\bar V$, XK, $\lambda = 0.5$ | 0.2379 | 0.2375 | 0.1890 | 0.0189 |
-| $r_0$, actual, $\lambda = 0.1$ | 0.7094 | 0.6443 | 0.5879 | 0.1073 |
-| $r_0$, actual, $\lambda = 0.5$ | 0.6220 | 0.5624 | 0.2063 | 0.0207 |
+$$r_3^{\rm cl}(x) = -(1-\lambda\eta)\bar V(x) + \eta k_V \dot q_2^2 / V_{\rm down} = -(1-\lambda\eta)\tfrac{\tilde E^2}{2V_{\rm down}} - (1-\lambda\eta)\tfrac{k_P q_2^2}{2V_{\rm down}} + \Big[\eta k_V - \tfrac12(1-\lambda\eta)k_D\Big]\tfrac{\dot q_2^2}{V_{\rm down}},$$
 
-At $10\%$, floored to the $0.01$ grid:
+a diagonal quadratic in $(\tilde E, q_2, \dot q_2)$ with no cross terms and, because the closed-loop surrogate drops $u$, no action dependence. $r_3^{\rm cl}(x) \le 0$ for *every* $x$ — not just the rollout — iff both bracketed coefficients are non-negative: $\lambda\eta \le 1$ and $\eta k_V \le \tfrac12(1-\lambda\eta)k_D$. The second is always the binding one, giving the exact, unconditional bound
 
-| config | committed | recommended | peak at | excess | $\min(-r)/\varepsilon_{\rm floor}$ |
-|---|---|---|---|---|---|
-| $r_3$, $-\bar V$, XK, $\lambda = 0.1$ | 0.24 | **0.24** (up to 0.26) | $\rho = 0.417$, $t = 20.000\ \mathrm{s}$ | $+0.0102$ | 55.8 |
-| $r_3$, $-\bar V$, XK, $\lambda = 0.5$ | 0.24 | **0.18** | $\rho = 0.417$, $t = 20.000\ \mathrm{s}$ | $+0.0082$ | 52.2 |
-| $r_3$, $r_0$ base, actual, $\lambda = 0.1$ | 0.76 | **0.58** | $\rho = 0.825$, $t = 18.492\ \mathrm{s}$ | $+0.0472$ | 53.5 |
-| $r_3$, $r_0$ base, actual, $\lambda = 0.5$ | 0.76 | **0.20** | $\rho = 0.336$, $t = 19.914\ \mathrm{s}$ | $+0.0030$ | 53.5 |
+$$\eta^\ast(\lambda) = \frac{k_D}{\lambda k_D + 2k_V}.$$
 
-Every peak now falls at $t \approx 18.5$–$20\ \mathrm{s}$ — settled on the orbit, late in the episode — with excess at most $0.05$ nats and a uniform $\approx 50\times$ floor margin, matching what the unshaped $r_1$ does on its own. The $1\%$ column is the knife edge `8bc819a` documented reappearing: it collapses toward the ceiling-defining sample and is not usable.
+At this plant's gains ($k_D = 35.8$, $k_V = 66.3$): $\eta^\ast(0.1) = 0.2629$, $\eta^\ast(0.5) = 0.2379$ — matching the rollout-scanned "no-saturate, XK closed loop" row above to four figures. The grid search was rediscovering this closed form one $0.01$ step at a time; it's now exact and requires no rollout. The committed values are these floored to $0.01$ — $0.26$ and $0.23$ — staying strictly inside the bound rather than landing on it.
 
-Isolating the three factors in the `no-saturate` bound:
+The actual rate does not have this property, for a structural reason rather than a numerical one. Because only the elbow is actuated and the plant is conservative, $\dot E = \dot q_2\tau_2$ exactly, and carrying that through $\ddot q_2 = (M^{-1})_{22}\tau_2 - (M^{-1}(H+G))_2$ shows every term of $\dot V_{\rm actual}$ carries an explicit $\dot q_2$ factor:
 
-| base | rate source | $\lambda = 0.1$ | $\lambda = 0.5$ |
-|---|---|---|---|
-| $-\bar V$ | actual | 0.2604 | 0.2358 |
-| $-\bar V$ | XK closed loop | 0.2629 | 0.2379 |
-| $r_0$ | actual | 0.7073 | 0.6200 |
-| $r_0$ | XK closed loop | 0.8389 | 0.7591 |
+$$\dot V_{\rm actual}(x, u) = \dot q_2 \cdot G(x, u), \qquad G(x,\tau_2) = \big[\tilde E + k_D(M^{-1})_{22}\big]\tau_2 + k_P q_2 - k_D\big(M^{-1}(H+G_{\rm grav})\big)_2.$$
 
-The base dominates: $r_0$ admits roughly $2.7$–$3.2\times$ the $\eta$ that $-\bar V$ does. During the pump ($t \in [4, 5]\ \mathrm{s}$) $r_0$ runs at median $-3.61\times10^{-2}$ against $-\bar V$'s $-1.47\times10^{-2}$, so it carries about $2.5\times$ the magnitude for $\eta\dot{\bar V}$ to cancel before $r$ reaches zero — which tracks the ratio of the bounds. The rate source is a minor term, worth $1\%$ on the $-\bar V$ base and $19\%$ on $r_0$; the two $\dot{\bar V}$ definitions have nearly equal magnitude through the pump (median $-3.74\times10^{-2}$ actual, $-3.60\times10^{-2}$ closed loop). Raising $\lambda$ from $0.1$ to $0.5$ tightens every bound by about $10\%$, since $r_3$'s $+\lambda\eta\bar V$ term grows with $\lambda$ and $\bar V \ge 0$.
+At $q_2 = 0$, $H \equiv 0$ identically (its only nonzero entries carry a $\sin q_2$ factor), which collapses $G$ to a function of $(\tilde E, q_1, \tau_2)$ alone: $G = [\tilde E + 216.0]\tau_2 + 527.5\cos q_1$ at this plant's gains and $\tau_{\max} = 20\ \mathrm{N\cdot m}$. Fixing $\tilde E = 0$, $q_2 = 0$ and any $\tau_2$ with $G \ne 0$ (true for all but one $\tau_2$ in the admissible interval), the reward along $\dot q_2 \to 0$ is
 
-These bounds are properties of the analytical rollout. A learned policy visiting states off that trajectory can reach a $\dot V$ the rollout never produces, so they are necessary rather than sufficient; the training-time guard against that is the reward's own lower envelope, which is unchanged.
+$$r_3(x, u) = -(1-\lambda\eta)\tfrac{k_D}{2}\dot q_2^2 / V_{\rm down} - \eta \dot q_2 G / V_{\rm down} = \tfrac{|\dot q_2|}{V_{\rm down}}\Big(\eta|G| - (1-\lambda\eta)\tfrac{k_D}{2}|\dot q_2|\Big),$$
+
+which is strictly positive for every $0 < |\dot q_2| < 2\eta|G| / [(1-\lambda\eta)k_D]$ — an interval that exists for *every* $\eta > 0$. No finite $\eta$ makes $r_3$ non-positive everywhere on the actual rate; the quadratic Lyapunov cushion is always beaten by the linear-in-$\dot q_2$ term as $\dot q_2 \to 0$, because real $\dot V$ is only negative-definite under Xin–Kaneda's own control law, not under an arbitrary action.
+
+Weakening the ask to what the rollout-scanned bound was actually approximating — no state outside the target tube $\mathcal H$ can outscore the tube itself, rather than $r_3 \le 0$ everywhere — is solvable, because outside $\mathcal H$ at least one of $\tilde E, q_2, \dot q_2$ has a guaranteed nonzero floor that competes with the linear gain instead of vanishing with it. Bounding $|G|$ by its worst case over $\tau_2 \in [-\tau_{\max}, \tau_{\max}]$, $q_1$ free ($\bar G \approx 4850$ near $\tilde E = 0$), the tightest branch — violate only $\dot q_2$, pinned at the tube edge $\epsilon_\omega\omega_s$ — gives
+
+$$\eta \lesssim \frac{\epsilon_\omega \omega_s V_{\rm down}}{2\bar G}\cdot k_D \approx 2.7\times10^{-3} \text{ (r0 base)}, \qquad \approx 8.5\times10^{-4} \text{ ($-\bar V$ base)},$$
+
+roughly three orders of magnitude below the committed $0.58$/$0.2$. At that scale the shaping term is indistinguishable from $\eta = 0$ ($r_1$) at any practical training horizon, so the actual-rate arms are dropped rather than retagged.
 
 ## Applied
 
-`benchmarks/hyperparams/ct_sac.csv` carries these on the demonstration-warm-start arms. The nine $\eta$-bearing `_xkdemo*` rows are renamed and retagged — `eta0p24` $\to$ `eta0p18` on $-\bar V$/XK/2 s, `eta0p76` $\to$ `eta0p58` on $r_0$/actual/10 s, `eta0p76` $\to$ `eta0p2` on $r_0$/actual/2 s — and three matched non-demo `_logrecip` rows are added at the same $\eta$, so each demonstration arm keeps a control differing from it only in the warm start. The $-\bar V$/XK/10 s arms keep $\eta = 0.24$.
+`benchmarks/hyperparams/ct_sac.csv` retags the $-\bar V$/XK-closed-loop demonstration family to $\eta^\ast(\lambda)$ floored to $0.01$ instead of the grid-scanned value — `eta0p24` $\to$ `eta0p26` on $\lambda=0.1$ (10 s), `eta0p18` $\to$ `eta0p23` on $\lambda=0.5$ (2 s) — across all four rows each (`_xkdemo`, `_xkdemo20k`, `_xkdemo100k`, and the matched non-demo `_logrecip` control), eight rows in total.
 
-Verified across all sixteen affected rows (four configs $\times$ control, `_xkdemo`, `_xkdemo20k`, `_xkdemo100k`): peak at most $0.047$ nats above the closest approach, floor margin $52$–$56\times$.
+The $r_0$-base/actual-rate family (`eta0p58` on $\lambda=0.1$, `eta0p2` on $\lambda=0.5$) is removed outright — all four rows each, eight rows — per the negligible-$\eta$ result above rather than retagged to $\approx 0.0027$.
 
-The earlier $\eta$ sweep points ($0.24$ on $-\bar V$/2 s, $0.76$ on both $r_0$ bases) stay in the ladder as the pre-correction comparison. Only the `q2dot4pi` cap gains the new values, since only it has `_xkdemo` arms; the $r_2$ ladders are untouched, and their $\eta$ have not been checked against this criterion.
+Only the `q2dot4pi` cap's `_xkdemo*` rows are touched, since only it has them; the `r2` ladders and the broader `q2dot4pi`/`q2dot4sqrt2pi` exploratory sweeps (`eta=0, 0.01, 0.03, 0.1, 0.3, 1` and the earlier `0.24`/`0.28`/`0.76`/`0.84`/`0.86`/`0.77`/`0.85` ladder points) are untouched — they're exploratory grid points, not the committed recommendation, and are unaffected by this closed form.
 
 ## Reproducing
 
-Scripts are in the job scratch directory, not the repo. Regenerate the rollout with the sweep's own collector, then apply the closed forms above:
+The closed-loop bound is now algebraic, not empirical — $\eta^\ast(\lambda) = k_D/(\lambda k_D + 2k_V)$ reproduces directly from the plant's $k_D$, $k_V$ and the chosen $\lambda$, no rollout needed. The `plot_acrobot_xk_r3_eta_sweep` script (job scratch, not the repo) still reproduces the superseded rollout-scanned numbers for comparison:
 
 ```
 MUJOCO_GL=disable python -m benchmarks.plot_acrobot_xk_r3_eta_sweep \
     --reward-base lyapunov --lyapunov-rate-source xk_closed_loop
 ```
 
-The sweep's `--violation-tolerance` reproduces the "sweep bound" column, and passing it $0.1 \cdot |\max_x r_1|$ reproduces the recommended $\eta$ — $5.77\times10^{-6}$ on the $-\bar V$ base, $5.92\times10^{-6}$ on the $r_0$ base, since each base has its own ceiling. The `no-saturate` and `tube-peak` columns are not exposed by it.
+The actual-rate bounds ($8.5\times10^{-4}$, $2.7\times10^{-3}$) have no script; they come from the $\dot V = \dot q_2 G(x,u)$ factorization and the tube-boundary branch above, worked symbolically rather than by rollout.
