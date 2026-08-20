@@ -244,6 +244,191 @@ class TestDemonstrationWarmStart(unittest.TestCase):
             self.assertEqual(obs.shape, vec_env.observation_space.shape)
 
 
+class _BatchExpert:
+    """A constant control law with the batched interface the KL term needs."""
+
+    def __init__(self, action, undefined=None):
+        self.action = float(action)
+        self.undefined = undefined
+        self.batches = 0
+
+    def __call__(self, obs):
+        return np.array([self.action], dtype=np.float64)
+
+    def actions(self, obs):
+        self.batches += 1
+        out = np.full((np.asarray(obs).shape[0], 1), self.action)
+        if self.undefined is not None:
+            out[self.undefined] = np.nan
+        return out
+
+
+class TestImitationKL(unittest.TestCase):
+    """The actor-loss KL between the policy and an analytical control law."""
+
+    def setUp(self):
+        self.env = DMCContinuousEnv(
+            domain_name="cartpole",
+            task_name="swingup",
+            time_sampling="uniform",
+            dt=0.02,
+            episode_duration=0.2,
+        )
+        self.expert_action = 0.5
+
+    def _agent(self, **kwargs):
+        model = ActorQCriticModel(
+            observation_space=self.env.observation_space,
+            action_space=self.env.action_space,
+            q_net_arch=[16, 16],
+            pi_net_arch=[16, 16],
+        )
+        return CTSAC(
+            env=self.env,
+            model=model,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=200,
+            seed=0,
+            **kwargs,
+        )
+
+    def _mean_gap(self, agent, count=64):
+        obs = np.stack([self.env.reset()[0] for _ in range(count)])
+        with th.no_grad():
+            actions, _ = agent.model.act(
+                th.as_tensor(obs, dtype=th.float32), deterministic=True
+            )
+        return float((actions - self.expert_action).abs().mean())
+
+    def test_off_by_default(self):
+        agent = self._agent()
+        self.assertEqual(agent.imitation_coef, 0.0)
+        self.assertIsNone(agent._imitation_expert)
+
+    def test_defaults_to_imitating_the_demonstration_policy(self):
+        expert = _BatchExpert(self.expert_action)
+        agent = self._agent(demonstration_policy=expert, imitation_coef=1.0)
+        self.assertIs(agent.imitation_policy, expert)
+        self.assertIsNotNone(agent._imitation_expert)
+
+    def test_seeding_and_imitation_are_independent(self):
+        # The headline arm: distil the law without ever handing it the env.
+        expert = _BatchExpert(self.expert_action)
+        agent = self._agent(
+            demonstration_policy=expert,
+            demonstration_steps=0,
+            imitation_coef=1.0,
+        )
+        agent.learn(total_timesteps=40)
+        self.assertEqual(agent.demonstration_steps, 0)
+        self.assertGreater(expert.batches, 0)
+
+    def test_rejects_a_missing_or_unbatched_law(self):
+        with self.assertRaises(ValueError):
+            self._agent(imitation_coef=1.0)
+        with self.assertRaises(ValueError):
+            self._agent(
+                imitation_coef=1.0,
+                imitation_policy=lambda obs: np.zeros(1),
+            )
+
+    def test_rejects_invalid_settings(self):
+        expert = _BatchExpert(self.expert_action)
+        for kwargs in (
+            {"imitation_coef": -1.0},
+            {"imitation_coef": 1.0, "imitation_direction": "sideways"},
+            {"imitation_coef": 1.0, "imitation_sigma": 0.0},
+            {"imitation_coef": 1.0, "imitation_sigma": -0.5},
+        ):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    self._agent(imitation_policy=expert, **kwargs)
+
+    def test_both_directions_pull_the_policy_towards_the_law(self):
+        baseline = self._agent()
+        baseline.learn(total_timesteps=600)
+        baseline_gap = self._mean_gap(baseline)
+
+        for direction in ("forward", "reverse"):
+            with self.subTest(direction=direction):
+                agent = self._agent(
+                    imitation_policy=_BatchExpert(self.expert_action),
+                    imitation_coef=50.0,
+                    imitation_direction=direction,
+                )
+                agent.learn(total_timesteps=600)
+                self.assertLess(self._mean_gap(agent), 0.5 * baseline_gap)
+
+    def test_states_the_law_cannot_score_are_dropped(self):
+        # A law is only defined on part of the state space -- Xin-Kaneda has a
+        # singular set -- so a non-finite row must not poison the update.
+        for undefined in (0, slice(None)):
+            with self.subTest(undefined=str(undefined)):
+                agent = self._agent(
+                    imitation_policy=_BatchExpert(
+                        self.expert_action, undefined=undefined
+                    ),
+                    imitation_coef=1.0,
+                )
+                agent.learn(total_timesteps=60)
+                for parameter in agent.model.actor.parameters():
+                    self.assertTrue(th.isfinite(parameter).all())
+
+    def test_a_wholly_undefined_batch_leaves_the_actor_where_sac_put_it(self):
+        agent = self._agent(
+            imitation_policy=_BatchExpert(self.expert_action, undefined=slice(None)),
+            imitation_coef=1e6,
+        )
+        agent.learn(total_timesteps=40)
+        self.assertTrue(
+            all(
+                th.isfinite(p).all() for p in agent.model.actor.parameters()
+            )
+        )
+
+    def test_rejects_a_law_whose_actions_do_not_fit_the_action_space(self):
+        class Wrong(_BatchExpert):
+            def actions(self, obs):
+                return np.zeros((np.asarray(obs).shape[0], 3))
+
+        agent = self._agent(
+            imitation_policy=Wrong(self.expert_action), imitation_coef=1.0
+        )
+        with self.assertRaises(ValueError):
+            agent.learn(total_timesteps=40)
+
+    def test_accepts_a_law_that_drops_the_trailing_action_axis(self):
+        class Flat(_BatchExpert):
+            def actions(self, obs):
+                return np.full(np.asarray(obs).shape[0], self.action)
+
+        agent = self._agent(
+            imitation_policy=Flat(self.expert_action), imitation_coef=1.0
+        )
+        agent.learn(total_timesteps=40)
+
+    def test_rejects_a_deterministic_policy(self):
+        model = ActorQCriticModel(
+            observation_space=self.env.observation_space,
+            action_space=self.env.action_space,
+            q_net_arch=[16],
+            pi_net_arch=[16],
+            deterministic_policy=True,
+        )
+        with self.assertRaises(ValueError):
+            CTSAC(
+                env=self.env,
+                model=model,
+                learning_starts=10,
+                batch_size=8,
+                buffer_size=200,
+                seed=0,
+                imitation_policy=_BatchExpert(self.expert_action),
+                imitation_coef=1.0,
+            )
+
+
 class TestDynamicsPublication(unittest.TestCase):
     def _agent(
         self,

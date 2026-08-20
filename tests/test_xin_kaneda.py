@@ -855,5 +855,102 @@ class TestClosedLoopOnThePlant(unittest.TestCase):
             )
 
 
+class TestBatchedLaw(unittest.TestCase):
+    """``torque_batch`` / ``actions``: the same law read on many states at once.
+
+    CT-SAC's imitation term scores a whole replay minibatch per gradient step,
+    which the per-state entry points cannot afford, so the batched pair has to
+    reproduce them exactly rather than approximately.
+    """
+
+    def setUp(self):
+        env = swingup_xk()
+        env.reset()
+        self.params = xk.AcrobotParams.from_physics(env.physics)
+        self.gains = xk.Gains(k_v=66.3, k_d=35.8, k_p=61.2)
+        self.states = np.random.default_rng(11).uniform(-4.0, 4.0, size=(512, 4))
+
+    def _controller(self, **kwargs):
+        return xk.XinKanedaController(self.params, self.gains, **kwargs)
+
+    def test_matches_the_per_state_law(self):
+        batched = xk.torque_batch(self.params, self.gains, self.states)
+        scalar = np.array(
+            [xk.torque(self.params, self.gains, x) for x in self.states]
+        )
+        np.testing.assert_allclose(batched, scalar, rtol=1e-12, atol=1e-12)
+
+    def test_the_singularity_yields_nan_where_the_scalar_law_raises(self):
+        # Admissible gains keep the denominator away from zero everywhere, so
+        # reaching the singularity at all takes a k_D below its own floor.
+        gains = xk.Gains(k_v=66.3, k_d=0.5, k_p=61.2)
+        q1, q2, d2 = 0.3, 0.5, 0.7
+
+        def denominator(d1):
+            state = np.array([q1, q2, d1, d2])
+            error = self.params.energy(state[:2], state[2:]) - self.params.energy_top
+            return gains.k_d * self.params.m11(q2) + error * self.params.det_m(q2)
+
+        grid = np.linspace(-30.0, 30.0, 60001)
+        values = np.array([denominator(d1) for d1 in grid])
+        crossing = np.flatnonzero(np.sign(values[:-1]) != np.sign(values[1:]))
+        self.assertTrue(crossing.size, "no singular state on the scan")
+        lo, hi = grid[crossing[0]], grid[crossing[0] + 1]
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if np.sign(denominator(mid)) == np.sign(denominator(lo)):
+                lo = mid
+            else:
+                hi = mid
+        singular = np.array([q1, q2, 0.5 * (lo + hi), d2])
+        regular = np.array([q1, q2, 1.0, d2])
+
+        batched = xk.torque_batch(self.params, gains, np.stack([singular, regular]))
+        self.assertTrue(np.isnan(batched[0]))
+        with self.assertRaises(FloatingPointError):
+            xk.torque(self.params, gains, singular)
+        self.assertAlmostEqual(
+            float(batched[1]), xk.torque(self.params, gains, regular), places=9
+        )
+
+    def test_actions_match_the_call_and_leave_the_bookkeeping_alone(self):
+        controller = self._controller()
+        batched = controller.actions(self.states)
+        self.assertEqual(batched.shape, (len(self.states), 1))
+        single = np.stack([controller(x) for x in self.states])
+        np.testing.assert_allclose(batched, single, rtol=1e-12, atol=1e-12)
+
+        # The saturation counters describe what the controller drove; a batched
+        # read of states it did not drive must not enter them.
+        steps, saturated = controller.steps, controller.saturated_steps
+        controller.actions(self.states)
+        self.assertEqual((controller.steps, controller.saturated_steps),
+                         (steps, saturated))
+
+    def test_actions_accept_a_single_observation(self):
+        controller = self._controller()
+        state = np.array([-0.5 * np.pi + 0.2, 0.1, 0.3, -0.2])
+        np.testing.assert_allclose(
+            controller.actions(state), controller(state).reshape(1, 1),
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_actions_honour_the_upward_vertical_frame(self):
+        controller = self._controller(frame="upward_vertical")
+        states = self.states[:64]
+        np.testing.assert_allclose(
+            controller.actions(states),
+            np.stack([controller(x) for x in states]),
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_wrong_shapes_are_rejected(self):
+        with self.assertRaises(ValueError):
+            xk.torque_batch(self.params, self.gains, self.states[:, :3])
+        controller = self._controller()
+        with self.assertRaises(ValueError):
+            controller.actions(self.states[:, :3])
+
+
 if __name__ == "__main__":
     unittest.main()

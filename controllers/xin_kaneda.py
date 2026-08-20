@@ -458,6 +458,52 @@ def torque(params: AcrobotParams, gains: Gains, state: np.ndarray) -> float:
     return float(-numerator / denominator)
 
 
+def torque_batch(
+    params: AcrobotParams, gains: Gains, states: np.ndarray
+) -> np.ndarray:
+    """:func:`torque` evaluated over a batch, ``states`` of shape ``(N, 4)``.
+
+    Rows sitting on the law's singularity come back as ``nan`` rather than
+    raising, so a caller sweeping states it did not choose -- a replay buffer,
+    say -- can drop those rows instead of losing the whole batch.  Whenever a
+    row is admissible the value matches :func:`torque` to floating-point.
+    """
+    values = np.asarray(states, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 4:
+        raise ValueError(
+            f"expected states of shape (N, 4) [q1, q2, qd1, qd2], got {values.shape}"
+        )
+    q1, q2, d1, d2 = values[:, 0], values[:, 1], values[:, 2], values[:, 3]
+    c2, s2 = np.cos(q2), np.sin(q2)
+
+    m11 = params.a1 + params.a2 + 2.0 * params.a3 * c2
+    m12 = params.a2 + params.a3 * c2
+    m22 = np.full_like(m11, params.a2)
+    det = params.det_m(q2)
+
+    bias1 = params.a3 * s2 * (-2.0 * d1 * d2 - d2**2) + (
+        params.b1 * np.cos(q1) + params.b2 * np.cos(q1 + q2)
+    )
+    bias2 = params.a3 * s2 * d1**2 + params.b2 * np.cos(q1 + q2)
+
+    kinetic = 0.5 * (m11 * d1**2 + 2.0 * m12 * d1 * d2 + m22 * d2**2)
+    potential = params.b1 * np.sin(q1) + params.b2 * np.sin(q1 + q2)
+    energy_error = kinetic + potential - params.energy_top
+
+    denominator = gains.k_d * m11 + energy_error * det
+    numerator = (gains.k_v * d2 + gains.k_p * q2) * det + gains.k_d * (
+        m12 * bias1 - m11 * bias2
+    )
+    singular = ~np.isfinite(denominator) | (np.abs(denominator) < 1e-9)
+    result = np.divide(
+        -numerator,
+        denominator,
+        out=np.full_like(denominator, np.nan),
+        where=~singular,
+    )
+    return np.where(singular, np.nan, result)
+
+
 def lyapunov(params: AcrobotParams, gains: Gains, state: np.ndarray) -> float:
     """``V = 1/2 (E - E_r)^2 + 1/2 k_D qdot2^2 + 1/2 k_P q2^2``, eq. (11)."""
     q = np.asarray(state[:2], dtype=np.float64)
@@ -653,6 +699,37 @@ class XinKanedaController:
         # upward-vertical frame the reflection also flips the torque sign.
         sign = 1.0 if self.frame == "paper" else -1.0
         return np.array([sign * applied / self.params.gear], dtype=np.float64)
+
+    def actions(self, obs: np.ndarray) -> np.ndarray:
+        """Normalized commands for a batch of observations, ``(N, 4) -> (N, 1)``.
+
+        The batched counterpart of :meth:`__call__`, for callers that score many
+        states at once -- CT-SAC's imitation loss reads the law through here.
+        Two differences follow from those states not being ones this controller
+        drove: the saturation bookkeeping is left alone, since it counts what
+        was actually commanded on a trajectory, and states on the law's
+        singularity yield ``nan`` instead of raising, for the caller to mask.
+        """
+        values = np.asarray(obs, dtype=np.float64)
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+        if values.ndim != 2 or values.shape[1] != 4:
+            raise ValueError(
+                f"expected observations of shape (N, 4), got {values.shape}"
+            )
+        if self.frame != "paper":
+            values = np.column_stack(
+                [
+                    0.5 * np.pi - values[:, 0],
+                    -values[:, 1],
+                    -values[:, 2],
+                    -values[:, 3],
+                ]
+            )
+        commanded = torque_batch(self.params, self.gains, values)
+        applied = np.clip(commanded, -self.torque_limit, self.torque_limit)
+        sign = 1.0 if self.frame == "paper" else -1.0
+        return (sign * applied / self.params.gear).reshape(-1, 1)
 
     @property
     def saturation_fraction(self) -> float:

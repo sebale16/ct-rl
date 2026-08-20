@@ -18,6 +18,15 @@ from models.actor_q_critic import ActorQCriticModel
 from models.port_hamiltonian import FlowIntegrationError, integrate_drift
 
 
+#: Which KL the imitation term minimizes.  ``forward`` is KL(pi_E || pi_theta)
+#: with the law read as a point mass, which reduces to the negative
+#: log-likelihood of its action under the policy -- mass-covering, and defined
+#: without a width for the law.  ``reverse`` is KL(pi_theta || pi_E) against the
+#: law smeared into a Gaussian of width ``imitation_sigma`` -- mode-seeking, and
+#: it re-weights the policy's own entropy on top of the SAC term.
+IMITATION_DIRECTIONS = ("forward", "reverse")
+
+
 class ModelBasedTargetNumericalError(RuntimeError):
     """A typed CT-SAC critic-target numerical failure.
 
@@ -258,6 +267,18 @@ class CTSAC(OffPolicyAlgorithm):
     acrobot-swingup-xk (``benchmarks/run_ct_rl.py:_build_demonstration_policy``,
     selected via ``algo_demonstration_controller=xin_kaneda`` in the
     hyperparameter table).
+
+    ``imitation_coef > 0`` adds a KL between the policy and that same control
+    law to the actor loss, evaluated on the replayed states of every gradient
+    step rather than only during the warm start:
+
+        actor_loss = alpha log pi - Q + imitation_coef * KL(pi_theta, pi_E)
+
+    with :data:`IMITATION_DIRECTIONS` choosing which KL.  The law is read from
+    ``imitation_policy``, defaulting to ``demonstration_policy``, and must offer
+    a batched ``actions(obs)``.  Seeding and imitation are independent knobs:
+    ``demonstration_steps=0`` with ``imitation_coef>0`` distills the law without
+    ever handing it the environment.
     """
 
     def __init__(
@@ -323,6 +344,13 @@ class CTSAC(OffPolicyAlgorithm):
         # replay buffer starts from states that law actually reaches.
         demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         demonstration_steps: Optional[int] = None,
+        # Imitation (KL to an analytical controller): an extra actor-loss term
+        # pulling pi_theta towards a known control law on replayed states.
+        # Off at imitation_coef=0.
+        imitation_coef: float = 0.0,
+        imitation_direction: str = "forward",
+        imitation_sigma: float = 0.1,
+        imitation_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> None:
         if gamma is not None and discount_rate is not None:
             raise ValueError(
@@ -708,6 +736,55 @@ class CTSAC(OffPolicyAlgorithm):
                 "demonstration_steps must be non-negative, got "
                 f"{demonstration_steps!r}"
             )
+
+        # Imitation term: a KL between the policy and an analytical control law
+        # on replayed states, added to the actor loss.  Unlike the demonstration
+        # warm start -- which only decides which states get written into the
+        # buffer, and stops entirely at demonstration_steps -- this shapes the
+        # actor's gradient on every update, for the whole run.  The two are
+        # independent: either can run without the other.
+        self.imitation_coef = float(imitation_coef)
+        if not np.isfinite(self.imitation_coef) or self.imitation_coef < 0.0:
+            raise ValueError(
+                f"imitation_coef must be finite and >= 0, got {imitation_coef!r}"
+            )
+        self.imitation_direction = str(imitation_direction).strip().lower()
+        if self.imitation_direction not in IMITATION_DIRECTIONS:
+            raise ValueError(
+                f"imitation_direction must be one of {IMITATION_DIRECTIONS}, got "
+                f"{imitation_direction!r}"
+            )
+        self.imitation_sigma = float(imitation_sigma)
+        if not np.isfinite(self.imitation_sigma) or self.imitation_sigma <= 0.0:
+            raise ValueError(
+                f"imitation_sigma must be finite and > 0, got {imitation_sigma!r}"
+            )
+        self.imitation_policy = (
+            demonstration_policy if imitation_policy is None else imitation_policy
+        )
+        self._imitation_expert = None
+        if self.imitation_coef > 0.0:
+            if self.imitation_policy is None:
+                raise ValueError(
+                    "imitation_coef > 0 needs a control law to imitate; pass "
+                    "imitation_policy, or a demonstration_policy to reuse."
+                )
+            # The term is evaluated once per gradient step on a whole minibatch,
+            # so a per-state Python call is not affordable at training rates.
+            batched = getattr(self.imitation_policy, "actions", None)
+            if not callable(batched):
+                raise ValueError(
+                    "imitation_policy must expose a batched actions(obs) -> "
+                    "(N, action_dim) method (e.g. "
+                    "controllers.xin_kaneda.XinKanedaController), got "
+                    f"{type(self.imitation_policy).__name__}"
+                )
+            self._imitation_expert = batched
+            if getattr(self.model, "deterministic_policy", False):
+                raise ValueError(
+                    "imitation_coef > 0 requires a stochastic policy: both KL "
+                    "directions are defined through pi_theta's density."
+                )
 
         # For logging how many gradient updates we’ve done
         self._n_updates = 0
@@ -1329,6 +1406,12 @@ class CTSAC(OffPolicyAlgorithm):
             # Re-use actions_pi, log_prob_pi from above
             q_values_pi = self.model.min_q(obs, actions_pi)
             actor_loss = (alpha_tensor * log_prob_pi - q_values_pi).mean()
+
+            if self._imitation_expert is not None:
+                imitation_loss = self._imitation_loss(obs, actions_pi, log_prob_pi)
+                if imitation_loss is not None:
+                    actor_loss = actor_loss + self.imitation_coef * imitation_loss
+
             self.logger.record("train/actor_loss", actor_loss.item())
 
             self.actor_optimizer.zero_grad()
@@ -1345,6 +1428,70 @@ class CTSAC(OffPolicyAlgorithm):
             self._n_updates += 1
 
         self.logger.record("train/n_updates", self._n_updates)
+
+    # ------------------------ Imitation term ------------------------
+
+    def _imitation_loss(
+        self,
+        obs: th.Tensor,
+        actions_pi: th.Tensor,
+        log_prob_pi: th.Tensor,
+    ) -> Optional[th.Tensor]:
+        """KL between the policy and the analytical law on this minibatch.
+
+        ``forward`` reads the law as a point mass a*(x), so
+        ``KL(pi_E || pi_theta) = -log pi_theta(a*(x) | x)`` up to a constant in
+        theta: the policy's own density at the law's action, tanh correction
+        included.  ``reverse`` smears the law into ``N(a*, sigma^2 I)`` and takes
+        ``KL(pi_theta || pi_E) = E_pi[log pi_theta(a)] + E_pi[|a - a*|^2] /
+        (2 sigma^2)``, again up to a constant, differentiated through the same
+        reparameterized sample the SAC term uses.
+
+        A control law need not be defined everywhere the replay buffer has been
+        -- the Xin-Kaneda law is singular where ``k_D M11 + (E - E_r) det M``
+        vanishes -- so rows the law cannot score are dropped and the remainder
+        averaged.  ``None`` means the whole minibatch was undefined and the
+        actor update should carry no imitation gradient at all.
+        """
+        obs_np = obs.detach().cpu().numpy()
+        expert_np = np.asarray(self._imitation_expert(obs_np), dtype=np.float32)
+        expert = th.as_tensor(
+            expert_np, dtype=actions_pi.dtype, device=actions_pi.device
+        )
+        if expert.ndim == 1:  # a scalar-action law may drop the trailing axis
+            expert = expert.unsqueeze(-1)
+        if expert.shape != actions_pi.shape:
+            raise ValueError(
+                "imitation_policy returned actions of shape "
+                f"{tuple(expert.shape)}, expected {tuple(actions_pi.shape)}"
+            )
+
+        defined = th.isfinite(expert).all(dim=-1)
+        self.logger.record(
+            "train/imitation_defined_fraction",
+            float(defined.float().mean().item()),
+        )
+        if not bool(th.any(defined)):
+            return None
+
+        obs_ok = obs[defined]
+        expert_ok = expert[defined]
+        self.logger.record(
+            "train/imitation_action_gap",
+            float((actions_pi[defined] - expert_ok).abs().mean().item()),
+        )
+
+        if self.imitation_direction == "forward":
+            loss = -self.model.actor.log_prob(obs_ok, expert_ok).mean()
+        else:
+            gap = actions_pi[defined] - expert_ok
+            quadratic = gap.pow(2).sum(dim=-1, keepdim=True) / (
+                2.0 * self.imitation_sigma**2
+            )
+            loss = (log_prob_pi[defined] + quadratic).mean()
+
+        self.logger.record("train/imitation_loss", float(loss.item()))
+        return loss
 
     # ------------------------ Critic targets ------------------------
 

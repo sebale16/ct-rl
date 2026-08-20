@@ -809,7 +809,10 @@ def run_algorithm(
     # algorithms.ct_sac.CTSAC's demonstration_policy / demonstration_steps).
     # `algo_demonstration_steps`, if set, passes straight through in
     # algo_kwargs already; only the controller name needs resolving into an
-    # actual act(obs) -> action object here.
+    # actual act(obs) -> action object here.  The same object is what
+    # `algo_imitation_coef` defaults to imitating, so a row wanting only the
+    # KL term still names the controller here and sets
+    # `algo_demonstration_steps=0` to skip the seeding.
     demonstration_controller = algo_kwargs.pop("demonstration_controller", None)
     if demonstration_controller:
         algo_kwargs["demonstration_policy"] = _build_demonstration_policy(

@@ -723,6 +723,49 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
             },
         )
 
+    def test_imitation_kl_arms_vary_only_seeding_and_the_kl_term(self):
+        # The 2x2-ish design behind algorithms.ct_sac.CTSAC's imitation_coef:
+        # the KL term at three seeding lengths, plus the 200k seeding on its
+        # own so the longest warm start has a matched no-KL control.  The
+        # shorter no-KL controls are the existing _xkdemo/_xkdemo20k/
+        # _xkdemo100k arms, which is why only 200k is added here.
+        stem = "xk_r3_eta0p26_fixed1ms_h10s_temp1_xkdot_q2dot4pi_logrecip"
+        expected = {
+            f"{stem}_xkkl": (0, 1.0, "forward"),
+            f"{stem}_xkkl_xkdemo100k": (100_000, 1.0, "forward"),
+            f"{stem}_xkkl_xkdemo200k": (200_000, 1.0, "forward"),
+            f"{stem}_xkdemo200k": (200_000, None, None),
+        }
+        base_total, base_env, base_model, base_algo, base_log = _load(
+            f"{stem}_xkdemo100k"
+        )
+        varying = {
+            "demonstration_steps",
+            "imitation_coef",
+            "imitation_direction",
+            "imitation_sigma",
+        }
+        for mode, (steps, coef, direction) in expected.items():
+            with self.subTest(mode=mode):
+                total, env, model, algo, log = _load(mode)
+                self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
+                self.assertEqual(algo["demonstration_steps"], steps)
+                self.assertEqual(algo.get("imitation_coef"), coef)
+                self.assertEqual(algo.get("imitation_direction"), direction)
+                # Forward KL reads the law as a point mass, so no width is set.
+                self.assertNotIn("imitation_sigma", algo)
+
+                # Everything else is the base arm, so any difference in
+                # outcome is attributable to the two knobs above.
+                self.assertEqual(total, base_total)
+                self.assertEqual(env, base_env)
+                self.assertEqual(model, base_model)
+                self.assertEqual(log, base_log)
+                self.assertEqual(
+                    {k: v for k, v in algo.items() if k not in varying},
+                    {k: v for k, v in base_algo.items() if k not in varying},
+                )
+
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")
         self.assertEqual(train["time_sampling"], "irregular")
