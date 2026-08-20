@@ -130,6 +130,14 @@ The base dominates: $r_0$ admits roughly $2.7$–$3.2\times$ the $\eta$ that $-\
 
 These bounds are properties of the analytical rollout. A learned policy visiting states off that trajectory can reach a $\dot V$ the rollout never produces, so they are necessary rather than sufficient; the training-time guard against that is the reward's own lower envelope, which is unchanged.
 
+## Applied
+
+`benchmarks/hyperparams/ct_sac.csv` carries these on the demonstration-warm-start arms. The nine $\eta$-bearing `_xkdemo*` rows are renamed and retagged — `eta0p24` $\to$ `eta0p18` on $-\bar V$/XK/2 s, `eta0p76` $\to$ `eta0p58` on $r_0$/actual/10 s, `eta0p76` $\to$ `eta0p2` on $r_0$/actual/2 s — and three matched non-demo `_logrecip` rows are added at the same $\eta$, so each demonstration arm keeps a control differing from it only in the warm start. The $-\bar V$/XK/10 s arms keep $\eta = 0.24$.
+
+Verified across all sixteen affected rows (four configs $\times$ control, `_xkdemo`, `_xkdemo20k`, `_xkdemo100k`): peak at most $0.047$ nats above the closest approach, floor margin $52$–$56\times$.
+
+The earlier $\eta$ sweep points ($0.24$ on $-\bar V$/2 s, $0.76$ on both $r_0$ bases) stay in the ladder as the pre-correction comparison. Only the `q2dot4pi` cap gains the new values, since only it has `_xkdemo` arms; the $r_2$ ladders are untouched, and their $\eta$ have not been checked against this criterion.
+
 ## Reproducing
 
 Scripts are in the job scratch directory, not the repo. Regenerate the rollout with the sweep's own collector, then apply the closed forms above:

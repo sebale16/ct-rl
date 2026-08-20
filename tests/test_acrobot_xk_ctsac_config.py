@@ -616,7 +616,7 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                 and row["mode"].endswith("_logrecip")
             ]
 
-        self.assertEqual(len(rows), 94)
+        self.assertEqual(len(rows), 97)
         self.assertEqual(len(rows), len({row["mode"] for row in rows}))
 
         # Each sweep is trimmed to the etas that satisfy
@@ -630,19 +630,40 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         # tightens the bound at lambda=0.5 (h2s) more than at lambda=0.1
         # (h10s). See docs/reward_shaping_for_acrobot_swingup.md and
         # benchmarks/plot_acrobot_xk_r3_eta_sweep.py.
+        #
+        # The q2dot4pi r3 ladders additionally carry the peak-locality eta
+        # (0.18, 0.58, 0.2) that the demonstration-warm-start arms train on:
+        # never_enters_lqr_level bounds the ceiling excess by an absolute
+        # 1e-3, ~17x the ceiling's own magnitude, which still admits an
+        # r -> 0 spike mid-pump; scaling that tolerance to 10% of |max r1|
+        # keeps the peak on the settled orbit instead. Only this cap has
+        # them, since only it has _xkdemo arms -- hence the per-cap keys.
+        # See docs/acrobot_xk_eta_peak_reward_locality.md.
         expected_sweeps = {
-            ("lyapunov", "xk_closed_loop", "r2", "h10s"): {0.1, 0.24, 0.28},
-            ("lyapunov", "xk_closed_loop", "r2", "h2s"): {0.1, 0.24, 0.28},
-            ("lyapunov", "xk_closed_loop", "r3", "h10s"): {0.1, 0.24},
-            ("lyapunov", "xk_closed_loop", "r3", "h2s"): {0.1, 0.24},
-            ("r0", "actual", "r2", "h10s"): {0.1, 0.3, 0.76, 0.84, 0.86},
-            ("r0", "actual", "r2", "h2s"): {0.1, 0.3, 0.76, 0.84, 0.86},
-            ("r0", "actual", "r3", "h10s"): {0.1, 0.3, 0.76, 0.84},
-            ("r0", "actual", "r3", "h2s"): {0.1, 0.3, 0.76},
-            ("r0", "xk_closed_loop", "r2", "h10s"): {0.1, 0.3, 0.77, 0.85},
-            ("r0", "xk_closed_loop", "r2", "h2s"): {0.1, 0.3, 0.77, 0.85},
-            ("r0", "xk_closed_loop", "r3", "h10s"): {0.1, 0.3, 0.77, 0.85},
-            ("r0", "xk_closed_loop", "r3", "h2s"): {0.1, 0.3, 0.77},
+            ("lyapunov", "xk_closed_loop", "r2", "h10s", "q2dot4pi"): {0.1, 0.24, 0.28},
+            ("lyapunov", "xk_closed_loop", "r2", "h10s", "q2dot4sqrt2pi"): {0.1, 0.24, 0.28},
+            ("lyapunov", "xk_closed_loop", "r2", "h2s", "q2dot4pi"): {0.1, 0.24, 0.28},
+            ("lyapunov", "xk_closed_loop", "r2", "h2s", "q2dot4sqrt2pi"): {0.1, 0.24, 0.28},
+            ("lyapunov", "xk_closed_loop", "r3", "h10s", "q2dot4pi"): {0.1, 0.24},
+            ("lyapunov", "xk_closed_loop", "r3", "h10s", "q2dot4sqrt2pi"): {0.1, 0.24},
+            ("lyapunov", "xk_closed_loop", "r3", "h2s", "q2dot4pi"): {0.1, 0.18, 0.24},
+            ("lyapunov", "xk_closed_loop", "r3", "h2s", "q2dot4sqrt2pi"): {0.1, 0.24},
+            ("r0", "actual", "r2", "h10s", "q2dot4pi"): {0.1, 0.3, 0.76, 0.84, 0.86},
+            ("r0", "actual", "r2", "h10s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.76, 0.84, 0.86},
+            ("r0", "actual", "r2", "h2s", "q2dot4pi"): {0.1, 0.3, 0.76, 0.84, 0.86},
+            ("r0", "actual", "r2", "h2s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.76, 0.84, 0.86},
+            ("r0", "actual", "r3", "h10s", "q2dot4pi"): {0.1, 0.3, 0.58, 0.76, 0.84},
+            ("r0", "actual", "r3", "h10s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.76, 0.84},
+            ("r0", "actual", "r3", "h2s", "q2dot4pi"): {0.1, 0.2, 0.3, 0.76},
+            ("r0", "actual", "r3", "h2s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.76},
+            ("r0", "xk_closed_loop", "r2", "h10s", "q2dot4pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r2", "h10s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r2", "h2s", "q2dot4pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r2", "h2s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r3", "h10s", "q2dot4pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r3", "h10s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.77, 0.85},
+            ("r0", "xk_closed_loop", "r3", "h2s", "q2dot4pi"): {0.1, 0.3, 0.77},
+            ("r0", "xk_closed_loop", "r3", "h2s", "q2dot4sqrt2pi"): {0.1, 0.3, 0.77},
         }
         grouped_etas = {}
         category_counts = Counter()
@@ -673,15 +694,15 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         self.assertEqual(
             category_counts,
             {
-                ("lyapunov", "xk_closed_loop"): 20,
-                ("r0", "actual"): 34,
+                ("lyapunov", "xk_closed_loop"): 21,
+                ("r0", "actual"): 36,
                 ("r0", "xk_closed_loop"): 30,
             },
         )
         self.assertEqual(len(grouped_etas), 24)
-        for (category, reward_kind, horizon, _), etas in grouped_etas.items():
+        for (category, reward_kind, horizon, cap), etas in grouped_etas.items():
             self.assertEqual(
-                etas, expected_sweeps[(*category, reward_kind, horizon)]
+                etas, expected_sweeps[(*category, reward_kind, horizon, cap)]
             )
 
         self.assertEqual(
