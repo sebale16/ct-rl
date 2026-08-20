@@ -35,7 +35,7 @@ So "peak reward only near the LQR region" is not a property any of these rewards
 - **no-saturate** — $r \le -\varepsilon_{\rm floor}$ at every sample, so $\ln(1/-r)$ never clamps.
 - **tube-peak** — $\max_{x \notin \mathcal H} r < \max_{x \in \mathcal H} r$, so the best-scoring state on the rollout lies in the target tube.
 
-Both are exact linear conditions in $\eta$ (a grid scan for the second), evaluated per reward base, rate source, and discount horizon.
+Both are exact linear conditions in $\eta$ (a grid scan for the second), evaluated per reward base, rate source, and discount horizon. They are enough to locate the failure below, and both turn out to be too weak to set $\eta$ by; the tolerance that does is developed after the diagnosis.
 
 ## Result: three of the four committed $\eta$ saturate the transform
 
@@ -80,16 +80,42 @@ The tolerance is about $17\times$ the ceiling's own magnitude. It was sized in `
 
 The `no-saturate` criterion avoids the knife edge without the loose window, because it compares against $-\varepsilon_{\rm floor}$ rather than against a ceiling realized at a particular sample. Its numerator $-\varepsilon_{\rm floor} - r_1 \ge 5.67\times10^{-5} > 0$ everywhere, so no $\eta > 0$ trips it degenerately.
 
-## Recommended $\eta$
+## `no-saturate` alone relocates the peak without fixing it
 
-Binding bound is $\min(\text{no-saturate},\ \text{tube-peak})$, rounded down to the sweep's $0.01$ grid:
+Taking $\min(\text{no-saturate},\ \text{tube-peak})$ down to the $0.01$ grid gives $0.24$, $0.23$, $0.70$, $0.62$. Every one clears the pump — over $t \in [4, 5]\ \mathrm{s}$ the closest any comes to the floor is $504\times$ it, with no clamped sample. Over the whole rollout, though, the two $r_0$-base values only move the peak:
 
-| config | committed | binding bound | recommended |
-|---|---|---|---|
-| $r_3$, $-\bar V$, XK, $\lambda = 0.1$ | 0.24 | 0.2615 | **0.24** (unchanged) |
-| $r_3$, $-\bar V$, XK, $\lambda = 0.5$ | 0.24 | 0.2370 | **0.23** |
-| $r_3$, $r_0$ base, actual, $\lambda = 0.1$ | 0.76 | 0.7073 | **0.70** |
-| $r_3$, $r_0$ base, actual, $\lambda = 0.5$ | 0.76 | 0.6200 | **0.62** |
+| config | $\eta$ | clamped | $\min(-r)/\varepsilon_{\rm floor}$ | peak at | excess over closest |
+|---|---|---|---|---|---|
+| $-\bar V$, XK, 10 s | 0.24 | 0 | 55.9 | $\rho = 0.417$, $t = 20.0\ \mathrm{s}$ | $+0.0096$ |
+| $-\bar V$, XK, 2 s | 0.23 | 0 | 50.7 | $\rho = 0.417$, $t = 20.0\ \mathrm{s}$ | $+0.0100$ |
+| $r_0$, actual, 10 s | 0.70 | 0 | 4.4 | $\rho = 3.424$, $t = 7.907\ \mathrm{s}$ | $+2.5285$ |
+| $r_0$, actual, 2 s | 0.62 | 0 | 1.02 | $\rho = 3.467$, $t = 7.916\ \mathrm{s}$ | $+3.7052$ |
+
+The peak migrates from $t \approx 4.4\ \mathrm{s}$ to $t \approx 7.9\ \mathrm{s}$ and stays at $\rho \approx 3.4$, still $2.5$–$3.7$ nats above the closest approach, with $\eta = 0.62$ sitting within $2\%$ of the floor.
+
+`tube-peak` passes there because $\rho \approx 3.4$ is *inside* $\mathcal H$ — the bottom of the swing, on the orbit. A criterion phrased on tube membership cannot separate the bottom of the swing from the top, which is the separation this check needs.
+
+## Recommended $\eta$: a ceiling-relative tolerance
+
+Replacing the absolute $10^{-3}$ with a tolerance scaled to $|\max_x r_1|$ restores the property directly — no sample may beat the unshaped ceiling by more than a set fraction of it:
+
+| config | tol $=100\%$ | $50\%$ | $10\%$ | $1\%$ |
+|---|---|---|---|---|
+| $-\bar V$, XK, $\lambda = 0.1$ | 0.2629 | 0.2624 | 0.2621 | 0.0775 |
+| $-\bar V$, XK, $\lambda = 0.5$ | 0.2379 | 0.2375 | 0.1890 | 0.0189 |
+| $r_0$, actual, $\lambda = 0.1$ | 0.7094 | 0.6443 | 0.5879 | 0.1073 |
+| $r_0$, actual, $\lambda = 0.5$ | 0.6220 | 0.5624 | 0.2063 | 0.0207 |
+
+At $10\%$, floored to the $0.01$ grid:
+
+| config | committed | recommended | peak at | excess | $\min(-r)/\varepsilon_{\rm floor}$ |
+|---|---|---|---|---|---|
+| $r_3$, $-\bar V$, XK, $\lambda = 0.1$ | 0.24 | **0.24** (up to 0.26) | $\rho = 0.417$, $t = 20.000\ \mathrm{s}$ | $+0.0102$ | 55.8 |
+| $r_3$, $-\bar V$, XK, $\lambda = 0.5$ | 0.24 | **0.18** | $\rho = 0.417$, $t = 20.000\ \mathrm{s}$ | $+0.0082$ | 52.2 |
+| $r_3$, $r_0$ base, actual, $\lambda = 0.1$ | 0.76 | **0.58** | $\rho = 0.825$, $t = 18.492\ \mathrm{s}$ | $+0.0472$ | 53.5 |
+| $r_3$, $r_0$ base, actual, $\lambda = 0.5$ | 0.76 | **0.20** | $\rho = 0.336$, $t = 19.914\ \mathrm{s}$ | $+0.0030$ | 53.5 |
+
+Every peak now falls at $t \approx 18.5$–$20\ \mathrm{s}$ — settled on the orbit, late in the episode — with excess at most $0.05$ nats and a uniform $\approx 50\times$ floor margin, matching what the unshaped $r_1$ does on its own. The $1\%$ column is the knife edge `8bc819a` documented reappearing: it collapses toward the ceiling-defining sample and is not usable.
 
 Isolating the three factors in the `no-saturate` bound:
 
@@ -113,4 +139,4 @@ MUJOCO_GL=disable python -m benchmarks.plot_acrobot_xk_r3_eta_sweep \
     --reward-base lyapunov --lyapunov-rate-source xk_closed_loop
 ```
 
-The sweep's `--violation-tolerance` reproduces the "sweep bound" column; the `no-saturate` and `tube-peak` columns are not currently exposed by it.
+The sweep's `--violation-tolerance` reproduces the "sweep bound" column, and passing it $0.1 \cdot |\max_x r_1|$ reproduces the recommended $\eta$ — $5.77\times10^{-6}$ on the $-\bar V$ base, $5.92\times10^{-6}$ on the $r_0$ base, since each base has its own ceiling. The `no-saturate` and `tube-peak` columns are not exposed by it.
