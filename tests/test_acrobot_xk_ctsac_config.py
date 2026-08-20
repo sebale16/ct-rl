@@ -733,18 +733,21 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         # other but not to the existing _xkdemo/_xkdemo20k/_xkdemo100k arms;
         # a shorter-seeding no-KL control at this temperature would have to be
         # added before those comparisons mean anything.
-        base_stem = "xk_r3_eta0p26_fixed1ms_h10s_temp1_xkdot_q2dot4pi_logrecip"
-        stem = base_stem.replace("_temp1_", "_temp0p01_")
-        expected = {
-            f"{stem}_xkkl": (0, 1.0, "forward"),
-            f"{stem}_xkkl_xkdemo100k": (100_000, 1.0, "forward"),
-            f"{stem}_xkkl_xkdemo200k": (200_000, 1.0, "forward"),
-            f"{stem}_xkdemo200k": (200_000, None, None),
+        #
+        # Both discount horizons carry the set.  Each forks its own ladder,
+        # since the peak-locality eta and the discount rate differ between
+        # them -- h2s is eta 0.23 at 0.5 s^-1 where h10s is 0.26 at 0.1.
+        arms = {
+            "_xkkl": (0, 1.0, "forward"),
+            "_xkkl_xkdemo100k": (100_000, 1.0, "forward"),
+            "_xkkl_xkdemo200k": (200_000, 1.0, "forward"),
+            "_xkdemo200k": (200_000, None, None),
         }
-        base_total, base_env, base_model, base_algo, base_log = _load(
-            f"{base_stem}_xkdemo100k"
-        )
-        self.assertEqual(base_algo["alpha"], "auto_1.0")
+        base_stems = {
+            "h10s": "xk_r3_eta0p26_fixed1ms_h10s_temp1_xkdot_q2dot4pi_logrecip",
+            "h2s": "xk_r3_eta0p23_fixed1ms_h2s_temp1_xkdot_q2dot4pi_logrecip",
+        }
+        expected_rates = {"h10s": 0.1, "h2s": 0.5}
         varying = {
             "alpha",
             "demonstration_steps",
@@ -752,30 +755,46 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
             "imitation_direction",
             "imitation_sigma",
         }
-        for mode, (steps, coef, direction) in expected.items():
-            with self.subTest(mode=mode):
-                total, env, model, algo, log = _load(mode)
-                # auto_<init>: the initial value of the learned temperature.
-                # The target entropy is target_entropy, and is unchanged.
-                self.assertEqual(algo["alpha"], "auto_0.01")
-                self.assertEqual(algo["target_entropy"], base_algo["target_entropy"])
-                self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
-                self.assertEqual(algo["demonstration_steps"], steps)
-                self.assertEqual(algo.get("imitation_coef"), coef)
-                self.assertEqual(algo.get("imitation_direction"), direction)
-                # Forward KL reads the law as a point mass, so no width is set.
-                self.assertNotIn("imitation_sigma", algo)
+        for horizon, base_stem in base_stems.items():
+            stem = base_stem.replace("_temp1_", "_temp0p01_")
+            base_total, base_env, base_model, base_algo, base_log = _load(
+                f"{base_stem}_xkdemo100k"
+            )
+            self.assertEqual(base_algo["alpha"], "auto_1.0")
+            for suffix, (steps, coef, direction) in arms.items():
+                mode = stem + suffix
+                with self.subTest(mode=mode):
+                    total, env, model, algo, log = _load(mode)
+                    # auto_<init>: the initial value of the learned
+                    # temperature.  target_entropy is what it anneals
+                    # towards, and is unchanged.
+                    self.assertEqual(algo["alpha"], "auto_0.01")
+                    self.assertEqual(
+                        algo["target_entropy"], base_algo["target_entropy"]
+                    )
+                    self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
+                    self.assertEqual(algo["demonstration_steps"], steps)
+                    self.assertEqual(algo.get("imitation_coef"), coef)
+                    self.assertEqual(algo.get("imitation_direction"), direction)
+                    # Forward KL reads the law as a point mass: no width set.
+                    self.assertNotIn("imitation_sigma", algo)
 
-                # Everything else is the base arm, so any difference in
-                # outcome is attributable to the two knobs above.
-                self.assertEqual(total, base_total)
-                self.assertEqual(env, base_env)
-                self.assertEqual(model, base_model)
-                self.assertEqual(log, base_log)
-                self.assertEqual(
-                    {k: v for k, v in algo.items() if k not in varying},
-                    {k: v for k, v in base_algo.items() if k not in varying},
-                )
+                    # The r3 shaping rate and the critic discount are the same
+                    # physical lambda; CTSAC rejects a mismatch at construction.
+                    rate = expected_rates[horizon]
+                    self.assertEqual(algo["discount_rate"], rate)
+                    self.assertEqual(env["task_kwargs"]["discount_rate"], rate)
+
+                    # Everything else is that horizon's base arm, so any
+                    # difference in outcome is attributable to the knobs above.
+                    self.assertEqual(total, base_total)
+                    self.assertEqual(env, base_env)
+                    self.assertEqual(model, base_model)
+                    self.assertEqual(log, base_log)
+                    self.assertEqual(
+                        {k: v for k, v in algo.items() if k not in varying},
+                        {k: v for k, v in base_algo.items() if k not in varying},
+                    )
 
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")
