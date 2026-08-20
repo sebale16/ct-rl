@@ -726,10 +726,15 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
     def test_imitation_kl_arms_vary_only_seeding_and_the_kl_term(self):
         # The 2x2-ish design behind algorithms.ct_sac.CTSAC's imitation_coef:
         # the KL term at three seeding lengths, plus the 200k seeding on its
-        # own so the longest warm start has a matched no-KL control.  The
-        # shorter no-KL controls are the existing _xkdemo/_xkdemo20k/
-        # _xkdemo100k arms, which is why only 200k is added here.
-        stem = "xk_r3_eta0p26_fixed1ms_h10s_temp1_xkdot_q2dot4pi_logrecip"
+        # own so the longest warm start has a matched no-KL control.
+        #
+        # All four start the learned temperature at 0.01 rather than the 1.0
+        # of the _temp1 ladder they fork, so the four are matched to each
+        # other but not to the existing _xkdemo/_xkdemo20k/_xkdemo100k arms;
+        # a shorter-seeding no-KL control at this temperature would have to be
+        # added before those comparisons mean anything.
+        base_stem = "xk_r3_eta0p26_fixed1ms_h10s_temp1_xkdot_q2dot4pi_logrecip"
+        stem = base_stem.replace("_temp1_", "_temp0p01_")
         expected = {
             f"{stem}_xkkl": (0, 1.0, "forward"),
             f"{stem}_xkkl_xkdemo100k": (100_000, 1.0, "forward"),
@@ -737,9 +742,11 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
             f"{stem}_xkdemo200k": (200_000, None, None),
         }
         base_total, base_env, base_model, base_algo, base_log = _load(
-            f"{stem}_xkdemo100k"
+            f"{base_stem}_xkdemo100k"
         )
+        self.assertEqual(base_algo["alpha"], "auto_1.0")
         varying = {
+            "alpha",
             "demonstration_steps",
             "imitation_coef",
             "imitation_direction",
@@ -748,6 +755,10 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         for mode, (steps, coef, direction) in expected.items():
             with self.subTest(mode=mode):
                 total, env, model, algo, log = _load(mode)
+                # auto_<init>: the initial value of the learned temperature.
+                # The target entropy is target_entropy, and is unchanged.
+                self.assertEqual(algo["alpha"], "auto_0.01")
+                self.assertEqual(algo["target_entropy"], base_algo["target_entropy"])
                 self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
                 self.assertEqual(algo["demonstration_steps"], steps)
                 self.assertEqual(algo.get("imitation_coef"), coef)
