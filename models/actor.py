@@ -93,6 +93,14 @@ class StochasticActor(nn.Module):
         periodic_obs_indices: Optional[Sequence[int]] = None,
         squash_output: bool = True,
         device: str = "auto",
+        # Numerical rail on the spread. The defaults are the conventional SAC
+        # bounds and are inert on every run measured so far -- the learned
+        # log_std across 188 acrobot-xk checkpoints spans [-2.33, +0.08], well
+        # inside them -- so they guard against runaway rather than shape a
+        # healthy run. Tighten log_std_min only to deliberately floor the
+        # spread, e.g. against an imitation term that rewards concentration.
+        log_std_min: float = -20.0,
+        log_std_max: float = 2.0,
     ) -> None:
         super().__init__()
         self.device = (
@@ -140,6 +148,13 @@ class StochasticActor(nn.Module):
 
         self.mu = nn.Linear(last_layer_dim, action_dim)
         self.log_std = nn.Parameter(th.ones(action_dim) * log_std_init)
+        self.log_std_min = float(log_std_min)
+        self.log_std_max = float(log_std_max)
+        if not self.log_std_min < self.log_std_max:
+            raise ValueError(
+                "log_std_min must be < log_std_max, got "
+                f"({self.log_std_min}, {self.log_std_max})"
+            )
 
         # Distribution in [-1, 1]
         self.dist = (
@@ -182,8 +197,9 @@ class StochasticActor(nn.Module):
         obs_flat = self._process_obs(obs)
         features = self.body(obs_flat)
         mean = self.mu(features)
-        log_std = self.log_std.expand_as(mean)
-        # log_std = th.clamp(log_std, -20, 2)  # TODO: Clamp log_std for stability
+        log_std = th.clamp(
+            self.log_std.expand_as(mean), self.log_std_min, self.log_std_max
+        )
         act = (
             actions
             if isinstance(actions, th.Tensor)
@@ -217,7 +233,9 @@ class StochasticActor(nn.Module):
         obs_flat = self._process_obs(obs)
         features = self.body(obs_flat)
         mean = self.mu(features)
-        log_std = self.log_std.expand_as(mean)
+        log_std = th.clamp(
+            self.log_std.expand_as(mean), self.log_std_min, self.log_std_max
+        )
 
         if deterministic:
             # Use the mean action, and treat log_prob as that of the corresponding Gaussian.

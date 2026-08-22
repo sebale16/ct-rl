@@ -754,6 +754,12 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
             "imitation_coef",
             "imitation_direction",
             "imitation_sigma",
+            # Tied to demonstration_steps rather than held fixed -- see the
+            # explicit assertion below.  A seeding length longer than
+            # learning_starts would hand the actor the buffer while the
+            # controller was still driving, and the temperature ran away
+            # (train/alpha reached 1e7) on the rows where the two disagreed.
+            "learning_starts",
         }
         for horizon, base_stem in base_stems.items():
             stem = base_stem.replace("_temp1_", "_temp0p01_")
@@ -774,6 +780,13 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                     )
                     self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
                     self.assertEqual(algo["demonstration_steps"], steps)
+                    # Updates start no earlier than the seeding ends, so the
+                    # actor never trains against a buffer the controller is
+                    # still filling.  10k is the plain random-warmup floor the
+                    # unseeded arm keeps.
+                    self.assertEqual(
+                        algo["learning_starts"], max(steps, 10_000)
+                    )
                     self.assertEqual(algo.get("imitation_coef"), coef)
                     self.assertEqual(algo.get("imitation_direction"), direction)
                     # Forward KL reads the law as a point mass: no width set.

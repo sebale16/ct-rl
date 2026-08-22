@@ -49,6 +49,9 @@ class ActorQCriticModel(Model):
         pi_net_arch: Sequence[int],
         activation_fn: Type[nn.Module] = nn.ReLU,
         log_std_init: float = -0.5,
+        # Forwarded to StochasticActor; the defaults are the inert SAC rails.
+        log_std_min: float = -20.0,
+        log_std_max: float = 2.0,
         n_critics: int = 2,
         v_net_arch: Optional[Sequence[int]] = None,
         periodic_obs_indices: Optional[Sequence[int]] = None,
@@ -105,6 +108,8 @@ class ActorQCriticModel(Model):
                 net_arch=pi_net_arch,
                 activation_fn=activation_fn,
                 log_std_init=log_std_init,
+                log_std_min=log_std_min,
+                log_std_max=log_std_max,
                 periodic_obs_indices=self.periodic_obs_indices,
                 squash_output=True,
                 device=self.device,

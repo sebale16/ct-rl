@@ -276,12 +276,13 @@ class TestReanchoredTarget(unittest.TestCase):
     def test_new_options_do_not_shift_existing_positional_cadence_arguments(self):
         signature = inspect.signature(CTSAC.__init__)
         params = list(signature.parameters)
-        # Offsets are -6 from their original values: the demonstration pair,
-        # then the four imitation-KL options, were appended after
-        # reward_is_rate (see algorithms.ct_sac.CTSAC), keyword-only like the
-        # rest of this tail, so they cannot shift any positional argument.
+        # Offsets are -8 from their original values: the demonstration pair,
+        # the four imitation-KL options, and then the critic_grad_norm /
+        # alpha_min stability rails were appended after reward_is_rate (see
+        # algorithms.ct_sac.CTSAC), keyword-only like the rest of this tail,
+        # so they cannot shift any positional argument.
         self.assertEqual(
-            params[-14:-9],
+            params[-16:-11],
             [
                 "dynamics_publish_interval",
                 "dynamics_train_interval",
@@ -291,15 +292,15 @@ class TestReanchoredTarget(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            params[-9:-6],
+            params[-11:-8],
             ["discount_rate", "target_reference_dt", "reward_is_rate"],
         )
         self.assertEqual(
-            params[-6:-4],
+            params[-8:-6],
             ["demonstration_policy", "demonstration_steps"],
         )
         self.assertEqual(
-            params[-4:],
+            params[-6:-2],
             [
                 "imitation_coef",
                 "imitation_direction",
@@ -307,7 +308,8 @@ class TestReanchoredTarget(unittest.TestCase):
                 "imitation_policy",
             ],
         )
-        for name in params[-9:]:
+        self.assertEqual(params[-2:], ["critic_grad_norm", "alpha_min"])
+        for name in params[-11:]:
             self.assertEqual(
                 signature.parameters[name].kind,
                 inspect.Parameter.KEYWORD_ONLY,

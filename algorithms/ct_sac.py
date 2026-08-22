@@ -351,6 +351,16 @@ class CTSAC(OffPolicyAlgorithm):
         imitation_direction: str = "forward",
         imitation_sigma: float = 0.1,
         imitation_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        # Global-norm clip on the critic gradient. ``0`` (the default) leaves the
+        # update unclipped, preserving the historical behaviour of every row that
+        # does not set it. The pre-clip norm is logged either way, so a run can
+        # measure whether the critic gradient is running away before choosing a
+        # bound.
+        critic_grad_norm: float = 0.0,
+        # Lower bound on the learned entropy temperature. ``0`` (the default)
+        # leaves the dual unbounded, preserving the behaviour of every row that
+        # does not set it. See the clamp site in ``train`` for why it matters.
+        alpha_min: float = 0.0,
     ) -> None:
         if gamma is not None and discount_rate is not None:
             raise ValueError(
@@ -748,6 +758,19 @@ class CTSAC(OffPolicyAlgorithm):
             raise ValueError(
                 f"imitation_coef must be finite and >= 0, got {imitation_coef!r}"
             )
+        self.critic_grad_norm = float(critic_grad_norm)
+        if not np.isfinite(self.critic_grad_norm) or self.critic_grad_norm < 0.0:
+            raise ValueError(
+                f"critic_grad_norm must be finite and >= 0, got {critic_grad_norm!r}"
+            )
+        self.alpha_min = float(alpha_min)
+        if not np.isfinite(self.alpha_min) or self.alpha_min < 0.0:
+            raise ValueError(
+                f"alpha_min must be finite and >= 0, got {alpha_min!r}"
+            )
+        self._log_alpha_min = (
+            float(np.log(self.alpha_min)) if self.alpha_min > 0.0 else None
+        )
         self.imitation_direction = str(imitation_direction).strip().lower()
         if self.imitation_direction not in IMITATION_DIRECTIONS:
             raise ValueError(
@@ -1264,6 +1287,18 @@ class CTSAC(OffPolicyAlgorithm):
                 self.alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 self.alpha_optimizer.step()
+                # Anti-windup on the entropy dual. While the entropy constraint
+                # is slack the dual correctly drives alpha toward zero, and
+                # nothing stops it: measured runs reach 1e-17, from which
+                # climbing back to a useful 1e-2 costs ~1e5 Adam steps at this
+                # learning rate. If the constraint later becomes active -- as it
+                # does once an imitation term presses actions toward the tanh
+                # boundary -- the multiplier has no authority left when it is
+                # finally needed. Flooring log_alpha keeps that recovery within
+                # ~1e4 steps. Off at alpha_min=0.0.
+                if self._log_alpha_min is not None:
+                    with th.no_grad():
+                        self.log_alpha.clamp_(min=self._log_alpha_min)
                 self.logger.record("train/alpha_loss", alpha_loss.item())
 
             ## Dynamics model update (learned port-Hamiltonian, fit from transitions)
@@ -1397,6 +1432,31 @@ class CTSAC(OffPolicyAlgorithm):
 
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
+            # Report the pre-clip critic gradient norm on every row, clipped or
+            # not: it is what separates a diverging critic from a merely
+            # large-valued one, and an unclipped run needs it to choose a bound.
+            if self.critic_grad_norm > 0.0:
+                critic_grad_norm = th.nn.utils.clip_grad_norm_(
+                    self.model.critic_parameters, self.critic_grad_norm
+                )
+            else:
+                # Measurement only -- deliberately not routed through
+                # clip_grad_norm_, whose clip coefficient is inf/inf = NaN at an
+                # infinite max_norm once the norm itself goes non-finite, which
+                # would rescale the very gradients this branch must leave alone.
+                grads = [
+                    p.grad.detach()
+                    for p in self.model.critic_parameters
+                    if p.grad is not None
+                ]
+                critic_grad_norm = (
+                    th.norm(th.stack([th.norm(g) for g in grads]))
+                    if grads
+                    else th.zeros(())
+                )
+            self.logger.record(
+                "train/critic_grad_norm", float(critic_grad_norm.item())
+            )
             self.critic_optimizer.step()
 
             ## Actor update
