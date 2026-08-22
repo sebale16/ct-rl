@@ -802,7 +802,9 @@ class DMCContinuousEnv(ContinuousEnv):
         # on the terminal transition and frozen over that remainder.  The
         # learner applies its physical discount rate analytically.
         termination_reason = getattr(task, "last_termination_reason", None)
-        if termination_reason is not None:
+        if termination_reason is not None and getattr(
+            task, "cap_terminal_penalty", True
+        ):
             if self.episode_duration is None:
                 raise RuntimeError(
                     "Acrobot-XK cap failures require a finite "

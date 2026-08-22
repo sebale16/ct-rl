@@ -600,8 +600,17 @@ class BalanceXK(suite_base.Task):
         elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
         elbow_rate_limit: float = ELBOW_RATE_LIMIT,
         shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
+        cap_terminal_penalty: bool = True,
     ) -> None:
         super().__init__(random=random)
+        # When True (default), a state-cap crossing freezes the reward at the
+        # conservative reward-rate lower envelope and CT-SAC analytically
+        # sums that frozen rate over the unexecuted episode remainder (see
+        # DMCContinuousEnv._step_physics_unlocked). When False, a cap simply
+        # ends the episode at the live, actually-computed reward for the
+        # terminal state -- an ordinary termination with no absorbing
+        # continuation, no bootstrap.
+        self.cap_terminal_penalty = bool(cap_terminal_penalty)
         self.angle_noise = float(angle_noise)
         self.velocity_noise = float(velocity_noise)
         if not np.isfinite(self.angle_noise) or self.angle_noise < 0.0:
@@ -1107,6 +1116,7 @@ def swingup_xk(
     elbow_angle_limit: float = ELBOW_ANGLE_LIMIT,
     elbow_rate_limit: float = ELBOW_RATE_LIMIT,
     shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
+    cap_terminal_penalty: bool = True,
 ):
     """Construct ``acrobot-swingup-xk``.
 
@@ -1124,11 +1134,14 @@ def swingup_xk(
     actual action-dependent derivative or the counterfactual Xin--Kaneda
     closed-loop surrogate.  ``reward_transform="log_reciprocal"`` applies
     ``log(1 / -r)`` with a finite numerical floor.  The three state limits are
-    instance kwargs.  A cap
+    instance kwargs.  By default (``cap_terminal_penalty=True``), a cap
     crossing emits the selected reward's finite lower envelope as the terminal
     reward -- the minimum reward attainable anywhere in the capped state/action
     closure -- and freezes that rate so CT-SAC sums it over the unexecuted
-    episode remainder.
+    episode remainder.  With ``cap_terminal_penalty=False``, a cap crossing
+    is instead an ordinary termination: the episode simply ends there, using
+    the live, actually-computed reward for that terminal state (no penalty
+    override, no analytical continuation).
     """
     physics = mujoco.Physics.from_xml_string(
         _model_xml(damping, torque_limit), common.ASSETS
@@ -1155,6 +1168,7 @@ def swingup_xk(
         elbow_angle_limit=elbow_angle_limit,
         elbow_rate_limit=elbow_rate_limit,
         shoulder_rate_scale_limit=shoulder_rate_scale_limit,
+        cap_terminal_penalty=cap_terminal_penalty,
     )
     return control.Environment(
         physics,

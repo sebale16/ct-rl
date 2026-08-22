@@ -164,6 +164,7 @@ ACROBOT_XK_TERMINATION_TASK_KEYS = (
     "elbow_angle_limit",
     "elbow_rate_limit",
     "shoulder_rate_scale_limit",
+    "cap_terminal_penalty",
 )
 
 
