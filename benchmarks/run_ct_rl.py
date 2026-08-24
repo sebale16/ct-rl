@@ -201,6 +201,17 @@ def _align_acrobot_xk_eval_termination_limits(
         if key in train_task
     }
     aligned = dict(eval_env_kwargs)
+    # Evaluate at the control rate the policy was trained at.  The eval config
+    # comes from the fixed xk_eval row, which is written at dt=1ms; a policy
+    # trained at a coarser control interval would otherwise be asked to act
+    # 10x more often at evaluation than it ever did in training, which is not
+    # the same policy.  Physics resolution and the 20 s episode are carried
+    # across too so the protocol differs only in the start distribution.
+    # NOTE: this changes evaluation for the 16 existing rows written at
+    # dt=0.01/0.0005, which were previously evaluated at 1ms regardless.
+    for _timing_key in ("dt", "physics_dt", "max_steps", "episode_duration"):
+        if _timing_key in train_env_kwargs:
+            aligned[_timing_key] = train_env_kwargs[_timing_key]
     eval_task = dict(aligned.get("task_kwargs", {}) or {})
     eval_task.update(
         uniform_start=False,
