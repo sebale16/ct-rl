@@ -52,6 +52,12 @@ _COUNTER_ATTRS = (
     "_value_updates",
     "_dynamics_updates",
     "alpha",
+    # guarded-pipeline counters (structured/learned modes only; saved iff present)
+    # so guard-hit rates are inspectable from the checkpoint's train_state.pt.
+    "_dynamics_fit_rejections",
+    "_dynamics_publish_rejections",
+    "_dynamics_rollbacks",
+    "_last_dynamics_rejection_reason",
 )
 
 _MODEL_NAME = "model.pth"

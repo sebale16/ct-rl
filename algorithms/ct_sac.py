@@ -351,6 +351,16 @@ class CTSAC(OffPolicyAlgorithm):
         imitation_direction: str = "forward",
         imitation_sigma: float = 0.1,
         imitation_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        # Optional linear anneal of the imitation weight, so the law can guide
+        # the actor early and then hand back control.  ``imitation_coef`` is the
+        # starting weight and ``imitation_coef_final`` the one reached after
+        # ``imitation_anneal_steps`` environment steps of training (measured
+        # from ``learning_starts``, i.e. from when the actor first updates, not
+        # from step 0 -- a seeded run spends its whole warm start with no actor
+        # gradient at all).  Leaving ``imitation_coef_final`` unset keeps the
+        # weight constant, as every row that predates this did.
+        imitation_coef_final: Optional[float] = None,
+        imitation_anneal_steps: int = 0,
         # Global-norm clip on the critic gradient. ``0`` (the default) leaves the
         # update unclipped, preserving the historical behaviour of every row that
         # does not set it. The pre-clip norm is logged either way, so a run can
@@ -782,11 +792,35 @@ class CTSAC(OffPolicyAlgorithm):
             raise ValueError(
                 f"imitation_sigma must be finite and > 0, got {imitation_sigma!r}"
             )
+        self.imitation_anneal_steps = int(imitation_anneal_steps)
+        if self.imitation_anneal_steps < 0:
+            raise ValueError(
+                "imitation_anneal_steps must be >= 0, got "
+                f"{imitation_anneal_steps!r}"
+            )
+        self.imitation_coef_final = (
+            None if imitation_coef_final is None else float(imitation_coef_final)
+        )
+        if self.imitation_coef_final is not None:
+            if (
+                not np.isfinite(self.imitation_coef_final)
+                or self.imitation_coef_final < 0.0
+            ):
+                raise ValueError(
+                    "imitation_coef_final must be finite and >= 0, got "
+                    f"{imitation_coef_final!r}"
+                )
+            if self.imitation_anneal_steps <= 0:
+                raise ValueError(
+                    "imitation_coef_final needs imitation_anneal_steps > 0; "
+                    "an anneal with no length is ambiguous"
+                )
         self.imitation_policy = (
             demonstration_policy if imitation_policy is None else imitation_policy
         )
         self._imitation_expert = None
-        if self.imitation_coef > 0.0:
+        # An anneal that starts at zero still needs the law wired up.
+        if self.imitation_coef > 0.0 or (self.imitation_coef_final or 0.0) > 0.0:
             if self.imitation_policy is None:
                 raise ValueError(
                     "imitation_coef > 0 needs a control law to imitate; pass "
@@ -1465,12 +1499,16 @@ class CTSAC(OffPolicyAlgorithm):
 
             # Re-use actions_pi, log_prob_pi from above
             q_values_pi = self.model.min_q(obs, actions_pi)
-            actor_loss = (alpha_tensor * log_prob_pi - q_values_pi).mean()
+            actor_loss = (
+                self._entropy_price(alpha_tensor) * log_prob_pi - q_values_pi
+            ).mean()
 
             if self._imitation_expert is not None:
+                imitation_coef = self._current_imitation_coef()
+                self.logger.record("train/imitation_coef", imitation_coef)
                 imitation_loss = self._imitation_loss(obs, actions_pi, log_prob_pi)
                 if imitation_loss is not None:
-                    actor_loss = actor_loss + self.imitation_coef * imitation_loss
+                    actor_loss = actor_loss + imitation_coef * imitation_loss
 
             self.logger.record("train/actor_loss", actor_loss.item())
 
@@ -1490,6 +1528,25 @@ class CTSAC(OffPolicyAlgorithm):
         self.logger.record("train/n_updates", self._n_updates)
 
     # ------------------------ Imitation term ------------------------
+
+    def _current_imitation_coef(self) -> float:
+        """Imitation weight for this update, after any anneal.
+
+        Linear from ``imitation_coef`` to ``imitation_coef_final`` over
+        ``imitation_anneal_steps`` environment steps, starting once updates do
+        (``learning_starts``) and held at the final value afterwards.  Reading
+        the clock off ``num_timesteps`` -- which the checkpoint carries -- keeps
+        the schedule continuous across a resumed chunk instead of restarting it.
+        """
+        if self.imitation_coef_final is None or self.imitation_anneal_steps <= 0:
+            return self.imitation_coef
+        elapsed = self.num_timesteps - self.learning_starts
+        if elapsed <= 0:
+            return self.imitation_coef
+        frac = min(1.0, elapsed / float(self.imitation_anneal_steps))
+        return self.imitation_coef + frac * (
+            self.imitation_coef_final - self.imitation_coef
+        )
 
     def _imitation_loss(
         self,
@@ -1755,7 +1812,7 @@ class CTSAC(OffPolicyAlgorithm):
         obs_rep = obs.repeat_interleave(n, dim=0)  # (B*N, O)
         actions, log_prob = self.model.act(obs_rep, deterministic=deterministic)
         q_min = self.model.target_min_q(obs_rep, actions)  # (B*N, 1)
-        q_tilde = q_min - alpha_tensor * log_prob  # (B*N, 1)
+        q_tilde = q_min - self._entropy_price(alpha_tensor) * log_prob  # (B*N, 1)
         q_tilde = q_tilde.view(obs.shape[0], n, 1).mean(dim=1)  # (B, 1)
         return q_tilde
 
@@ -1784,6 +1841,28 @@ class CTSAC(OffPolicyAlgorithm):
                 dones,
                 dt,
             )
+
+    def _entropy_price(self, alpha_tensor: th.Tensor) -> th.Tensor:
+        """``alpha`` converted to one target-reference interval.
+
+        The soft Bellman target accumulates reward and entropy over the same
+        interval, so both enter as amounts: ``T r + T alpha H``.  A reward
+        exposed as a physical rate already gets its ``T`` from
+        ``_target_reward_term``; ``alpha`` is the matching price per second and
+        needs the same factor.  Without it the entropy term is over-weighted by
+        ``1/T`` -- a thousandfold at a 1 ms control step -- which is why the
+        temperatures that leave the critic inside its physically admissible
+        range here are ``~2e-4``, exactly a conventional ``0.2`` divided by
+        ``T``.  Above ``alpha ~ 0.0138`` the ``alpha log pi`` term, amplified by
+        ``1/(1 - exp(-lambda T))``, pushes ``|Q|`` past the range the reward can
+        physically produce, whatever the discount horizon.
+
+        Environments whose reward is already an interval amount are left alone:
+        there both terms are per-interval and the pair is already consistent.
+        """
+        if not self.reward_is_rate:
+            return alpha_tensor
+        return alpha_tensor * self.target_reference_dt
 
     def _target_reward_term(self, rewards: th.Tensor) -> th.Tensor:
         """Convert configured rewards to one target-reference-interval.
