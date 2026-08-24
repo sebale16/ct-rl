@@ -809,6 +809,43 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                         {k: v for k, v in base_algo.items() if k not in varying},
                     )
 
+    def test_annealed_mean_mse_arms_bootstrap_then_release_the_actor(self):
+        """The mean-MSE arms share one schedule and one target timescale.
+
+        Both floors anneal over the same 600k window opening at
+        ``learning_starts``, so they reach it at 800k of a 2M run and differ
+        only in where they land -- 0.0 releases the actor entirely, 0.5 keeps
+        the law engaged.  ``tau`` is 1.25e-3 at ``train_freq=1`` so that
+        ``T_target = dt / (tau * updates_per_env_step)`` is 0.80 s, matching
+        every other arm since the dtscale sweep rather than the 0.20 s that
+        tau=5e-3 would give at this update ratio.
+        """
+        stem = "_fixed1ms_{h}_temp0p01_xkdot_q2dot4pi_logrecip_xkmse_xkdemo200k_tau1p25e3_"
+        cases = (
+            ("xk_r3_eta0p23" + stem.format(h="h2s") + "anneal0span600k", 0.0),
+            ("xk_r3_eta0p23" + stem.format(h="h2s") + "anneal0p5span600k", 0.5),
+            ("xk_r3_eta0p26" + stem.format(h="h10s") + "anneal0span600k", 0.0),
+        )
+        for mode, floor in cases:
+            with self.subTest(mode=mode):
+                total, env, _, algo, _ = _load(mode)
+                self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
+                self.assertEqual(algo["demonstration_steps"], 200_000)
+                self.assertEqual(algo["learning_starts"], 200_000)
+                self.assertEqual(algo["imitation_coef"], 1.0)
+                self.assertEqual(algo["imitation_loss_type"], "mean_mse")
+                self.assertEqual(total, 2_000_000)
+                # Either spelling of the schedule resolves to the same curve.
+                if floor == 0.0:
+                    self.assertEqual(algo["imitation_decay_steps"], 600_000)
+                else:
+                    self.assertEqual(algo["imitation_coef_final"], floor)
+                    self.assertEqual(algo["imitation_anneal_steps"], 600_000)
+                updates_per_step = 1.0 / algo["train_freq"]
+                self.assertAlmostEqual(
+                    env["dt"] / (algo["tau"] * updates_per_step), 0.80, places=6
+                )
+
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")
         self.assertEqual(train["time_sampling"], "irregular")
