@@ -304,6 +304,8 @@ class TestImitationKL(unittest.TestCase):
     def test_off_by_default(self):
         agent = self._agent()
         self.assertEqual(agent.imitation_coef, 0.0)
+        self.assertEqual(agent.imitation_loss_type, "kl")
+        self.assertEqual(agent.imitation_decay_steps, 0)
         self.assertIsNone(agent._imitation_expert)
 
     def test_defaults_to_imitating_the_demonstration_policy(self):
@@ -340,10 +342,51 @@ class TestImitationKL(unittest.TestCase):
             {"imitation_coef": 1.0, "imitation_direction": "sideways"},
             {"imitation_coef": 1.0, "imitation_sigma": 0.0},
             {"imitation_coef": 1.0, "imitation_sigma": -0.5},
+            {"imitation_coef": 1.0, "imitation_loss_type": "cosine"},
+            {"imitation_coef": 1.0, "imitation_decay_steps": -1},
         ):
             with self.subTest(**kwargs):
                 with self.assertRaises(ValueError):
                     self._agent(imitation_policy=expert, **kwargs)
+
+    def test_mean_mse_pulls_the_mean_without_a_log_std_gradient(self):
+        agent = self._agent(
+            imitation_policy=_BatchExpert(self.expert_action),
+            imitation_coef=1.0,
+            imitation_loss_type="mean_mse",
+        )
+        obs = th.as_tensor(
+            np.stack([self.env.reset()[0] for _ in range(8)]), dtype=th.float32
+        )
+        actions_pi, log_prob_pi, _ = agent.model.actor(obs)
+        loss = agent._imitation_loss(obs, actions_pi, log_prob_pi)
+        self.assertIsNotNone(loss)
+        agent.actor_optimizer.zero_grad()
+        loss.backward()
+        self.assertIsNotNone(agent.model.actor.mu.weight.grad)
+        log_std_grad = agent.model.actor.log_std.grad
+        self.assertTrue(
+            log_std_grad is None or bool(th.all(log_std_grad == 0.0))
+        )
+
+    def test_imitation_coefficient_decays_after_learning_starts(self):
+        agent = self._agent(
+            imitation_policy=_BatchExpert(self.expert_action),
+            imitation_coef=2.0,
+            imitation_loss_type="mean_mse",
+            imitation_decay_steps=100,
+        )
+        expected = {
+            agent.learning_starts - 1: 2.0,
+            agent.learning_starts: 2.0,
+            agent.learning_starts + 25: 1.5,
+            agent.learning_starts + 100: 0.0,
+            agent.learning_starts + 150: 0.0,
+        }
+        for timestep, coefficient in expected.items():
+            with self.subTest(timestep=timestep):
+                agent.num_timesteps = timestep
+                self.assertAlmostEqual(agent._current_imitation_coef(), coefficient)
 
     def test_both_directions_pull_the_policy_towards_the_law(self):
         baseline = self._agent()

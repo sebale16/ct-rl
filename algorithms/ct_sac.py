@@ -25,6 +25,7 @@ from models.port_hamiltonian import FlowIntegrationError, integrate_drift
 #: law smeared into a Gaussian of width ``imitation_sigma`` -- mode-seeking, and
 #: it re-weights the policy's own entropy on top of the SAC term.
 IMITATION_DIRECTIONS = ("forward", "reverse")
+IMITATION_LOSS_TYPES = ("kl", "mean_mse")
 
 
 class ModelBasedTargetNumericalError(RuntimeError):
@@ -268,17 +269,24 @@ class CTSAC(OffPolicyAlgorithm):
     selected via ``algo_demonstration_controller=xin_kaneda`` in the
     hyperparameter table).
 
-    ``imitation_coef > 0`` adds a KL between the policy and that same control
-    law to the actor loss, evaluated on the replayed states of every gradient
-    step rather than only during the warm start:
+    ``imitation_coef > 0`` adds an imitation loss between the policy and that
+    same control law, evaluated on the replayed states of every gradient step
+    rather than only during the warm start.  The default is the historical KL:
 
         actor_loss = alpha log pi - Q + imitation_coef * KL(pi_theta, pi_E)
 
-    with :data:`IMITATION_DIRECTIONS` choosing which KL.  The law is read from
-    ``imitation_policy``, defaulting to ``demonstration_policy``, and must offer
-    a batched ``actions(obs)``.  Seeding and imitation are independent knobs:
-    ``demonstration_steps=0`` with ``imitation_coef>0`` distills the law without
-    ever handing it the environment.
+    with :data:`IMITATION_DIRECTIONS` choosing which KL.  Alternatively,
+    ``imitation_loss_type="mean_mse"`` penalizes only the squared gap between
+    the actor's deterministic mean action and the law.  It therefore leaves
+    the actor's exploration variance to SAC.  ``imitation_decay_steps > 0``
+    linearly anneals the coefficient to zero over that many environment
+    transitions, starting at the first actor update after ``learning_starts``.
+
+    The law is read from ``imitation_policy``, defaulting to
+    ``demonstration_policy``, and must offer a batched ``actions(obs)``.
+    Seeding and imitation are independent knobs: ``demonstration_steps=0``
+    with ``imitation_coef>0`` distills the law without ever handing it the
+    environment.
     """
 
     def __init__(
@@ -344,12 +352,14 @@ class CTSAC(OffPolicyAlgorithm):
         # replay buffer starts from states that law actually reaches.
         demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         demonstration_steps: Optional[int] = None,
-        # Imitation (KL to an analytical controller): an extra actor-loss term
-        # pulling pi_theta towards a known control law on replayed states.
+        # Imitation: a KL or mean-action MSE actor-loss term pulling pi_theta
+        # towards a known control law on replayed states.
         # Off at imitation_coef=0.
         imitation_coef: float = 0.0,
         imitation_direction: str = "forward",
         imitation_sigma: float = 0.1,
+        imitation_loss_type: str = "kl",
+        imitation_decay_steps: int = 0,
         imitation_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         # Global-norm clip on the critic gradient. ``0`` (the default) leaves the
         # update unclipped, preserving the historical behaviour of every row that
@@ -747,16 +757,27 @@ class CTSAC(OffPolicyAlgorithm):
                 f"{demonstration_steps!r}"
             )
 
-        # Imitation term: a KL between the policy and an analytical control law
-        # on replayed states, added to the actor loss.  Unlike the demonstration
-        # warm start -- which only decides which states get written into the
-        # buffer, and stops entirely at demonstration_steps -- this shapes the
-        # actor's gradient on every update, for the whole run.  The two are
-        # independent: either can run without the other.
+        # Imitation term between the policy and an analytical control law on
+        # replayed states. Unlike the demonstration warm start -- which only
+        # decides which states get written into the buffer -- this shapes actor
+        # gradients. It lasts for the whole run by default or can be annealed;
+        # seeding and imitation remain independent.
         self.imitation_coef = float(imitation_coef)
         if not np.isfinite(self.imitation_coef) or self.imitation_coef < 0.0:
             raise ValueError(
                 f"imitation_coef must be finite and >= 0, got {imitation_coef!r}"
+            )
+        self.imitation_loss_type = str(imitation_loss_type).strip().lower()
+        if self.imitation_loss_type not in IMITATION_LOSS_TYPES:
+            raise ValueError(
+                f"imitation_loss_type must be one of {IMITATION_LOSS_TYPES}, got "
+                f"{imitation_loss_type!r}"
+            )
+        self.imitation_decay_steps = int(imitation_decay_steps)
+        if self.imitation_decay_steps < 0:
+            raise ValueError(
+                "imitation_decay_steps must be non-negative, got "
+                f"{imitation_decay_steps!r}"
             )
         self.critic_grad_norm = float(critic_grad_norm)
         if not np.isfinite(self.critic_grad_norm) or self.critic_grad_norm < 0.0:
@@ -805,8 +826,7 @@ class CTSAC(OffPolicyAlgorithm):
             self._imitation_expert = batched
             if getattr(self.model, "deterministic_policy", False):
                 raise ValueError(
-                    "imitation_coef > 0 requires a stochastic policy: both KL "
-                    "directions are defined through pi_theta's density."
+                    "imitation_coef > 0 requires CT-SAC's stochastic policy."
                 )
 
         # For logging how many gradient updates we’ve done
@@ -1467,10 +1487,12 @@ class CTSAC(OffPolicyAlgorithm):
             q_values_pi = self.model.min_q(obs, actions_pi)
             actor_loss = (alpha_tensor * log_prob_pi - q_values_pi).mean()
 
-            if self._imitation_expert is not None:
+            imitation_coef = self._current_imitation_coef()
+            self.logger.record("train/imitation_coef", imitation_coef)
+            if self._imitation_expert is not None and imitation_coef > 0.0:
                 imitation_loss = self._imitation_loss(obs, actions_pi, log_prob_pi)
                 if imitation_loss is not None:
-                    actor_loss = actor_loss + self.imitation_coef * imitation_loss
+                    actor_loss = actor_loss + imitation_coef * imitation_loss
 
             self.logger.record("train/actor_loss", actor_loss.item())
 
@@ -1491,13 +1513,26 @@ class CTSAC(OffPolicyAlgorithm):
 
     # ------------------------ Imitation term ------------------------
 
+    def _current_imitation_coef(self) -> float:
+        """Coefficient at the current environment timestep.
+
+        Decay starts when actor training can first begin rather than at reset,
+        so a demonstration replay warm start does not silently use up the
+        imitation window before there has been an actor gradient.
+        """
+        if self.imitation_coef == 0.0 or self.imitation_decay_steps == 0:
+            return self.imitation_coef
+        elapsed = max(0, self.num_timesteps - self.learning_starts)
+        remaining = max(0.0, 1.0 - elapsed / self.imitation_decay_steps)
+        return self.imitation_coef * remaining
+
     def _imitation_loss(
         self,
         obs: th.Tensor,
         actions_pi: th.Tensor,
         log_prob_pi: th.Tensor,
     ) -> Optional[th.Tensor]:
-        """KL between the policy and the analytical law on this minibatch.
+        """Imitation loss between the policy and law on this minibatch.
 
         ``forward`` reads the law as a point mass a*(x), so
         ``KL(pi_E || pi_theta) = -log pi_theta(a*(x) | x)`` up to a constant in
@@ -1506,6 +1541,10 @@ class CTSAC(OffPolicyAlgorithm):
         ``KL(pi_theta || pi_E) = E_pi[log pi_theta(a)] + E_pi[|a - a*|^2] /
         (2 sigma^2)``, again up to a constant, differentiated through the same
         reparameterized sample the SAC term uses.
+
+        ``mean_mse`` compares the actor's deterministic, tanh-squashed mean
+        action with the law.  It does not depend on the actor's log standard
+        deviation, leaving SAC alone to choose the exploration entropy.
 
         A control law need not be defined everywhere the replay buffer has been
         -- the Xin-Kaneda law is singular where ``k_D M11 + (E - E_r) det M``
@@ -1536,12 +1575,18 @@ class CTSAC(OffPolicyAlgorithm):
 
         obs_ok = obs[defined]
         expert_ok = expert[defined]
+        if self.imitation_loss_type == "mean_mse":
+            imitation_actions, _, _ = self.model.actor(obs_ok, deterministic=True)
+        else:
+            imitation_actions = actions_pi[defined]
         self.logger.record(
             "train/imitation_action_gap",
-            float((actions_pi[defined] - expert_ok).abs().mean().item()),
+            float((imitation_actions - expert_ok).abs().mean().item()),
         )
 
-        if self.imitation_direction == "forward":
+        if self.imitation_loss_type == "mean_mse":
+            loss = F.mse_loss(imitation_actions, expert_ok)
+        elif self.imitation_direction == "forward":
             loss = -self.model.actor.log_prob(obs_ok, expert_ok).mean()
         else:
             gap = actions_pi[defined] - expert_ok

@@ -809,6 +809,23 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                         {k: v for k, v in base_algo.items() if k not in varying},
                     )
 
+    def test_annealed_mean_mse_arms_bootstrap_then_release_the_actor(self):
+        modes = (
+            "xk_r3_eta0p23_fixed1ms_h2s_temp0p01_xkdot_q2dot4pi_"
+            "logrecip_xkmseanneal200k_xkdemo200k_tau5e3",
+            "xk_r3_eta0p26_fixed1ms_h10s_temp0p01_xkdot_q2dot4pi_"
+            "logrecip_xkmseanneal200k_xkdemo200k_tau5e3",
+        )
+        for mode in modes:
+            with self.subTest(mode=mode):
+                _, _, _, algo, _ = _load(mode)
+                self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
+                self.assertEqual(algo["demonstration_steps"], 200_000)
+                self.assertEqual(algo["learning_starts"], 200_000)
+                self.assertEqual(algo["imitation_coef"], 1.0)
+                self.assertEqual(algo["imitation_loss_type"], "mean_mse")
+                self.assertEqual(algo["imitation_decay_steps"], 200_000)
+
     def test_training_and_evaluation_timing_contracts(self):
         _, train, train_model, train_algo, train_log = _load("xk_r0")
         self.assertEqual(train["time_sampling"], "irregular")
