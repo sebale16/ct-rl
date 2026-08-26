@@ -61,89 +61,69 @@ because $s_1', s_2' \to s$ together. Measured directly on this task (analytical 
 |---|---|
 | change in joint angle | $\sim 2\times10^{-5}\ \text{rad}$ |
 | change in joint velocity | $\sim 0.07\ \text{rad/s}$ |
-| resulting change in $V^\pi$ | $95\%\ \text{CI} = [-0.016,\ +0.013]$ — indistinguishable from 0 |
+| resulting change in $V^\pi$ | $-0.018$, $95\%\ \text{CI} = [-0.025,\ -0.011]$ (see §5) |
 
-So at $dt = 1\ \text{ms}$, $Q(s,a_1) - Q(s,a_2)$ is dominated by noise. Both terms — immediate and future — are close to zero.
+So at $dt = 1\ \text{ms}$ both terms of $Q(s,a_1) - Q(s,a_2)$ are tiny: the immediate term because it is multiplied by $dt$, the future term because it evaluates the same $V^\pi$ at two states $0.07\ \text{rad/s}$ apart. Section 5 measures how tiny, and against what.
 
-## 5. What "indistinguishable from zero" means here
+## 5. How small is "small"? Measuring the one-step advantage properly
 
-That claim is doing real work in the argument, so it is worth stating precisely.
+That bound is doing real work in the argument, so it is worth measuring rather than asserting.
 
-The measurement takes $n = 20$ in-tube states $s_1,\dots,s_n$ and, for each, computes
+The measurement takes $n$ in-tube states $s_1,\dots,s_n$ and, for each, computes
 
 $$
 A_i \;=\; G\big(\text{deviate at } s_i \text{ for one step, then follow } \pi\big) \;-\; G\big(\text{follow } \pi \text{ throughout}\big)
 $$
 
-where $G$ is the discounted return over a 2 s horizon. Both the dynamics and the controller are deterministic, so **each $A_i$ is an exact number, not a noisy estimate.** There is no measurement error anywhere in this.
-
-The quantity being estimated is therefore the mean advantage over the distribution of in-tube states,
+where $G$ is the discounted return over a 2 s horizon. Both the dynamics and the controller are deterministic, so **each $A_i$ is an exact number, not a noisy estimate.** There is no measurement error anywhere in this. The quantity being estimated is the mean advantage over the distribution of in-tube states,
 
 $$
 \mu \;=\; \mathbb{E}_{s \sim \rho_{\text{tube}}}\big[A(s)\big],
-$$
-
-and the usual estimator and its spread are
-
-$$
+\qquad
 \bar{A} = \frac{1}{n}\sum_{i=1}^{n} A_i,
 \qquad
-s^2 = \frac{1}{n-1}\sum_{i=1}^{n}\big(A_i - \bar{A}\big)^2,
+\mathrm{SE} = \frac{s}{\sqrt{n}},
 \qquad
-\mathrm{SE} = \frac{s}{\sqrt{n}}.
+t = \frac{\bar{A}}{\mathrm{SE}}.
 $$
 
-For the 1 ms measurement:
+A first pass at $n = 20$, drawn from a single evaluation episode, could not separate $\mu$ from zero:
 
 $$
-\bar{A} = -0.00532, \qquad s = 0.0241, \qquad \mathrm{SE} = 0.00539, \qquad n = 20.
+\bar{A} = -0.00532,\quad s = 0.0241,\quad \mathrm{SE} = 0.00539,\quad |t| = 0.99 \;<\; t_{0.975,19} = 2.09,
 $$
 
-Testing $H_0: \mu = 0$ gives
+giving a 95% interval $[-0.0159,\,+0.0053]$ that contains zero. Since $\mathrm{SE}$ falls as $1/\sqrt{n}$, resolving an effect of that size at $|t| = 3$ needs roughly $n \geq (3s/\bar{A})^2 \approx 185$ states. Running exactly that, pooled across four protocol episodes so the sample spans the tube rather than one trajectory through it:
 
 $$
-t \;=\; \frac{\bar{A}}{\mathrm{SE}} \;=\; \frac{-0.00532}{0.00539} \;=\; -0.99,
-\qquad
-t_{0.975,\,19} = 2.09,
+\bar{A} = -0.01766,\quad s = 0.04783,\quad \mathrm{SE} = 0.00352,\quad |t| = 5.02 \;>\; t_{0.975,184} = 1.97,
 $$
 
-so $|t| < t_{0.975,19}$ and $H_0$ is not rejected. Equivalently, the 95% confidence interval
-
 $$
-\bar{A} \pm t_{0.975,\,19}\cdot \mathrm{SE} \;=\; [-0.0159,\ +0.0053]
+\text{95\% CI} = [-0.0246,\ -0.0107].
 $$
 
-contains zero.
+**The one-step advantage is real and negative.** It is not zero. The small sample understated it by a factor of three and, with less than half the spread, was unrepresentative as well as underpowered — the wider pool reveals $s = 0.0478$ against $0.0241$.
 
-**What this does not say.** It does not say $\mu = 0$. Failing to reject a null is not evidence for it. What the interval provides is an *upper bound*: with 95% confidence, $|\mu| < 0.016$.
-
-**Where the spread comes from.** Since each $A_i$ is exact, $s = 0.0241$ is not noise — it is genuine heterogeneity across the tube. At some in-tube states the deviation happens to push in the direction the controller was already going and helps; at others it hurts. The mean displacement is about a fifth of the spread, so both signs occur across the tube — in a separate 12-state run where the individual values were recorded, six of twelve came out positive. In effect-size terms,
+**The spread is not noise.** Since each $A_i$ is exact, $s = 0.0478$ is genuine heterogeneity across the tube: at some in-tube states the deviation pushes in the direction the controller was already going and helps, at others it hurts. Even at $n = 185$, **75 of 185 come out positive**. The effect size
 
 $$
-d \;=\; \frac{\bar{A}}{s} \;=\; \frac{-0.00532}{0.0241} \;=\; -0.22,
+d \;=\; \frac{\bar{A}}{s} \;=\; \frac{-0.01766}{0.04783} \;=\; -0.37
 $$
 
-a small mean displacement relative to the state-to-state variation it sits inside.
+is a modest mean displacement inside a much larger state-to-state variation. This is why the sign of a single one-step comparison is close to a coin flip even though the mean is now firmly established.
 
-**What it would take to resolve.** Since $\mathrm{SE}$ falls as $1/\sqrt{n}$, reaching $|t| = 3$ at the observed effect size needs
-
-$$
-n \;\geq\; \left(\frac{3s}{\bar{A}}\right)^{2} \;=\; \left(\frac{3 \times 0.0241}{0.00532}\right)^{2} \;\approx\; 185
-$$
-
-states, against the 20 used. So the effect is resolvable in principle; it is simply far too small to matter.
-
-**Why the bound is enough for the argument.** Every conclusion below rests on comparisons where even the *most generous* end of the interval is negligible. Taking $|\mu| < 0.016$ at face value:
+**Why this does not change the argument.** Nothing below required $\mu = 0$ — only that $|\mu|$ is negligible against the two quantities it must compete with. With the resolved value:
 
 $$
-\underbrace{0.016}_{\text{upper bound on one-step}}
-\;\ll\;
-\underbrace{0.047}_{\text{critic's spurious action-range noise}}
+\underbrace{0.018}_{\text{one-step advantage}}
+\;<\;
+\underbrace{0.047}_{\text{critic's spurious action-range variation}}
 \;\lll\;
 \underbrace{7.10}_{\text{cost of the persistent bias}}
 $$
 
-The one-step advantage is bounded below the critic's own fitting error, which is in turn two orders of magnitude below the effect that actually decides tube residence. Whether $\mu$ is exactly zero or merely small changes none of that.
+The one-step advantage remains **below the critic's own fitting error**, and roughly 400 times smaller than the effect that actually decides tube residence. A signal that exists but sits beneath the noise of the function approximator meant to represent it is, for the actor, not usable — which is the claim the rest of this document rests on.
 
 ## 6. But the physical consequence of the deviation is not zero
 
@@ -156,13 +136,13 @@ $$
 Measured under the same conditions, with the same $\Delta = 5.8\ \text{N·m}$ error:
 
 $$
-\underbrace{-0.005}_{\text{one-step, }Q(s,a_1)-Q(s,a_2)} \qquad \text{vs.} \qquad \underbrace{-7.10}_{\Delta_{\text{persistent}}}
+\underbrace{-0.018}_{\text{one-step, }Q(s,a_1)-Q(s,a_2)} \qquad \text{vs.} \qquad \underbrace{-7.10}_{\Delta_{\text{persistent}}}
 $$
 
-The one-step figure is not distinguishable from zero; the persistent figure is measured cleanly, with all 20 test states agreeing in sign, and the tube residence collapses from 100% to 1% of the episode. This is a real, large, unambiguous effect — it is simply not the quantity $Q(s,a)$ measures:
+The one-step figure is real but sits below the critic's own fitting error (§7); the persistent figure is measured cleanly, with all 20 test states agreeing in sign, and the tube residence collapses from 100% to 1% of the episode. Both effects are genuine — they are simply different quantities, and only the first is what $Q(s,a)$ measures:
 
 $$
-\frac{|\Delta_{\text{one-step}}|}{|\Delta_{\text{persistent}}|} \;\approx\; \frac{1}{1400}
+\frac{|\Delta_{\text{one-step}}|}{|\Delta_{\text{persistent}}|} \;\approx\; \frac{1}{400}
 $$
 
 $Q(s,a)$ prices a **one-step** deviation; a systematically biased policy is a **persistent** deviation. These are different objects.
