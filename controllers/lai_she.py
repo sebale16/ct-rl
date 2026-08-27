@@ -1,27 +1,22 @@
-"""Lai--She three-stage nonsmooth-Lyapunov controller for the Acrobot.
+"""Lai--She unified WCLF controller for the Acrobot.
 
-This implements the controller in Lai, She, Yang & Wu, *Stability Analysis
-and Control Law Design for Acrobots*, ICRA 2006, equations (20), (26), and
-(36).  The paper's generalized coordinates have the straight upright at
-``x=(0, 0, 0, 0)`` and the straight hanging pose at ``x=(pi, 0, 0, 0)``.
+Implements the Acrobot specialization of Lai, She, Yang & Wu,
+"Comprehensive Unified Control Strategy for Underactuated Two-Link
+Manipulators", IEEE TSMC-B 39(2), 2009, equations (20), (25), (36), (41),
+and (46).
 
-The ``acrobot-swingup-xk`` model used by this repository has the same published
-mechanical parameters, but its first link is measured from the horizontal and
-both joint senses are reflected.  Therefore its raw state ``q`` maps to the
-2006 paper's state as
+The paper measures the shoulder from the upward vertical: upright is
+``x=(0, 0, 0, 0)`` and hanging is ``x=(pi, 0, 0, 0)``.  The dedicated
+``acrobot-swingup-wclf`` plant uses these coordinates directly.  An adapter for
+the repository's horizontal-frame ``acrobot-swingup-xk`` plant remains
+available and applies
 
-    x1 = pi/2 - q1,  x2 = -q2,  xdot1 = -qdot1,  xdot2 = -qdot2.
+    x = [pi/2 - q1, -q2, -qdot1, -qdot2],  tau_q = -tau_x.
 
-The generalized elbow torque is reflected too: ``tau_q = -tau_x``.
-
-Reproducibility note
---------------------
-The paper publishes the plant and scalar controller values, the fuzzy rule
-table, and the attractive-set bounds.  It does not publish the fuzzy membership
-ranges or the LQR ``Q`` and ``R`` matrices.  :class:`Design` consequently
-keeps those two implementation choices explicit.  The defaults use symmetric
-triangular fuzzy sets on normalized energy/power and a conventional diagonal
-LQR cost; none is presented as a value reported by the paper.
+Unlike the earlier Lai--She controller, this formulation contains no fuzzy
+logic and no intermediate transition controller.  A single state-dependent
+weak-control Lyapunov function (WCLF) governs swing-up, then a published LQR
+gain takes over on first entry to the attractive area.
 """
 
 from __future__ import annotations
@@ -40,18 +35,20 @@ def wrap(angle):
 
 @dataclass(frozen=True)
 class AcrobotParams:
-    """Physical parameters from Section IV of Lai et al. (2006)."""
+    """Acrobot parameters from Table II of Lai et al. (2009)."""
 
     m1: float = 1.0
     m2: float = 1.0
-    i1: float = 0.083
+    i1: float = 8.33e-2
     i2: float = 0.33
     l1: float = 1.0
     l2: float = 2.0
     lc1: float = 0.5
     lc2: float = 1.0
     gravity: float = 9.8
-    gear: float = 80.0
+    # The paper does not impose an actuator bound. ``gear`` is solely the
+    # normalized MuJoCo action interface used by the executable plant.
+    gear: float = 50.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,12 +80,12 @@ class AcrobotParams:
         return (self.m1 * self.lc1 + self.m2 * self.l1) * self.gravity
 
     @property
-    def b2(self) -> float:
+    def b2_gravity(self) -> float:
         return self.m2 * self.lc2 * self.gravity
 
     @property
     def energy_top(self) -> float:
-        return self.b1 + self.b2
+        return self.b1 + self.b2_gravity
 
     @property
     def energy_span(self) -> float:
@@ -103,6 +100,10 @@ class AcrobotParams:
             dtype=np.float64,
         )
 
+    def det_mass(self, x2: float) -> float:
+        cosine = np.cos(float(x2))
+        return float(self.a1 * self.a2 - self.a3**2 * cosine**2)
+
     def coriolis(self, state: np.ndarray) -> np.ndarray:
         _, x2, x3, x4 = np.asarray(state, dtype=np.float64)
         coefficient = self.a3 * np.sin(x2)
@@ -114,8 +115,9 @@ class AcrobotParams:
         x1, x2 = np.asarray(state, dtype=np.float64)[:2]
         return np.array(
             [
-                -self.b1 * np.sin(x1) - self.b2 * np.sin(x1 + x2),
-                -self.b2 * np.sin(x1 + x2),
+                -self.b1 * np.sin(x1)
+                - self.b2_gravity * np.sin(x1 + x2),
+                -self.b2_gravity * np.sin(x1 + x2),
             ],
             dtype=np.float64,
         )
@@ -125,11 +127,11 @@ class AcrobotParams:
         x1, x2, x3, x4 = values
         velocity = np.array([x3, x4])
         kinetic = 0.5 * float(velocity @ self.mass_matrix(x2) @ velocity)
-        potential = self.b1 * np.cos(x1) + self.b2 * np.cos(x1 + x2)
+        potential = self.b1 * np.cos(x1) + self.b2_gravity * np.cos(x1 + x2)
         return kinetic + potential
 
     def drift_and_input(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``f(x), b(x)`` in equations (10)--(12)."""
+        """Return ``f_a(x), b_a(x)`` in equations (13)--(16)."""
         values = np.asarray(state, dtype=np.float64)
         mass = self.mass_matrix(values[1])
         bias = self.coriolis(values) + self.gravity_vector(values)
@@ -140,15 +142,31 @@ class AcrobotParams:
             np.array([0.0, 0.0, *acceleration_input]),
         )
 
+    def elbow_input_gain(self, x2: float) -> float:
+        """``b_2(x)=m_11/det(M)`` in equations (29)--(30)."""
+        return float(self.mass_matrix(x2)[0, 0] / self.det_mass(x2))
+
+    def elbow_input_gain_derivative(self, x2: float) -> float:
+        """Derivative ``d b_2 / d x_2`` used to evaluate ``beta_dot``."""
+        sine = np.sin(float(x2))
+        cosine = np.cos(float(x2))
+        m11 = self.a1 + self.a2 + 2.0 * self.a3 * cosine
+        determinant = self.a1 * self.a2 - self.a3**2 * cosine**2
+        dm11 = -2.0 * self.a3 * sine
+        ddeterminant = 2.0 * self.a3**2 * cosine * sine
+        return float(
+            (dm11 * determinant - m11 * ddeterminant) / determinant**2
+        )
+
     @classmethod
     def from_physics(cls, physics) -> "AcrobotParams":
-        """Read the paper-parameter plant back from a two-link MuJoCo model."""
+        """Recover Table-II physical values from a two-link MuJoCo model."""
         model = physics.model
+        if int(model.nbody) != 3 or int(model.nq) != 2 or int(model.nv) != 2:
+            raise ValueError("expected a two-link Acrobot MuJoCo model")
         mass = np.asarray(model.body_mass, dtype=np.float64)
         ipos = np.asarray(model.body_ipos, dtype=np.float64)
         bpos = np.asarray(model.body_pos, dtype=np.float64)
-        if int(model.nbody) != 3 or int(model.nq) != 2 or int(model.nv) != 2:
-            raise ValueError("expected a two-link Acrobot MuJoCo model")
         link_axis = int(np.argmax(np.abs(bpos[2])))
         hinge_axis = int(np.argmax(np.abs(np.asarray(model.jnt_axis)[0])))
         inertia = np.asarray(model.body_inertia, dtype=np.float64)[:, hinge_axis]
@@ -158,8 +176,6 @@ class AcrobotParams:
             i1=float(inertia[1]),
             i2=float(inertia[2]),
             l1=float(abs(bpos[2, link_axis])),
-            # MuJoCo does not store a massless link endpoint; the paper's l2 is
-            # independent of the dynamics and is known from its plant table.
             l2=2.0,
             lc1=float(abs(ipos[1, link_axis])),
             lc2=float(abs(ipos[2, link_axis])),
@@ -173,48 +189,41 @@ PAPER_PARAMS = AcrobotParams()
 
 @dataclass(frozen=True)
 class Design:
-    """Published scalar design values plus explicit omitted design choices."""
+    """Published Acrobot design values from equations (73) and (75)."""
 
-    beta1: float = np.pi / 6.0
-    beta2: float = np.pi / 6.0
-    energy_tolerance: float = 1.2
-    kp1: float = 1.0
-    kd1: float = 1.0
-    ke1: float = 0.2
-    lambda1: float = 38.0
-    phi1: float = 10.0
-    zeta: float = -2.0
-    kp2: float = 1.0
-    kd2: float = 1.0
-    phi2: float = 5.0
-    lambda_alpha: float = 0.5
-    # Not reported in the paper: normalizers for the five fuzzy sets.
-    fuzzy_energy_scale: Optional[float] = None
-    fuzzy_power_scale: float = 10.0
-    # Not reported in the paper: LQR state and input cost.
+    alpha1: float = 0.5
+    alpha2: float = 30.0
+    eta: float = 25.0
+    gamma0: float = 1.6
+    energy_epsilon: float = 0.5
+    energy_top: float = 24.5
+    angle1_tolerance: float = np.pi / 6.0
+    angle2_tolerance: float = np.pi / 6.0
+    velocity1_weight: float = 1e-3
+    velocity2_weight: float = 1e-3
+    velocity_tolerance: float = 1e3
+    energy_tolerance: float = 1.0
     lqr_q: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
-    lqr_r: float = 1.0
+    lqr_r: float = 0.5
 
     def __post_init__(self) -> None:
-        positive = (
-            "beta1", "beta2", "energy_tolerance", "kp1", "kd1", "ke1",
-            "lambda1", "phi1", "kp2", "kd2", "phi2", "lambda_alpha",
-            "fuzzy_power_scale", "lqr_r",
-        )
-        for name in positive:
+        for name in (
+            "alpha1", "alpha2", "eta", "gamma0", "energy_epsilon",
+            "energy_top", "angle1_tolerance", "angle2_tolerance",
+            "velocity1_weight", "velocity2_weight", "velocity_tolerance",
+            "energy_tolerance", "lqr_r",
+        ):
             value = float(getattr(self, name))
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and > 0")
-        if not np.isfinite(self.zeta) or self.zeta >= 0.0:
-            raise ValueError("zeta must be finite and < 0")
-        if self.fuzzy_energy_scale is not None and self.fuzzy_energy_scale <= 0:
-            raise ValueError("fuzzy_energy_scale must be > 0 when specified")
         if len(self.lqr_q) != 4 or any(value <= 0 for value in self.lqr_q):
             raise ValueError("lqr_q must contain four positive weights")
+        if self.eta <= 2.0 * self.alpha1 * self.energy_top:
+            raise ValueError("equation (36) requires eta > 2*alpha1*E0")
 
 
 def xk_to_paper(obs: np.ndarray) -> np.ndarray:
-    """Transform the repository's horizontal-frame state to Lai et al.'s frame."""
+    """Map a horizontal-frame raw state into the 2009 paper's coordinates."""
     values = np.asarray(obs, dtype=np.float64).reshape(-1)
     if values.shape != (4,):
         raise ValueError(f"expected [q1, q2, qdot1, qdot2], got {values.shape}")
@@ -236,7 +245,6 @@ def paper_to_xk(state: np.ndarray) -> np.ndarray:
 
 
 def _linear_model(params: AcrobotParams) -> tuple[np.ndarray, np.ndarray]:
-    """Linearize equations (6)--(9) at the upright equilibrium."""
     equilibrium = np.zeros(4, dtype=np.float64)
     step = 1e-6
     a = np.empty((4, 4), dtype=np.float64)
@@ -253,7 +261,7 @@ def _linear_model(params: AcrobotParams) -> tuple[np.ndarray, np.ndarray]:
 def lqr_solution(
     params: AcrobotParams, design: Design
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``A, B, F, P`` for equations (33)--(38)."""
+    """Return ``A, B, F, P`` for equations (43)--(46)."""
     a, b = _linear_model(params)
     q = np.diag(np.asarray(design.lqr_q, dtype=np.float64))
     r = np.array([[design.lqr_r]], dtype=np.float64)
@@ -262,65 +270,35 @@ def lqr_solution(
     return a, b, f, p
 
 
-def _memberships(value: float) -> np.ndarray:
-    """Five symmetric triangular sets NB, NM, ZR, PM, PB on ``[-1, 1]``."""
-    centers = np.linspace(-1.0, 1.0, 5)
-    value = float(np.clip(value, -1.0, 1.0))
-    weights = np.maximum(0.0, 1.0 - np.abs(value - centers) / 0.5)
-    total = float(weights.sum())
-    if total == 0.0:  # defensive; clipping and shoulder sets make this unreachable
-        weights[int(np.argmin(np.abs(centers - value)))] = 1.0
-        total = 1.0
-    return weights / total
-
-
-# Table I, encoded as indices into NB=-1, NM=-.5, ZR=0, PM=.5, PB=1.
-_FUZZY_RULES = np.array(
-    [
-        [0, 0, 0, 1, 2],
-        [0, 0, 1, 2, 3],
-        [0, 1, 2, 3, 4],
-        [1, 2, 3, 4, 4],
-        [2, 3, 4, 4, 4],
-    ],
-    dtype=np.int64,
+# Equation (75).  Recomputing the CARE from the rounded Table-II inertia gives
+# a gain within 0.2 N.m of these entries; use the explicitly published control
+# law for reproduction rather than silently substituting the rounded rebuild.
+PUBLISHED_LQR_GAIN = np.array(
+    [[-260.559, -104.448, -112.604, -52.944]], dtype=np.float64
 )
-_FUZZY_OUTPUTS = np.linspace(-1.0, 1.0, 5)
-
-
-def fuzzy_adjustment(
-    energy_error: float,
-    power: float,
-    params: AcrobotParams,
-    design: Design,
-) -> float:
-    """Table-I fuzzy output ``r`` using product inference and centroid output."""
-    energy_scale = design.fuzzy_energy_scale or params.energy_span
-    energy_membership = _memberships(float(energy_error) / energy_scale)
-    power_membership = _memberships(float(power) / design.fuzzy_power_scale)
-    firing = power_membership[:, None] * energy_membership[None, :]
-    result = float(np.sum(firing * _FUZZY_OUTPUTS[_FUZZY_RULES]) / np.sum(firing))
-    # Equation (30) requires the strict inequality -1 < r < 1.
-    return float(np.clip(result, -1.0 + 1e-6, 1.0 - 1e-6))
 
 
 class LaiSheController:
-    """Stateful minimum-switching implementation of the three control laws."""
+    """Stateful WCLF swing-up/LQR balance controller."""
 
-    STAGE_1 = 1
-    STAGE_2 = 2
-    STAGE_3 = 3
+    SWING_UP = 1
+    BALANCE = 2
 
     def __init__(
         self,
         params: AcrobotParams = PAPER_PARAMS,
         design: Design = Design(),
         *,
-        frame: str = "xk",
+        frame: str = "paper",
         torque_limit: Optional[float] = None,
     ) -> None:
         if frame not in ("paper", "xk"):
             raise ValueError("frame must be 'paper' or 'xk'")
+        if abs(params.energy_top - design.energy_top) > 1e-8:
+            raise ValueError(
+                "the plant and design disagree on E0: "
+                f"{params.energy_top} versus {design.energy_top}"
+            )
         self.params = params
         self.design = design
         self.frame = frame
@@ -329,50 +307,81 @@ class LaiSheController:
             raise ValueError("torque_limit must be finite and > 0")
         if self.torque_limit > params.gear * (1.0 + 1e-12):
             raise ValueError("torque_limit cannot exceed the plant gear")
-        self.a, self.b, self.lqr_gain, self.p = lqr_solution(params, design)
+        self.a, self.b, recomputed_gain, self.p = lqr_solution(params, design)
+        self.recomputed_lqr_gain = recomputed_gain
+        self.lqr_gain = PUBLISHED_LQR_GAIN.copy()
         self.reset()
 
     def reset(self) -> None:
-        self.stage = self.STAGE_1
-        self.delta1: Optional[float] = None
+        self.stage = self.SWING_UP
+        self.switch_step: Optional[int] = None
         self.last_torque = 0.0
         self.last_commanded_torque = 0.0
-        self.last_energy_error = 0.0
-        self.last_fuzzy_adjustment = 0.0
-        self.last_denominator = np.nan
-        self.switch_log: list[tuple[int, int]] = []
+        self.last_energy_error = -2.0 * self.params.energy_top
+        self.last_beta = np.nan
+        self.last_gamma = np.nan
+        self.last_wclf = np.nan
         self.steps = 0
         self.saturated_steps = 0
 
     def paper_state(self, obs: np.ndarray) -> np.ndarray:
-        return (
-            np.asarray(obs, dtype=np.float64).reshape(-1)
-            if self.frame == "paper"
-            else xk_to_paper(obs)
+        values = np.asarray(obs, dtype=np.float64).reshape(-1)
+        if values.shape != (4,):
+            raise ValueError(f"expected a 4-vector state, got {values.shape}")
+        return values if self.frame == "paper" else xk_to_paper(values)
+
+    def beta(self, state: np.ndarray) -> float:
+        return float(self.design.eta / self.params.elbow_input_gain(state[1]))
+
+    def beta_dot(self, state: np.ndarray) -> float:
+        input_gain = self.params.elbow_input_gain(state[1])
+        input_gain_dot = (
+            self.params.elbow_input_gain_derivative(state[1]) * state[3]
         )
+        return float(-self.design.eta * input_gain_dot / input_gain**2)
 
-    def _terms(self, state: np.ndarray):
-        drift, input_vector = self.params.drift_and_input(state)
-        f_eta = float(drift[3])
-        b_eta = float(input_vector[3])
-        energy_error = self.params.energy(state) - self.params.energy_top
-        return f_eta, b_eta, energy_error
+    def gamma(self, state: np.ndarray) -> float:
+        energy_epsilon = (
+            self.params.energy(state)
+            + self.design.energy_top
+            + self.design.energy_epsilon
+        )
+        return float(self.design.gamma0 * energy_epsilon)
 
-    def j1(self, state: np.ndarray) -> float:
-        _, _, energy_error = self._terms(state)
-        d = self.design
-        delta = 0.0 if self.delta1 is None else self.delta1
+    def wclf(self, state: np.ndarray) -> float:
+        energy_error = self.params.energy(state) - self.design.energy_top
         return float(
             0.5
-            * (d.kp1 * state[1] ** 2 + d.kd1 * state[3] ** 2
-               + d.ke1 * energy_error**2)
-            + delta
+            * (
+                self.design.alpha1 * energy_error**2
+                + self.design.alpha2 * state[1] ** 2
+                + self.beta(state) * state[3] ** 2
+            )
         )
 
-    def j2(self, state: np.ndarray) -> float:
-        d = self.design
-        delta = 0.0 if self.delta1 is None else self.delta1
-        return float(0.5 * (d.kp2 * state[1] ** 2 + d.kd2 * state[3] ** 2) + delta)
+    def swingup_torque(self, state: np.ndarray) -> float:
+        drift, input_vector = self.params.drift_and_input(state)
+        f2 = float(drift[3])
+        b2 = float(input_vector[3])
+        energy_error = self.params.energy(state) - self.design.energy_top
+        beta = self.beta(state)
+        beta_dot = self.beta_dot(state)
+        gamma = self.gamma(state)
+        denominator = self.design.alpha1 * energy_error + beta * b2
+        if denominator <= 0.0 or not np.isfinite(denominator):
+            raise FloatingPointError(
+                "WCLF denominator must stay positive by equation (37), got "
+                f"{denominator}"
+            )
+        numerator = (
+            -self.design.alpha2 * state[1]
+            - beta * f2
+            - 0.5 * beta_dot * state[3]
+            - gamma * state[3]
+        )
+        self.last_beta = beta
+        self.last_gamma = gamma
+        return float(numerator / denominator)
 
     def lqr_state(self, state: np.ndarray) -> np.ndarray:
         values = np.asarray(state, dtype=np.float64).copy()
@@ -380,88 +389,42 @@ class LaiSheController:
         values[1] = wrap(values[1])
         return values
 
-    def j3(self, state: np.ndarray) -> float:
-        error = self.lqr_state(state)
-        return float(error @ self.p @ error)
+    def balance_torque(self, state: np.ndarray) -> float:
+        return float(-(self.lqr_gain @ self.lqr_state(state))[0])
 
     def in_attractive_area(self, state: np.ndarray) -> bool:
         d = self.design
+        velocity_residual = np.linalg.norm(
+            [d.velocity1_weight * state[2], d.velocity2_weight * state[3]]
+        )
         return bool(
-            abs(float(wrap(state[0]))) <= d.beta1
-            and abs(float(wrap(state[0] + state[1]))) <= d.beta2
-            and abs(self.params.energy(state) - self.params.energy_top)
-            <= d.energy_tolerance
+            abs(float(wrap(state[0]))) <= d.angle1_tolerance
+            and abs(float(wrap(state[0] + state[1]))) <= d.angle2_tolerance
+            and velocity_residual <= d.velocity_tolerance
+            and abs(self.params.energy(state) - d.energy_top) <= d.energy_tolerance
         )
-
-    def torque_c1(self, state: np.ndarray) -> float:
-        f_eta, b_eta, energy_error = self._terms(state)
-        d = self.design
-        denominator = d.kd1 * b_eta + d.ke1 * energy_error
-        self.last_denominator = denominator
-        if abs(denominator) < 1e-10:
-            raise FloatingPointError("C1 reached its singular surface")
-        numerator = (
-            d.kp1 * state[1]
-            + d.kd1 * f_eta
-            + d.lambda1 * np.clip(state[3] / d.phi1, -1.0, 1.0)
-        )
-        return float(-numerator / denominator)
-
-    def torque_c2(self, state: np.ndarray) -> float:
-        f_eta, b_eta, energy_error = self._terms(state)
-        d = self.design
-        torque_tilde = -(d.kp2 * state[1] + d.kd2 * f_eta) / (d.kd2 * b_eta)
-        power = state[3] * torque_tilde
-        adjustment = fuzzy_adjustment(energy_error, power, self.params, d)
-        lambda2 = d.lambda_alpha * (1.0 + adjustment)
-        self.last_fuzzy_adjustment = adjustment
-        return float(
-            torque_tilde - lambda2 * np.clip(state[3] / d.phi2, -1.0, 1.0)
-        )
-
-    def torque_c3(self, state: np.ndarray) -> float:
-        return float(-(self.lqr_gain @ self.lqr_state(state))[0])
-
-    def _maybe_switch(self, state: np.ndarray) -> None:
-        d = self.design
-        if self.stage == self.STAGE_1:
-            _, b_eta, energy_error = self._terms(state)
-            denominator = d.kd1 * b_eta + d.ke1 * energy_error
-            self.last_denominator = denominator
-            # Equation (23) prints ``denominator <= zeta``.  Along the reported
-            # swing-up the denominator approaches zero from below, however, so
-            # that inequality is true at the initial hanging pose and false
-            # near the singularity.  The figure's delayed C1->C2 switch and the
-            # stated purpose (switch *before* the zero) require the crossing
-            # ``denominator >= zeta``; we implement that operational condition.
-            if self.j2(state) < self.j1(state) and denominator >= d.zeta:
-                self.switch_log.append((self.STAGE_1, self.steps))
-                self.stage = self.STAGE_2
-        if self.stage == self.STAGE_2 and self.in_attractive_area(state):
-            # Equation (55): choose Delta1 at the first attractive-set entry.
-            self.delta1 = self.j3(state)
-            self.switch_log.append((self.STAGE_2, self.steps))
-            self.stage = self.STAGE_3
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         state = self.paper_state(obs)
-        self._maybe_switch(state)
-        if self.stage == self.STAGE_1:
-            commanded = self.torque_c1(state)
-        elif self.stage == self.STAGE_2:
-            commanded = self.torque_c2(state)
-        else:
-            commanded = self.torque_c3(state)
+        if self.stage == self.SWING_UP and self.in_attractive_area(state):
+            self.stage = self.BALANCE
+            self.switch_step = self.steps
+        commanded = (
+            self.swingup_torque(state)
+            if self.stage == self.SWING_UP
+            else self.balance_torque(state)
+        )
         applied = float(np.clip(commanded, -self.torque_limit, self.torque_limit))
+        paper_torque = applied
+        plant_torque = paper_torque if self.frame == "paper" else -paper_torque
         self.last_commanded_torque = commanded
-        # The xk plant's reflected joint sense requires tau_q = -tau_x.
-        self.last_torque = applied if self.frame == "paper" else -applied
-        self.last_energy_error = self.params.energy(state) - self.params.energy_top
+        self.last_torque = plant_torque
+        self.last_energy_error = self.params.energy(state) - self.design.energy_top
+        self.last_wclf = self.wclf(state)
         self.steps += 1
         if abs(commanded) > self.torque_limit:
             self.saturated_steps += 1
-        normalized = self.last_torque / self.params.gear
-        return np.array([normalized], dtype=np.float64)
+        return np.array([plant_torque / self.params.gear], dtype=np.float64)
 
     @property
     def saturation_fraction(self) -> float:

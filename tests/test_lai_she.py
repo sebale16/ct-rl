@@ -1,202 +1,216 @@
-"""Tests for the Lai--She nonsmooth-Lyapunov Acrobot controller."""
+"""Tests for the Lai--She 2009 unified WCLF Acrobot controller."""
 
 import os
 import unittest
 
 os.environ.setdefault("MUJOCO_GL", "disable")
 
-import mujoco
 import numpy as np
 
 from controllers import lai_she as ls
-from environment.acrobot_xk import swingup_xk
+from environment.acrobot_wclf import swingup_wclf
+from environment.dmc import DMCContinuousEnv
 
 
 class TestPublishedParameters(unittest.TestCase):
-    def test_section_iv_plant_values(self):
+    def test_table_ii_acrobot(self):
         params = ls.PAPER_PARAMS
         self.assertEqual(params.m1, 1.0)
         self.assertEqual(params.m2, 1.0)
-        self.assertEqual(params.i1, 0.083)
+        self.assertEqual(params.i1, 8.33e-2)
         self.assertEqual(params.i2, 0.33)
         self.assertEqual(params.l1, 1.0)
         self.assertEqual(params.l2, 2.0)
         self.assertEqual(params.lc1, 0.5)
         self.assertEqual(params.lc2, 1.0)
-        self.assertAlmostEqual(params.a1, 1.333, places=12)
-        self.assertAlmostEqual(params.a2, 1.33, places=12)
-        self.assertAlmostEqual(params.a3, 1.0, places=12)
-        self.assertAlmostEqual(params.b1, 14.7, places=12)
-        self.assertAlmostEqual(params.b2, 9.8, places=12)
         self.assertAlmostEqual(params.energy_top, 24.5, places=12)
 
-    def test_section_iv_controller_values(self):
+    def test_published_acrobot_design(self):
         design = ls.Design()
-        self.assertAlmostEqual(design.beta1, np.pi / 6.0)
-        self.assertAlmostEqual(design.beta2, np.pi / 6.0)
-        self.assertEqual(design.energy_tolerance, 1.2)
-        self.assertEqual(design.kp1, 1.0)
-        self.assertEqual(design.kd1, 1.0)
-        self.assertEqual(design.ke1, 0.2)
-        self.assertEqual(design.lambda1, 38.0)
-        self.assertEqual(design.phi1, 10.0)
-        self.assertEqual(design.zeta, -2.0)
-        self.assertEqual(design.kp2, 1.0)
-        self.assertEqual(design.kd2, 1.0)
-        self.assertEqual(design.phi2, 5.0)
-        self.assertEqual(design.lambda_alpha, 0.5)
+        self.assertEqual(design.alpha1, 0.5)
+        self.assertEqual(design.alpha2, 30.0)
+        self.assertEqual(design.eta, 25.0)
+        self.assertEqual(design.gamma0, 1.6)
+        self.assertEqual(design.energy_epsilon, 0.5)
+        self.assertEqual(design.energy_top, 24.5)
+        self.assertAlmostEqual(design.angle1_tolerance, np.pi / 6.0)
+        self.assertAlmostEqual(design.angle2_tolerance, np.pi / 6.0)
+        self.assertEqual(design.velocity1_weight, 1e-3)
+        self.assertEqual(design.velocity2_weight, 1e-3)
+        self.assertEqual(design.velocity_tolerance, 1e3)
+        self.assertEqual(design.energy_tolerance, 1.0)
+        self.assertEqual(design.lqr_q, (1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(design.lqr_r, 0.5)
+
+    def test_equation_75_gain_is_used_verbatim(self):
+        controller = ls.LaiSheController()
+        np.testing.assert_allclose(
+            controller.lqr_gain,
+            [[-260.559, -104.448, -112.604, -52.944]],
+            atol=0.0,
+        )
+        # Rebuilding the CARE from rounded Table-II values remains very close.
+        self.assertLess(
+            float(np.max(np.abs(
+                controller.recomputed_lqr_gain - controller.lqr_gain
+            ))),
+            0.21,
+        )
 
 
-class TestAngleTransformation(unittest.TestCase):
-    def test_named_landmarks(self):
-        # Horizontal-frame upright/hanging become x1=0/pi, respectively.
-        upright = ls.xk_to_paper(np.array([np.pi / 2, 0.0, 0.0, 0.0]))
-        hanging = ls.xk_to_paper(np.array([-np.pi / 2, 0.0, 0.0, 0.0]))
-        np.testing.assert_allclose(upright, np.zeros(4), atol=1e-15)
-        np.testing.assert_allclose(hanging, [np.pi, 0.0, 0.0, 0.0], atol=1e-15)
+class TestPaperCoordinatePlant(unittest.TestCase):
+    def setUp(self):
+        self.env = swingup_wclf(torque_interface=50.0)
+        self.env.reset()
+        self.physics = self.env.physics
+        self.params = ls.AcrobotParams.from_physics(self.physics)
 
-    def test_round_trip(self):
+    def test_model_recovers_table_ii(self):
+        expected = ls.PAPER_PARAMS
+        for name in ("m1", "m2", "i1", "i2", "l1", "l2", "lc1", "lc2"):
+            self.assertAlmostEqual(getattr(self.params, name), getattr(expected, name))
+
+    def test_qpos_is_directly_in_paper_coordinates(self):
+        for shoulder, height in ((0.0, 3.0), (np.pi / 2.0, 0.0), (np.pi, -3.0)):
+            self.physics.data.qpos[:] = [shoulder, 0.0]
+            self.physics.data.qvel[:] = 0.0
+            self.physics.forward()
+            tip = np.asarray(self.physics.named.data.site_xpos["tip"])
+            self.assertAlmostEqual(float(tip[2]), height, places=10)
+
+    def test_analytic_dynamics_match_mujoco(self):
         rng = np.random.RandomState(0)
-        for state in rng.normal(size=(100, 4)):
-            np.testing.assert_allclose(ls.paper_to_xk(ls.xk_to_paper(state)), state)
-
-    def test_transformed_dynamics_match_mujoco(self):
-        env = swingup_xk(torque_limit=80.0)
-        env.reset()
-        physics = env.physics
-        params = ls.AcrobotParams.from_physics(physics)
-        rng = np.random.RandomState(1)
         worst = 0.0
         for _ in range(100):
             state = np.concatenate(
                 [rng.uniform(-np.pi, np.pi, 2), rng.uniform(-6.0, 6.0, 2)]
             )
-            torque_paper = rng.uniform(-40.0, 40.0)
-            state_xk = ls.paper_to_xk(state)
-            physics.data.qpos[:] = state_xk[:2]
-            physics.data.qvel[:] = state_xk[2:]
-            # The coordinate reflection requires tau_xk = -tau_paper.
-            physics.data.ctrl[:] = -torque_paper / params.gear
-            physics.forward()
-            actual_acceleration = -np.asarray(physics.data.qacc).copy()
-            drift, input_vector = params.drift_and_input(state)
-            expected_acceleration = drift[2:] + input_vector[2:] * torque_paper
-            worst = max(
-                worst,
-                float(np.max(np.abs(actual_acceleration - expected_acceleration))),
-            )
-        self.assertLess(worst, 2e-12)
+            torque = rng.uniform(-40.0, 40.0)
+            self.physics.data.qpos[:] = state[:2]
+            self.physics.data.qvel[:] = state[2:]
+            self.physics.data.ctrl[:] = torque / self.params.gear
+            self.physics.forward()
+            actual = np.asarray(self.physics.data.qacc).copy()
+            drift, input_vector = self.params.drift_and_input(state)
+            expected = drift[2:] + input_vector[2:] * torque
+            worst = max(worst, float(np.max(np.abs(actual - expected))))
+        self.assertLess(worst, 1e-12)
 
-    def test_paper_torque_is_sign_flipped_at_plant_boundary(self):
-        params = ls.AcrobotParams(gear=100.0)
-        controller = ls.LaiSheController(params, frame="xk")
-        obs = ls.paper_to_xk(np.array([2.0, 0.4, -0.2, 0.3]))
-        paper_torque = controller.torque_c1(ls.xk_to_paper(obs))
-        action = controller(obs)
-        self.assertAlmostEqual(float(action[0]) * params.gear, -paper_torque)
+    def test_horizontal_frame_adapter_round_trips(self):
+        rng = np.random.RandomState(1)
+        for state in rng.normal(size=(100, 4)):
+            np.testing.assert_allclose(ls.paper_to_xk(ls.xk_to_paper(state)), state)
 
 
-class TestControlLaws(unittest.TestCase):
+class TestWCLFControlLaw(unittest.TestCase):
     def setUp(self):
         self.params = ls.PAPER_PARAMS
-        self.design = ls.Design()
-        self.controller = ls.LaiSheController(
-            self.params, self.design, frame="paper", torque_limit=80.0
-        )
+        self.controller = ls.LaiSheController(self.params)
 
-    def _derivative(self, state, torque):
-        drift, input_vector = self.params.drift_and_input(state)
-        return drift + input_vector * torque
+    def test_beta_derivative_matches_finite_difference(self):
+        for x2 in np.linspace(-np.pi, np.pi, 21):
+            state = np.array([0.3, x2, -0.7, 1.2])
+            step = 1e-6
+            forward = state.copy()
+            backward = state.copy()
+            forward[1] += step * state[3]
+            backward[1] -= step * state[3]
+            numerical = (
+                self.controller.beta(forward) - self.controller.beta(backward)
+            ) / (2.0 * step)
+            self.assertAlmostEqual(
+                self.controller.beta_dot(state), numerical, places=7
+            )
 
-    def test_c1_has_equation_21_lyapunov_derivative(self):
+    def test_denominator_reduces_to_alpha1_ex_plus_eta(self):
         rng = np.random.RandomState(2)
-        for _ in range(100):
-            state = rng.uniform([-2.5, -2.0, -5.0, -5.0],
-                                [2.5, 2.0, 5.0, 5.0])
-            f_eta, b_eta, energy_error = self.controller._terms(state)
-            denominator = self.design.kd1 * b_eta + self.design.ke1 * energy_error
-            if abs(denominator) < 0.1:
-                continue
-            torque = self.controller.torque_c1(state)
-            derivative = self._derivative(state, torque)
-            energy_rate = state[3] * torque
+        minimum = np.inf
+        for _ in range(500):
+            state = np.concatenate(
+                [rng.uniform(-np.pi, np.pi, 2), rng.uniform(-8.0, 8.0, 2)]
+            )
+            energy_error = self.params.energy(state) - 24.5
             actual = (
-                self.design.kp1 * state[1] * state[3]
-                + self.design.kd1 * state[3] * derivative[3]
-                + self.design.ke1 * energy_error * energy_rate
+                self.controller.design.alpha1 * energy_error
+                + self.controller.beta(state)
+                * self.params.elbow_input_gain(state[1])
             )
-            expected = -self.design.lambda1 * state[3] * np.clip(
-                state[3] / self.design.phi1, -1.0, 1.0
-            )
-            self.assertAlmostEqual(actual, expected, places=9)
+            expected = self.controller.design.alpha1 * energy_error + 25.0
+            self.assertAlmostEqual(actual, expected, places=12)
+            minimum = min(minimum, actual)
+        self.assertGreater(minimum, 0.0)
+        hanging = np.array([np.pi, 0.0, 0.0, 0.0])
+        hanging_denominator = (
+            0.5 * (self.params.energy(hanging) - 24.5) + 25.0
+        )
+        self.assertAlmostEqual(hanging_denominator, 0.5)
 
-    def test_c2_has_equation_28_lyapunov_derivative(self):
+    def test_equation_26_wclf_derivative(self):
         rng = np.random.RandomState(3)
         for _ in range(100):
-            state = rng.uniform([-2.5, -2.0, -5.0, -5.0],
-                                [2.5, 2.0, 5.0, 5.0])
-            torque = self.controller.torque_c2(state)
-            derivative = self._derivative(state, torque)
-            actual = state[3] * (
-                self.design.kp2 * state[1] + self.design.kd2 * derivative[3]
+            state = np.concatenate(
+                [rng.uniform(-2.5, 2.5, 2), rng.uniform(-5.0, 5.0, 2)]
             )
-            _, b_eta, _ = self.controller._terms(state)
-            lambda2 = self.design.lambda_alpha * (
-                1.0 + self.controller.last_fuzzy_adjustment
-            )
-            expected = (
-                -self.design.kd2 * lambda2 * b_eta * state[3]
-                * np.clip(state[3] / self.design.phi2, -1.0, 1.0)
-            )
-            self.assertAlmostEqual(actual, expected, places=9)
-            self.assertLessEqual(actual, 1e-12)
+            torque = self.controller.swingup_torque(state)
+            drift, input_vector = self.params.drift_and_input(state)
+            closed_loop = drift + input_vector * torque
+            step = 1e-6
+            numerical = (
+                self.controller.wclf(state + step * closed_loop)
+                - self.controller.wclf(state - step * closed_loop)
+            ) / (2.0 * step)
+            expected = -self.controller.gamma(state) * state[3] ** 2
+            self.assertAlmostEqual(numerical, expected, delta=2e-5)
 
-    def test_table_i_corner_rules(self):
-        params = self.params
-        design = self.design
-        energy_scale = design.fuzzy_energy_scale or params.energy_span
-        power_scale = design.fuzzy_power_scale
-        self.assertAlmostEqual(
-            ls.fuzzy_adjustment(-energy_scale, -power_scale, params, design),
-            -1.0 + 1e-6,
+    def test_attractive_area_matches_equations_17_18(self):
+        controller = self.controller
+        self.assertTrue(controller.in_attractive_area(np.zeros(4)))
+        self.assertFalse(
+            controller.in_attractive_area(np.array([0.6, 0.0, 0.0, 0.0]))
         )
-        self.assertAlmostEqual(
-            ls.fuzzy_adjustment(0.0, 0.0, params, design), 0.0
-        )
-        self.assertAlmostEqual(
-            ls.fuzzy_adjustment(energy_scale, power_scale, params, design),
-            1.0 - 1e-6,
+        self.assertFalse(
+            controller.in_attractive_area(np.array([0.3, 0.3, 0.0, 0.0]))
         )
 
-    def test_lqr_closed_loop_is_asymptotically_stable(self):
+    def test_lqr_linear_closed_loop_is_stable(self):
         eigenvalues = np.linalg.eigvals(
             self.controller.a - self.controller.b @ self.controller.lqr_gain
         )
         self.assertTrue(np.all(eigenvalues.real < 0.0), eigenvalues)
 
-    def test_attractive_area_uses_both_absolute_link_angles(self):
-        controller = self.controller
-        controller.design = ls.Design(energy_tolerance=1e6)
-        self.assertTrue(controller.in_attractive_area(np.zeros(4)))
-        self.assertFalse(
-            controller.in_attractive_area(
-                np.array([0.75 * controller.design.beta1, 2.0 * controller.design.beta2,
-                          0.0, 0.0])
-            )
-        )
 
-    def test_switches_are_one_way(self):
-        controller = self.controller
-        near_singularity = np.array([2.0, 0.2, 1.0, 0.1])
-        # Directly exercise the state machine with a permissive threshold; the
-        # control-law identities above test the equations independently.
-        controller.design = ls.Design(zeta=-1e6, energy_tolerance=1e6)
-        controller._maybe_switch(near_singularity)
-        self.assertEqual(controller.stage, controller.STAGE_2)
-        controller._maybe_switch(np.zeros(4))
-        self.assertEqual(controller.stage, controller.STAGE_3)
-        controller._maybe_switch(np.array([np.pi, 0.0, 0.0, 0.0]))
-        self.assertEqual(controller.stage, controller.STAGE_3)
+class TestPublishedStyleRollout(unittest.TestCase):
+    def test_calibrated_release_switches_and_balances_without_saturation(self):
+        env = DMCContinuousEnv(
+            "acrobot",
+            "swingup-wclf",
+            raw_state_obs=True,
+            dt=0.001,
+            physics_dt=0.001,
+            max_steps=12_001,
+            episode_duration=12.0,
+            task_kwargs=dict(
+                initial_perturbation=0.2,
+                torque_interface=50.0,
+            ),
+        )
+        obs, _ = env.reset()
+        controller = ls.LaiSheController(
+            ls.AcrobotParams.from_physics(env._env.physics)
+        )
+        for _ in range(12_000):
+            obs = env.step_dt(controller(obs))[4]
+        self.assertIsNotNone(controller.switch_step)
+        self.assertAlmostEqual(controller.switch_step * 0.001, 7.49, delta=0.15)
+        self.assertEqual(controller.saturated_steps, 0)
+        final = np.asarray(obs, dtype=np.float64)
+        error = np.array([
+            float(ls.wrap(final[0])),
+            float(ls.wrap(final[1])),
+            final[2],
+            final[3],
+        ])
+        self.assertLess(float(np.linalg.norm(error)), 0.01)
 
 
 if __name__ == "__main__":
