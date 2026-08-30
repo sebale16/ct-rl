@@ -243,6 +243,40 @@ is the weaker property that some *admissible* torque decreases \(V_2\), which is
 the one that matters when no balancing controller is ever switched in — the
 standing constraint in the region-based note.
 
+### Entering the region is not holding it
+
+That gap between the CLF margin and the linear gain is not academic. Pairing
+Xin–Kaneda swing-up with the published feedback, latched on first entry to
+\(\Sigma_2\), over 98 releases from rest at displacements \(0.02\)–\(0.5\) rad
+(2 ms, RK4):
+
+| \(\tau_{\max}\) | enter | hold upright | largest \(V\) rise |
+|---|---|---|---|
+| 64 N·m | 30 / 98 | **10 / 30** | \(+7.8\times10^{1}\) |
+| 104 N·m | 28 / 92 | 16 / 28 | \(+2.0\) |
+| 150 N·m | 28 / 92 | 28 / 28 | \(+2.4\) |
+
+Localizing where the value rises separates the construction from the
+controller cleanly:
+
+| phase | largest rise |
+|---|---|
+| swing-up under the Xin–Kaneda law | \(\sim10^{-7}\) |
+| crossing the transition band | **exactly \(0\)** |
+| after the switch, under \(-Ke\) | \(10^{-5}\) to \(1.1\times10^{-1}\), or \(+78\) when the balance fails |
+
+Every rise comes from the linear balance law overshooting inside the region.
+The swing-up contributes discretization noise, and the band — where the blend
+carries the \(\nabla\mu\) term and neither law is guaranteed to decrease the
+mixture — contributed no rise at all on any of these trajectories. That is
+encouraging for the open question flagged under *Important limitation* above,
+though a sweep is not a proof.
+
+The reading for a learned policy is that \(\Sigma_2\) is the right *reward*
+boundary while a linear gain is the wrong thing to hand control to at 64 N·m.
+`benchmarks/render_acrobot_nslf.py` renders this pairing, and pins its release
+rather than sampling one, for exactly this reason.
+
 ### Normalization and the offset
 
 Both pieces are divided by one scale, the Xin–Kaneda value at hanging rest
