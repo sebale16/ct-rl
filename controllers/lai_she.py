@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy.linalg import solve_continuous_are
+
+from .acrobot_gated_lyapunov import AttractiveRegion, riccati_feedback
 
 
 def wrap(angle):
@@ -221,6 +222,22 @@ class Design:
         if self.eta <= 2.0 * self.alpha1 * self.energy_top:
             raise ValueError("equation (36) requires eta > 2*alpha1*E0")
 
+    def attractive_region(self) -> AttractiveRegion:
+        """Equation (17)'s region carrying these tolerances.
+
+        The region itself lives in :mod:`controllers.acrobot_gated_lyapunov`,
+        which also builds the nonsmooth Lyapunov function on it; its conditions
+        are even in their arguments, so the same object serves this paper frame
+        and the repository's Xin--Kaneda frame unchanged.
+        """
+        return AttractiveRegion(
+            angle_tolerance=self.angle1_tolerance,
+            tip_tolerance=self.angle2_tolerance,
+            energy_tolerance=self.energy_tolerance,
+            velocity_weights=(self.velocity1_weight, self.velocity2_weight),
+            velocity_tolerance=self.velocity_tolerance,
+        )
+
 
 def xk_to_paper(obs: np.ndarray) -> np.ndarray:
     """Map a horizontal-frame raw state into the 2009 paper's coordinates."""
@@ -263,10 +280,7 @@ def lqr_solution(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return ``A, B, F, P`` for equations (43)--(46)."""
     a, b = _linear_model(params)
-    q = np.diag(np.asarray(design.lqr_q, dtype=np.float64))
-    r = np.array([[design.lqr_r]], dtype=np.float64)
-    p = solve_continuous_are(a, b, q, r)
-    f = np.linalg.solve(r, b.T @ p)
+    f, p = riccati_feedback(a, b, design.lqr_q, design.lqr_r)
     return a, b, f, p
 
 
@@ -307,6 +321,7 @@ class LaiSheController:
             raise ValueError("torque_limit must be finite and > 0")
         if self.torque_limit > params.gear * (1.0 + 1e-12):
             raise ValueError("torque_limit cannot exceed the plant gear")
+        self.region = design.attractive_region()
         self.a, self.b, recomputed_gain, self.p = lqr_solution(params, design)
         self.recomputed_lqr_gain = recomputed_gain
         self.lqr_gain = PUBLISHED_LQR_GAIN.copy()
@@ -393,15 +408,15 @@ class LaiSheController:
         return float(-(self.lqr_gain @ self.lqr_state(state))[0])
 
     def in_attractive_area(self, state: np.ndarray) -> bool:
-        d = self.design
-        velocity_residual = np.linalg.norm(
-            [d.velocity1_weight * state[2], d.velocity2_weight * state[3]]
-        )
+        """Equation (17), evaluated by the shared :class:`AttractiveRegion`."""
         return bool(
-            abs(float(wrap(state[0]))) <= d.angle1_tolerance
-            and abs(float(wrap(state[0] + state[1]))) <= d.angle2_tolerance
-            and velocity_residual <= d.velocity_tolerance
-            and abs(self.params.energy(state) - d.energy_top) <= d.energy_tolerance
+            self.region.residual_of(
+                float(wrap(state[0])),
+                float(wrap(state[0] + state[1])),
+                self.params.energy(state) - self.design.energy_top,
+                state[2:],
+            )
+            <= 1.0
         )
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:

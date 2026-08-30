@@ -85,6 +85,24 @@ tau2 = -F*x
 That printed gain is used directly. Recomputing the CARE from rounded Table-II
 values differs by about `0.2`, so it is retained only as a verification value.
 
+### Shared with the reward-side construction
+
+Equation (17)'s region and the Riccati step both have one home,
+`controllers/acrobot_gated_lyapunov.py`, which also builds the nonsmooth
+Lyapunov function of equation (67) on that region for use as a reward
+potential. `Design.attractive_region()` supplies the tolerances above and
+`in_attractive_area` reads membership through the shared object.
+
+The region is the same function in both coordinate frames. This module measures
+the shoulder from upright, the repository's Xin–Kaneda plant measures it from
+the horizontal, and the two are related by `x = -e`; every condition in
+equation (17) is even in its argument, so no conversion is needed.
+
+The two modules keep their own plants and linearizations, sharing only
+`riccati_feedback`. The papers print different link inertia (`8.33e-2` here
+against `0.083` in the Xin–Kaneda frame), and merging them would move the
+rebuilt gain past the `0.21` bound this document relies on.
+
 ## Initial-state caveat
 
 The paper reports `x(0)=[pi,0,0,0]`, which is an exact equilibrium of both the

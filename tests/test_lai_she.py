@@ -8,6 +8,7 @@ os.environ.setdefault("MUJOCO_GL", "disable")
 import numpy as np
 
 from controllers import lai_she as ls
+from controllers.acrobot_gated_lyapunov import AttractiveRegion
 from environment.acrobot_wclf import swingup_wclf
 from environment.dmc import DMCContinuousEnv
 
@@ -161,6 +162,42 @@ class TestWCLFControlLaw(unittest.TestCase):
             ) / (2.0 * step)
             expected = -self.controller.gamma(state) * state[3] ** 2
             self.assertAlmostEqual(numerical, expected, delta=2e-5)
+
+    def test_attractive_area_uses_the_shared_region_object(self):
+        """Equation (17) has one home, in ``controllers.acrobot_gated_lyapunov``."""
+        controller = self.controller
+        region = controller.region
+        self.assertIsInstance(region, AttractiveRegion)
+        self.assertAlmostEqual(
+            region.angle_tolerance, controller.design.angle1_tolerance, places=12
+        )
+        self.assertAlmostEqual(
+            region.effective_tip_tolerance,
+            controller.design.angle2_tolerance,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            region.energy_tolerance, controller.design.energy_tolerance, places=12
+        )
+        rng = np.random.RandomState(53)
+        inside = 0
+        for _ in range(4000):
+            state = np.concatenate(
+                [rng.uniform(-0.7, 0.7, 2), rng.uniform(-3.0, 3.0, 2)]
+            )
+            expected = (
+                region.residual_of(
+                    float(ls.wrap(state[0])),
+                    float(ls.wrap(state[0] + state[1])),
+                    controller.params.energy(state) - controller.design.energy_top,
+                    state[2:],
+                )
+                <= 1.0
+            )
+            self.assertEqual(controller.in_attractive_area(state), expected)
+            inside += expected
+        self.assertGreater(inside, 0)
+        self.assertLess(inside, 4000)
 
     def test_attractive_area_matches_equations_17_18(self):
         controller = self.controller

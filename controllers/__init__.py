@@ -9,6 +9,17 @@ from .xin_kaneda import (
     homoclinic_speed,
     obs_to_paper,
 )
+from .acrobot_gated_lyapunov import (
+    AttractiveRegion,
+    GatedLyapunov,
+    LQRDesign,
+    NonsmoothLyapunov,
+    lqr_switch_residual,
+    max_local_value_on_region,
+    plant_drift_and_gain,
+    riccati_feedback,
+    upright_error,
+)
 from .lai_she import (
     AcrobotParams as LaiSheAcrobotParams,
     Design as LaiSheDesign,
@@ -25,6 +36,15 @@ __all__ = [
     "hanging_regime",
     "homoclinic_speed",
     "obs_to_paper",
+    "AttractiveRegion",
+    "GatedLyapunov",
+    "LQRDesign",
+    "NonsmoothLyapunov",
+    "lqr_switch_residual",
+    "max_local_value_on_region",
+    "plant_drift_and_gain",
+    "riccati_feedback",
+    "upright_error",
     "LaiSheAcrobotParams",
     "LaiSheDesign",
     "LaiSheController",
