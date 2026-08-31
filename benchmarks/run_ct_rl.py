@@ -343,11 +343,21 @@ def _build_demonstration_policy(
 ):
     """Build CT-SAC's ``demonstration_policy`` replay-buffer warm start.
 
-    ``controller_name='xin_kaneda'`` is the only supported source today: the
-    analytical Xin-Kaneda swing-up law from ``controllers/xin_kaneda.py``,
-    acting on ``acrobot-swingup-xk``'s raw ``[q1, q2, qdot1, qdot2]``
-    observation (the same ``frame="paper"`` convention the evaluation
-    protocol uses). Gains and torque limit come from the task's own
+    Two sources, both acting on ``acrobot-swingup-xk``'s raw
+    ``[q1, q2, qdot1, qdot2]`` observation (the same ``frame="paper"``
+    convention the evaluation protocol uses):
+
+    ``controller_name='xin_kaneda'`` -- the analytical Xin-Kaneda swing-up
+    law from ``controllers/xin_kaneda.py``, unconditionally.
+
+    ``controller_name='xk_lqr_switch'`` --
+    :class:`controllers.acrobot_gated_lyapunov.XKLQRSwitchedController`: the
+    same Xin-Kaneda swing-up law, latching one-way to the local LQR feedback
+    on first entry to Lai et al.'s equation-(17) attractive region. The
+    demonstrations this fills the replay buffer with therefore include the
+    balance phase the pure Xin-Kaneda law never reaches on its own.
+
+    Gains and torque limit come from the task's own
     ``k_v``/``k_d``/``k_p``/``torque_limit`` when the reward config sets
     them (matching the reward's Vdot term to the controller that generated
     the demonstrations), and from the paper's Section-7 defaults otherwise.
@@ -357,14 +367,14 @@ def _build_demonstration_policy(
             f"demonstration_controller is only wired for algo='ct_sac', got "
             f"algo={algo!r}"
         )
-    if controller_name != "xin_kaneda":
+    if controller_name not in ("xin_kaneda", "xk_lqr_switch"):
         raise ValueError(
-            f"demonstration_controller must be 'xin_kaneda', got "
-            f"{controller_name!r}"
+            "demonstration_controller must be 'xin_kaneda' or "
+            f"'xk_lqr_switch', got {controller_name!r}"
         )
     if env_id != ACROBOT_XK_ENV_ID:
         raise ValueError(
-            f"demonstration_controller='xin_kaneda' requires env_id="
+            f"demonstration_controller={controller_name!r} requires env_id="
             f"{ACROBOT_XK_ENV_ID!r}, got {env_id!r}"
         )
 
@@ -377,11 +387,12 @@ def _build_demonstration_policy(
         current = getattr(current, "env", None)
     if current is None or not getattr(current, "raw_state_obs", False):
         raise ValueError(
-            "demonstration_controller='xin_kaneda' requires a single "
-            "raw_state_obs=True acrobot-swingup-xk env."
+            f"demonstration_controller={controller_name!r} requires a "
+            "single raw_state_obs=True acrobot-swingup-xk env."
         )
 
     from controllers.xin_kaneda import AcrobotParams, Gains, XinKanedaController
+    from controllers.acrobot_gated_lyapunov import XKLQRSwitchedController
     from environment.acrobot_xk import (
         DEFAULT_LYAPUNOV_K_D,
         DEFAULT_LYAPUNOV_K_P,
@@ -397,6 +408,8 @@ def _build_demonstration_policy(
     )
     torque_limit = float(task_kwargs.get("torque_limit", DEFAULT_TORQUE_LIMIT))
     params = AcrobotParams.from_physics(current._env.physics)
+    if controller_name == "xk_lqr_switch":
+        return XKLQRSwitchedController(params, gains, torque_limit=torque_limit)
     return XinKanedaController(params, gains, torque_limit=torque_limit)
 
 

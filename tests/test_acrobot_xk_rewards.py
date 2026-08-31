@@ -794,5 +794,134 @@ class TestAcrobotXKRewards(unittest.TestCase):
         )
 
 
+class TestLaiSheRewardBase(unittest.TestCase):
+    """``reward_base="lai_she"`` substitutes NonsmoothLyapunov for V."""
+
+    def _env(self, reward_kind="r1", **task_kwargs):
+        env = swingup_xk(
+            reward_kind=reward_kind,
+            angle_noise=0.0,
+            velocity_noise=0.0,
+            **task_kwargs,
+        )
+        env.reset()
+        return env
+
+    @staticmethod
+    def _set_state_and_torque(env, state, torque):
+        physics = env.physics
+        physics.data.qpos[:] = np.asarray(state[:2], dtype=np.float64)
+        physics.data.qvel[:] = np.asarray(state[2:], dtype=np.float64)
+        gear = float(np.asarray(physics.model.actuator_gear)[0, 0])
+        physics.data.ctrl[:] = float(torque) / gear
+        physics.forward()
+
+    def test_rejects_reward_kind_r0(self):
+        with self.assertRaises(ValueError):
+            self._env("r0", reward_base="lai_she")
+
+    def test_requires_the_actual_rate_source(self):
+        with self.assertRaises(ValueError):
+            self._env(
+                "r1", reward_base="lai_she", lyapunov_rate_source="xk_closed_loop"
+            )
+
+    def test_reward_is_finite_and_differs_from_the_raw_xk_reward(self):
+        lyapunov_env = self._env("r1", reward_base="lyapunov")
+        lai_she_env = self._env("r1", reward_base="lai_she")
+        state = np.array([-1.1, 0.4, 1.2, -0.7])
+        for env in (lyapunov_env, lai_she_env):
+            self._set_state_and_torque(env, state, torque=8.0)
+
+        lyapunov_terms = lyapunov_env.task.xk_reward_terms(lyapunov_env.physics)
+        lai_she_terms = lai_she_env.task.xk_reward_terms(lai_she_env.physics)
+        self.assertTrue(np.isfinite(lai_she_terms["reward"]))
+        self.assertAlmostEqual(lai_she_terms["reward"], lai_she_terms["r1"], places=12)
+        self.assertNotAlmostEqual(
+            lai_she_terms["raw_r1"], lyapunov_terms["raw_r1"], places=6
+        )
+
+    def test_reported_value_and_rate_match_the_controller_module(self):
+        """Confirms the plumbing, not the math -- NonsmoothLyapunov's value
+        and gradient are already covered by test_acrobot_xk_gated_lyapunov.py.
+        """
+        from controllers.acrobot_gated_lyapunov import (
+            AttractiveRegion,
+            NonsmoothLyapunov,
+        )
+        from controllers.xin_kaneda import AcrobotParams, Gains
+
+        env = self._env("r1", reward_base="lai_she")
+        state = np.array([-1.1, 0.4, 1.2, -0.7])
+        self._set_state_and_torque(env, state, torque=8.0)
+        terms = env.task.xk_reward_terms(env.physics)
+
+        params = AcrobotParams.from_physics(env.physics)
+        gains = Gains(
+            k_v=DEFAULT_LYAPUNOV_K_V,
+            k_d=DEFAULT_LYAPUNOV_K_D,
+            k_p=DEFAULT_LYAPUNOV_K_P,
+        )
+        lai_she = NonsmoothLyapunov(params, gains, AttractiveRegion())
+        xdot = np.concatenate(
+            [state[2:], np.asarray(env.physics.data.qacc, dtype=np.float64)]
+        )
+        expected_value = lai_she.value(state)
+        expected_rate = lai_she.rate(state, xdot)
+
+        self.assertAlmostEqual(
+            terms["lyapunov_normalized"], expected_value, places=10
+        )
+        self.assertAlmostEqual(terms["raw_r1"], -expected_value, places=10)
+        self.assertAlmostEqual(
+            terms["lyapunov_rate_normalized"], expected_rate, places=6
+        )
+
+    def test_lower_bound_is_below_sampled_admissible_rewards(self):
+        rng = np.random.default_rng(4321)
+        env = self._env("r1", reward_base="lai_she")
+        bound = reward_rate_lower_bound("r1", reward_base="lai_she")
+        shoulder_limit = SHOULDER_RATE_SCALE_LIMIT * env.task._rate_scale
+        for _ in range(128):
+            state = [
+                rng.uniform(-np.pi, np.pi),
+                rng.uniform(-ELBOW_ANGLE_LIMIT, ELBOW_ANGLE_LIMIT),
+                rng.uniform(-shoulder_limit, shoulder_limit),
+                rng.uniform(-ELBOW_RATE_LIMIT, ELBOW_RATE_LIMIT),
+            ]
+            torque = rng.uniform(-20.0, 20.0)
+            self._set_state_and_torque(env, state, torque)
+            selected = env.task.xk_reward_terms(env.physics)["r1"]
+            self.assertGreaterEqual(selected + 1e-9, bound)
+
+    def test_lower_bound_differs_from_the_raw_quadratic_bound(self):
+        lyapunov_bound = reward_rate_lower_bound("r1", reward_base="lyapunov")
+        lai_she_bound = reward_rate_lower_bound("r1", reward_base="lai_she")
+        self.assertLess(lai_she_bound, lyapunov_bound)
+
+    def test_lower_bound_rejects_r2_and_r3(self):
+        for kind, eta, discount_rate in (("r2", 0.1, None), ("r3", 0.1, 0.1)):
+            with self.subTest(kind=kind):
+                with self.assertRaises(NotImplementedError):
+                    reward_rate_lower_bound(
+                        kind, reward_base="lai_she", eta=eta,
+                        discount_rate=discount_rate,
+                    )
+
+    def test_lai_she_reuses_the_task_s_own_gains(self):
+        """k_v/k_d/k_p feed NonsmoothLyapunov's gains, same as every other
+        reward_base -- a non-default k_p should change the reward."""
+        default_env = self._env("r1", reward_base="lai_she")
+        custom_env = self._env("r1", reward_base="lai_she", k_p=2.0 * DEFAULT_LYAPUNOV_K_P)
+        state = np.array([-1.1, 0.4, 1.2, -0.7])
+        for env in (default_env, custom_env):
+            self._set_state_and_torque(env, state, torque=8.0)
+        default_terms = default_env.task.xk_reward_terms(default_env.physics)
+        custom_terms = custom_env.task.xk_reward_terms(custom_env.physics)
+        self.assertNotAlmostEqual(
+            default_terms["raw_r1"], custom_terms["raw_r1"], places=6
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

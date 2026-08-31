@@ -59,6 +59,17 @@ Thus the derivative and, for r3, the discount correction still use the
 original Xin--Kaneda ``V``; ``reward_base`` does not reinterpret them as a
 derivative or potential of ``r0``.
 
+``reward_base="lai_she"`` instead replaces ``V`` with
+:class:`controllers.acrobot_gated_lyapunov.NonsmoothLyapunov` -- Lai, Wu, She
+and Yang's nonsmooth Lyapunov function, built from this task's own physics
+via ``AcrobotParams.from_physics`` and its ``k_v``/``k_d``/``k_p`` gains, and
+already normalized on its own scale.  ``V`` and ``Vdot`` in the r1--r3
+formulas above become that function's value and directional derivative; the
+r0 baseline and ``reward_transform`` are unaffected.  It requires
+``lyapunov_rate_source="actual"``: the ``xk_closed_loop`` surrogate assumes
+the global Xin--Kaneda swing-up law and is not meaningful once the
+Lai--She function's LQR-gated local piece is active.
+
 By default ``Vdot`` is the true directional derivative under the action the
 plant applies.  The counterfactual ``lyapunov_rate_source="xk_closed_loop"``
 instead substitutes the identity from the exact Xin--Kaneda feedback law,
@@ -137,7 +148,7 @@ DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
 DEFAULT_LYAPUNOV_K_V = 66.3
 LYAPUNOV_RATE_SOURCES = frozenset(("actual", "xk_closed_loop"))
-REWARD_BASES = frozenset(("lyapunov", "r0"))
+REWARD_BASES = frozenset(("lyapunov", "r0", "lai_she"))
 DEFAULT_REWARD_BASE = "lyapunov"
 REWARD_KINDS = frozenset(("r0", "r1", "r2", "r3"))
 REWARD_TRANSFORMS = frozenset(("identity", "log_reciprocal"))
@@ -251,6 +262,39 @@ def _transform_reward(reward: float, reward_transform: str) -> float:
     return float(-np.log(reciprocal_argument))
 
 
+@lru_cache(maxsize=32)
+def _lai_she_delta_over_scale(k_v: float, k_d: float, k_p: float) -> float:
+    """``Delta / scale`` for a Lai-She function built on this module's own
+    hardcoded paper parameters, used to correct the raw-quadratic
+    reward-rate lower bound below for ``reward_base='lai_she'``.
+
+    Physics-free by construction: this plant already *is* the paper's fixed
+    geometry (``AcrobotParams.from_physics`` on it recovers exactly ``_A1``
+    through ``_B2``), and ``gear`` plays no part in ``NonsmoothLyapunov``'s
+    value (only in its control output, which this function never asks for),
+    so an arbitrary placeholder is fine.
+
+    The correction stays a valid (conservative) bound everywhere, inside or
+    outside the LQR-gated region: NonsmoothLyapunov's Definition-3 property
+    -- Delta is built so the local piece never exceeds the outer, swing-up
+    piece anywhere in the region (tested in
+    ``test_delta_dominates_the_local_value_everywhere_on_the_region``) --
+    means the switched value is bounded above by the swing-up piece alone,
+    ``(raw_XK_V + Delta) / scale``, everywhere. Since ``raw_XK_V`` is exactly
+    the quantity the raw-quadratic bound below already bounds (same energy,
+    unwrapped-elbow formula, cf. ``_xk_raw_value_and_gradient``), adding this
+    one constant to that existing bound is a valid upper bound on
+    NonsmoothLyapunov's value everywhere in the caps closure.
+    """
+    from controllers.acrobot_gated_lyapunov import AttractiveRegion, NonsmoothLyapunov
+    from controllers.xin_kaneda import AcrobotParams, Gains
+
+    params = AcrobotParams(a1=_A1, a2=_A2, a3=_A3, b1=_B1, b2=_B2, gear=1.0, gravity=GRAVITY)
+    gains = Gains(k_v=k_v, k_d=k_d, k_p=k_p)
+    lai_she = NonsmoothLyapunov(params, gains, AttractiveRegion())
+    return float(lai_she.delta / lai_she.scale)
+
+
 @lru_cache(maxsize=128)
 def _raw_reward_rate_lower_bound(
     reward_kind: str,
@@ -314,6 +358,13 @@ def _raw_reward_rate_lower_bound(
         raise ValueError(
             "lyapunov_rate_source is not meaningful for reward_kind='r0'"
         )
+    if base == "lai_she" and kind in ("r2", "r3"):
+        raise NotImplementedError(
+            "reward_rate_lower_bound does not derive a conservative Vdot "
+            "envelope for reward_base='lai_she' (the gate-derivative term "
+            "in NonsmoothLyapunov.rate has no closed-form bound here yet); "
+            "only reward_kind='r1' is supported for this reward_base"
+        )
     if not np.isfinite(torque_limit) or torque_limit <= 0.0:
         raise ValueError("torque_limit must be finite and > 0")
     if not np.isfinite(damping) or damping < 0.0:
@@ -352,6 +403,8 @@ def _raw_reward_rate_lower_bound(
         state_part_max + 0.5 * k_d * elbow_rate**2
     ) / _V_DOWN
     if kind == "r1":
+        if base == "lai_she":
+            lyapunov_max += _lai_she_delta_over_scale(k_v, k_d, k_p)
         return -float(lyapunov_max)
 
     eta_value = float(eta) if eta is not None else float("nan")
@@ -672,6 +725,14 @@ class BalanceXK(suite_base.Task):
             raise ValueError(
                 "lyapunov_rate_source is not meaningful for reward_kind='r0'"
             )
+        if self.reward_base == "lai_she" and self.lyapunov_rate_source != "actual":
+            raise ValueError(
+                "lyapunov_rate_source must be 'actual' when "
+                "reward_base='lai_she': the 'xk_closed_loop' surrogate "
+                "assumes the global Xin-Kaneda swing-up law and is not "
+                "meaningful once the Lai-She function's LQR-gated local "
+                "piece is active"
+            )
         self.elbow_angle_limit = float(elbow_angle_limit)
         self.elbow_rate_limit = float(elbow_rate_limit)
         self.shoulder_rate_scale_limit = float(shoulder_rate_scale_limit)
@@ -741,6 +802,7 @@ class BalanceXK(suite_base.Task):
         self._rate_scale: Optional[float] = None
         self._last_reward_terms: Optional[Dict[str, float]] = None
         self._last_termination_reason: Optional[str] = None
+        self._lai_she = None  # lazy: needs physics, built on first reward call
 
     # --- Mechanical energy ------------------------------------------------
 
@@ -916,6 +978,29 @@ class BalanceXK(suite_base.Task):
             return None
         return dict(self._last_reward_terms)
 
+    def _ensure_lai_she(self, physics):
+        """Build and cache the Lai-She nonsmooth Lyapunov function.
+
+        Deferred until first use because it needs ``physics`` (to recover
+        this plant's own mass/length/inertia via
+        :meth:`AcrobotParams.from_physics`); built once and reused across the
+        task's lifetime since those parameters don't change between resets.
+        Reuses the task's own ``k_v``/``k_d``/``k_p`` gains rather than the
+        module's paper-section defaults, so it stays tunable the same way the
+        other reward bases are.
+        """
+        if self._lai_she is None:
+            from controllers.acrobot_gated_lyapunov import (
+                AttractiveRegion,
+                NonsmoothLyapunov,
+            )
+            from controllers.xin_kaneda import AcrobotParams, Gains
+
+            params = AcrobotParams.from_physics(physics)
+            gains = Gains(k_v=self.k_v, k_d=self.k_d, k_p=self.k_p)
+            self._lai_she = NonsmoothLyapunov(params, gains, AttractiveRegion())
+        return self._lai_she
+
     def baseline_terms(self, physics) -> Dict[str, float]:
         """The ``r0`` baseline and its three normalized parts.
 
@@ -1011,23 +1096,43 @@ class BalanceXK(suite_base.Task):
 
         elbow_unwrapped = float(qpos[1])
         elbow_rate = float(qvel[1])
-        lyapunov = float(
-            0.5 * energy_error**2
-            + 0.5 * self.k_d * elbow_rate**2
-            + 0.5 * self.k_p * elbow_unwrapped**2
-        )
-        lyapunov_rate = float(
-            energy_error * energy_rate
-            + self.k_d * elbow_rate * float(qacc[1])
-            + self.k_p * elbow_unwrapped * elbow_rate
-        )
+        lyapunov_scale = self.lyapunov_scale
+        if self.reward_base == "lai_she":
+            # This plant already *is* the Xin-Kaneda paper's own
+            # coordinates (raw_state_obs's [qpos; qvel] needs no frame
+            # conversion), so state and its derivative are read straight
+            # off physics. NonsmoothLyapunov.value/.rate are already
+            # normalized on their own scale, so multiplying back by
+            # lyapunov_scale here lets every downstream computation --
+            # normalization, selection, raw_r1..r3 -- stay byte-for-byte
+            # the same as the other reward bases.
+            lai_she = self._ensure_lai_she(physics)
+            state = np.array(
+                [qpos[0], qpos[1], qvel[0], qvel[1]], dtype=np.float64
+            )
+            xdot = np.array(
+                [qvel[0], qvel[1], float(qacc[0]), float(qacc[1])],
+                dtype=np.float64,
+            )
+            lyapunov = float(lai_she.value(state)) * lyapunov_scale
+            lyapunov_rate = float(lai_she.rate(state, xdot)) * lyapunov_scale
+        else:
+            lyapunov = float(
+                0.5 * energy_error**2
+                + 0.5 * self.k_d * elbow_rate**2
+                + 0.5 * self.k_p * elbow_unwrapped**2
+            )
+            lyapunov_rate = float(
+                energy_error * energy_rate
+                + self.k_d * elbow_rate * float(qacc[1])
+                + self.k_p * elbow_unwrapped * elbow_rate
+            )
         xk_closed_loop_lyapunov_rate = -self.k_v * elbow_rate**2
         selected_lyapunov_rate = (
             lyapunov_rate
             if self.lyapunov_rate_source == "actual"
             else xk_closed_loop_lyapunov_rate
         )
-        lyapunov_scale = self.lyapunov_scale
         lyapunov_normalized = lyapunov / lyapunov_scale
         lyapunov_rate_normalized = lyapunov_rate / lyapunov_scale
         xk_closed_loop_lyapunov_rate_normalized = (

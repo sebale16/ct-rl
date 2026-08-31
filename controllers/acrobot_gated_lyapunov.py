@@ -53,7 +53,7 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.linalg import solve_continuous_are
 
-from .xin_kaneda import AcrobotParams, Gains, _refine
+from .xin_kaneda import AcrobotParams, Gains, XinKanedaController, _refine
 
 
 UPRIGHT_STATE = np.array([0.5 * np.pi, 0.0, 0.0, 0.0], dtype=np.float64)
@@ -779,3 +779,76 @@ class NonsmoothLyapunov:
         coordinate = (1.0 - residual) / (1.0 - inner)
         membership, slope = _smootherstep(coordinate)
         return membership, -slope / (1.0 - inner)
+
+
+class XKLQRSwitchedController:
+    """Xin-Kaneda swing-up, latching one-way to the local LQR feedback.
+
+    Same construction as :class:`NonsmoothLyapunov`'s two pieces, run as a
+    controller rather than a reward: the exact Xin-Kaneda law drives the
+    swing-up, and on first entry to :class:`AttractiveRegion` -- Lai et
+    al.'s equation-(17) region -- control latches to the local Riccati
+    feedback ``tau = -K e`` and never switches back (``benchmarks/render_
+    acrobot_nslf.py``'s ``SwitchedController`` renders exactly this law; this
+    is the reusable form, with the plain ``act(obs) -> action`` interface
+    :class:`~controllers.xin_kaneda.XinKanedaController` uses, so it drops
+    into anything that already accepts that controller -- including CT-SAC's
+    ``demonstration_policy``).
+    """
+
+    SWING_UP = 1
+    BALANCE = 2
+
+    def __init__(
+        self,
+        params: AcrobotParams,
+        gains: Gains,
+        region: Optional[AttractiveRegion] = None,
+        *,
+        torque_limit: Optional[float] = None,
+    ) -> None:
+        self.params = params
+        self.torque_limit = (
+            float(params.gear) if torque_limit is None else float(torque_limit)
+        )
+        if not np.isfinite(self.torque_limit) or self.torque_limit <= 0.0:
+            raise ValueError(
+                f"torque_limit must be finite and > 0, got {self.torque_limit}"
+            )
+        self.swing_up = XinKanedaController(
+            params, gains, torque_limit=self.torque_limit
+        )
+        self.lyapunov = NonsmoothLyapunov(params, gains, region or AttractiveRegion())
+        self.reset()
+
+    def reset(self) -> None:
+        self.swing_up.reset()
+        self.stage = self.SWING_UP
+        self.switch_step: Optional[int] = None
+        self.last_torque = 0.0
+        self.last_commanded_torque = 0.0
+        self.saturated_steps = 0
+        self.steps = 0
+
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
+        state = np.asarray(obs, dtype=np.float64).reshape(-1)
+        if self.stage == self.SWING_UP and self.lyapunov.region.contains(
+            self.params, state
+        ):
+            self.stage = self.BALANCE
+            self.switch_step = self.steps
+        self.steps += 1
+
+        if self.stage == self.SWING_UP:
+            action = self.swing_up(obs)
+            self.last_torque = self.swing_up.last_torque
+            self.last_commanded_torque = self.swing_up.last_commanded_torque
+            return action
+
+        commanded = self.lyapunov.lqr_torque(state)
+        applied = float(np.clip(commanded, -self.torque_limit, self.torque_limit))
+        if abs(commanded) > self.torque_limit:
+            self.saturated_steps += 1
+        self.last_commanded_torque = commanded
+        self.last_torque = applied
+        return np.array([applied / self.params.gear], dtype=np.float64)

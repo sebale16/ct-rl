@@ -11,6 +11,7 @@ from controllers.acrobot_gated_lyapunov import (
     LQRDesign,
     NonsmoothLyapunov,
     UPRIGHT_STATE,
+    XKLQRSwitchedController,
     lqr_scale_on_switch_region,
     lqr_solution,
     lqr_switch_residual,
@@ -567,6 +568,58 @@ class TestNonsmoothLyapunov(unittest.TestCase):
     def test_clf_margin_rejects_a_nonpositive_bound(self):
         with self.assertRaisesRegex(ValueError, "torque_limit"):
             self.candidate.clf_margin(UPRIGHT_STATE, 0.0)
+
+
+class TestXKLQRSwitchedController(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.params = xk.PAPER_PARAMS
+
+    def _controller(self):
+        return XKLQRSwitchedController(self.params, GAINS)
+
+    def test_starts_and_stays_in_swing_up_away_from_the_region(self):
+        c = self._controller()
+        self.assertEqual(c.stage, c.SWING_UP)
+        hanging = np.array([-0.5 * np.pi, 0.0, 0.0, 0.0])
+        action = c(hanging)
+        self.assertEqual(c.stage, c.SWING_UP)
+        self.assertEqual(action.shape, (1,))
+        self.assertTrue(np.all(np.isfinite(action)))
+        self.assertLessEqual(float(np.abs(action[0])), 1.0 + 1e-9)
+
+    def test_switches_to_balance_on_entering_the_region_and_latches(self):
+        c = self._controller()
+        self.assertTrue(c.lyapunov.region.contains(self.params, UPRIGHT_STATE))
+        action = c(UPRIGHT_STATE)
+        self.assertEqual(c.stage, c.BALANCE)
+        self.assertEqual(c.switch_step, 0)
+        expected = float(
+            np.clip(
+                c.lyapunov.lqr_torque(UPRIGHT_STATE),
+                -c.torque_limit,
+                c.torque_limit,
+            )
+            / self.params.gear
+        )
+        self.assertAlmostEqual(float(action[0]), expected, places=10)
+
+        # One-way latch: back outside the region, stage does not revert.
+        hanging = np.array([-0.5 * np.pi, 0.0, 0.0, 0.0])
+        c(hanging)
+        self.assertEqual(c.stage, c.BALANCE)
+
+    def test_reset_returns_to_swing_up(self):
+        c = self._controller()
+        c(UPRIGHT_STATE)
+        self.assertEqual(c.stage, c.BALANCE)
+        c.reset()
+        self.assertEqual(c.stage, c.SWING_UP)
+        self.assertIsNone(c.switch_step)
+
+    def test_rejects_a_nonpositive_torque_limit(self):
+        with self.assertRaisesRegex(ValueError, "torque_limit"):
+            XKLQRSwitchedController(self.params, GAINS, torque_limit=0.0)
 
 
 if __name__ == "__main__":
