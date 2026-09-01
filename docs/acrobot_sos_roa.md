@@ -158,7 +158,24 @@ $$
 \qquad (15)
 $$
 
-with $h_{ik}(\bar x) \ge 0$ where branch $i$ is active. Wherever
+The index $i$ runs over the three branches of (8)–(10). On each, $\dot V_i$ is
+the rate that branch imposes and $h_{ik}$ collects the inequalities that mark
+where it is active:
+
+$$
+\begin{array}{llll}
+i = 1 & \text{unsaturated} & \dot V_1 = \dot V \big|_{\tau = u(\bar x)} &
+  h_{11} = u_{\max} - u(\bar x), \quad h_{12} = u(\bar x) - u_{\min}\\
+i = 2 & \text{upper saturation} & \dot V_2 = \dot V_{\max} &
+  h_{21} = u(\bar x) - u_{\max}\\
+i = 3 & \text{lower saturation} & \dot V_3 = \dot V_{\min} &
+  h_{31} = u_{\min} - u(\bar x)
+\end{array}
+$$
+
+Each $h_{ik}$ is non-negative exactly where its branch is active, which is the
+sign the multiplier terms of (15) require; the same regions appear in (11)–(13)
+with the opposite sign. Wherever
 $\dot V_i \ge 0$ on an active branch, the multiplier terms are non-negative,
 so $(\bar x^\top \bar x)(V - \rho) \ge 0$ and hence $V \ge \rho$ away from
 the origin: the states at which the rate fails lie outside $B_\rho$. The factor
