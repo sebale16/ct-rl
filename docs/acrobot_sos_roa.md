@@ -115,6 +115,27 @@ In Step 2, $\rho$ appears linearly in the constraints and is optimized directly.
 In Step 1, $L_i$ is a decision variable multiplying $\rho$, so $\rho$ is
 maximized by bisection.
 
+**Remark.** An equivalent certificate attaches the multiplier to the rate:
+
+$$
+(\bar x^\top \bar x)\big(V(\bar x) - \rho\big)
+\;-\; L_i(\bar x)\,\dot V_i(\bar x)
+\;-\; \sum_k M_k(\bar x)\,h_{ik}(\bar x) \quad \text{SOS}
+$$
+
+with $h_{ik}(\bar x) \ge 0$ where branch $i$ is active. Wherever
+$\dot V_i \ge 0$ on an active branch, the multiplier terms are non-negative,
+so $(\bar x^\top \bar x)(V - \rho) \ge 0$ and hence $V \ge \rho$ away from
+the origin: the states at which the rate fails lie outside $B_\rho$. The factor
+$\bar x^\top \bar x$ carries the condition through $\bar x = 0$, where
+$\dot V$ vanishes for any $V$.
+
+In this form $\rho$ multiplies the known polynomial $\bar x^\top \bar x$, and
+$L_i$ multiplies $\dot V_i$, which is fixed along with $V(\bar x)$ throughout
+Step 1. Both are then linear in the decision variables, so Step 1 optimizes
+$\rho$ directly as one semidefinite program.
+`evaluations/acrobot_sos_roa.py` implements this form.
+
 **Algorithm 1** Region of Attraction under Actuator Limits
 
 $$
