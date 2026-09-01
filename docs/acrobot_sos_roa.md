@@ -163,7 +163,49 @@ a solution to the previous iteration remains feasible for the current one. With
 $\rho$ bounded above for any system with a bounded region of attraction, the
 sequence of optimal values converges.
 
-## V. Initialization
+## V. The implemented certificate
+
+`evaluations/acrobot_sos_roa.py` runs Step 1 of Algorithm 1 once, with
+$V(\bar x)$ held at the Riccati candidate and $\rho$ optimized directly through
+the form given in the remark of Section IV. The certified level is therefore
+the largest sublevel set of that particular candidate.
+
+The polynomial vector field of Section I introduces a second obligation. The
+semidefinite program reasons about the Taylor expansion, so its certificate
+holds for the expanded field; a returned level is checked against the exact
+dynamics by sampling $\partial B_\rho$ under the saturated feedback, and is
+retained when the observed rate is negative there.
+
+**Algorithm 2** Certified Level for a Fixed Candidate
+
+$$
+\begin{array}{ll}
+\hline
+1\!: & \text{Expand } f,\ g \text{ about } \bar x = 0 \text{ to degrees } 3 \text{ and } 2\\
+2\!: & V(\bar x) \leftarrow \bar x^\top P \bar x, \quad P \text{ from the Riccati equation}\\
+3\!: & u(\bar x) \leftarrow -K\bar x\\
+4\!: & \text{Solve for } \rho,\ L_i(\bar x),\ M_k(\bar x):\\
+   & \quad\qquad \text{maximize } \rho \text{ subject to the three branch conditions}\\
+   & \quad\qquad \text{of Section III in the form of the Section IV remark,}\\
+   & \quad\qquad \text{and } L_i(\bar x),\, M_k(\bar x) \ \text{SOS}\\
+5\!: & \textbf{if } \text{the program is infeasible or } \rho \le 0 \ \textbf{then return } \varnothing\\
+6\!: & w \leftarrow \underset{\bar x \,:\, V(\bar x) = \rho}{\max} \ \nabla V(\bar x)^\top
+       \big(f_{\text{exact}} + g_{\text{exact}}\,\mathrm{sat}(u(\bar x))\big)\\
+7\!: & \textbf{if } w \ge 0 \ \textbf{then return } \varnothing \quad
+       \text{\{the exact field contradicts the certificate\}}\\
+8\!: & \textbf{return } \rho\\
+\hline
+\end{array}
+$$
+
+Line 6 is a sampled maximum over the level set, so its force is refutational:
+a negative $w$ leaves the certificate standing, and a non-negative one retires
+it.
+
+Growing the region calls for Step 2 of Algorithm 1, which searches over
+$V(\bar x)$ and is bilinear. That step is left for future work.
+
+## VI. Initialization
 
 The alternation requires an initial Lyapunov candidate. Linearizing about
 $x^\star$ and solving the algebraic Riccati equation
