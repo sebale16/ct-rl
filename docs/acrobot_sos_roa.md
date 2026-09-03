@@ -6,230 +6,172 @@ robots: noindex
 
 # Region of Attraction for a Torque-Limited Acrobot via Sums of Squares
 
-Following Majumdar, Ahmadi and Tedrake, *Control Design along Trajectories with
-Sums of Squares Programming*, specialised to the time-invariant case about a
-fixed point and to a fixed feedback law.
+This note describes the time-invariant upright-balancing calculation behind
+Figure 2 of Majumdar, Ahmadi and Tedrake,
+[*Control Design along Trajectories with Sums of Squares Programming*](https://groups.csail.mit.edu/robotics-center/public_papers/Majumdar13.pdf).
 
-## I. Problem statement
+The paper's printed Algorithm 1 is stated for a time-varying funnel. Here it is
+specialized to one time-invariant equilibrium and modified for a saturated
+single input exactly as described in Section IV-A of the paper. This is the
+controller-design calculation relevant to Figure 2; the time-varying swing-up
+calculation is not implemented.
 
-Let $\dot x = f(x) + g(x)u$ be the control system, $x^\star$ the upright
-equilibrium, and $\bar x = x - x^\star$. The feedback $u(\bar x) = -K\bar x$ is
-given and is not a decision variable. The actuator is bounded, so the applied
-input is passed through the saturation function
+## I. Problem
+
+Let
 
 $$
-s(u(\bar x)) =
+\dot x = f(x)+g(x)u,
+\qquad \bar x=x-x^\star,
+$$
+
+where $x^\star$ is upright rest. We search for both a polynomial feedback law
+$u(\bar x)$ and a Lyapunov function $V(\bar x)$. The requested torque is passed
+through
+
+$$
+s(u)=
 \begin{cases}
-u_{\max} & u(\bar x) \ge u_{\max}\\[2pt]
-u_{\min} & u(\bar x) \le u_{\min}\\[2pt]
-u(\bar x) & \text{otherwise.}
+u_{\max},&u\ge u_{\max},\\
+u_{\min},&u\le u_{\min},\\
+u,&\text{otherwise}.
 \end{cases}
 $$
 
-For a Lyapunov candidate $V(\bar x)$ define the sublevel set
+For
 
 $$
-B_\rho = \{\bar x \mid V(\bar x) \le \rho\}.
+B_\rho=\{\bar x\mid V(\bar x)\le\rho\},
 $$
 
-We seek the largest $\rho$ for which $B_\rho$ is an inner estimate of the region
-of attraction of $x^\star$ under the saturated law.
+the goal is to maximize $\rho$ while proving that $V$ decreases inside
+$B_\rho$ under the saturated controller. Following the Figure 2 experiment,
+the calculation uses a cubic $u$, a quadratic $V$, a symmetric 5 N m torque
+limit, and a degree-three Taylor model of the dynamics.
 
-The dynamics are not polynomial: the gravitational and inertial terms are
-trigonometric in the joint angles, and $\ddot q = M^{-1}(\tau - H - G)$ is
-rational. Both are removed by Taylor expanding $f$ and $g$ about $\bar x = 0$ to
-degree three, so that the certificate applies to the polynomial vector field.
+## II. Unsaturated SOS condition
 
-## II. The sums-of-squares program
-
-With $L(\bar x)$ a multiplier term, the region of attraction is certified by
+Without saturation, a sufficient certificate is
 
 $$
 \begin{aligned}
-\underset{\rho,\; L(\bar x),\; V(\bar x)}{\text{maximize}} \quad & \rho &&(1)\\
-\text{subject to} \quad
-& V(\bar x) \ \text{SOS} &&(2)\\
-& -\dot V(\bar x) + L(\bar x)\big(V(\bar x) - \rho\big) \ \text{SOS} &&(3)\\
-& L(\bar x) \ \text{SOS} &&(4)\\
-& V\Big(\textstyle\sum_j e_j\Big) = 1 &&(5)
+V(\bar x)&\ \text{SOS},\\
+-\dot V(\bar x)+L(\bar x)(V(\bar x)-\rho)&\ \text{SOS},\\
+L(\bar x)&\ \text{SOS},\\
+V(\mathbf 1)&=1.
 \end{aligned}
 $$
 
-where $e_j$ is the $j$-th standard basis vector. Condition (5) is a
-normalization constraint, linear in the coefficients of $V$, and introduces no
-conservativeness: any valid Lyapunov function can be scaled to satisfy it.
+On $B_\rho$, the multiplier term is non-positive. Therefore the second SOS
+condition implies $-\dot V\ge0$. The last equality removes the otherwise free
+joint scaling of $V$ and $\rho$.
 
-For $\bar x \in B_\rho$ we have $V(\bar x) - \rho \le 0$, and $L(\bar x) \ge 0$
-by (4), so (3) gives $\dot V(\bar x) \le 0$.
+The program is not jointly convex. It contains the products $LV$ and $L\rho$,
+and $\dot V$ contains products between the coefficients of $V$ and $u$. It is
+convex when the appropriate blocks of variables are held fixed, which is why
+the paper alternates between subproblems.
 
-## III. Incorporating actuator limits
+## III. Saturation branches
 
-A piecewise analysis of $\dot V$ enforces the Lyapunov conditions on each branch
-of the saturation. Define
+For a symmetric bound $\tau_{\max}$, define three rates:
 
 $$
 \begin{aligned}
-\dot V_{\min}(\bar x) &= \frac{\partial V(\bar x)}{\partial \bar x}^{\!\top}
-\big(f(\bar x) + g(\bar x)u_{\min}\big) &&(6)\\
-\dot V_{\max}(\bar x) &= \frac{\partial V(\bar x)}{\partial \bar x}^{\!\top}
-\big(f(\bar x) + g(\bar x)u_{\max}\big) &&(7)
+\dot V_0 &= \nabla V^\top(f+gu),\\
+\dot V_+ &= \nabla V^\top(f+g\tau_{\max}),\\
+\dot V_- &= \nabla V^\top(f-g\tau_{\max}).
 \end{aligned}
 $$
 
-and require
+The following three polynomials are required to be SOS:
 
 $$
 \begin{aligned}
-u(\bar x) \le u_{\min} &\implies \dot V_{\min}(\bar x) < 0 &&(8)\\
-u(\bar x) \ge u_{\max} &\implies \dot V_{\max}(\bar x) < 0 &&(9)\\
-u_{\min} \le u(\bar x) \le u_{\max} &\implies \dot V(\bar x) < 0 &&(10)
+p_0={}&-\dot V_0+L_0(V-\rho)
+       -M_{01}(\tau_{\max}-u)-M_{02}(\tau_{\max}+u),\\
+p_+={}&-\dot V_++L_+(V-\rho)-M_+(u-\tau_{\max}),\\
+p_-={}&-\dot V_-+L_-(V-\rho)-M_-(-\tau_{\max}-u),
 \end{aligned}
 $$
 
-Each implication is enforced with additional multipliers $M_k(\bar x)$,
-replacing (3) by
+with every $L_i$ and $M_k$ SOS. Each expression following an $M_k$ is
+non-negative precisely on its active saturation branch. On that branch and
+inside $B_\rho$, all multiplier terms are non-positive, so $p_i\ge0$ implies
+$\dot V_i\le0$.
+
+## IV. Implemented three-step alternation
+
+The saturation multipliers introduce products $M_k u$, so the saturated
+controller and the multipliers cannot be searched simultaneously. The
+time-invariant specialization of the paper's saturation-modified Algorithm 1
+is:
+
+**Algorithm 1: saturated time-invariant controller design**
+
+1. Initialize $V$ and $u$ from LQR and choose a feasible small constant
+   $\rho>0$.
+2. With $V$, $u$, and $\rho$ fixed, solve a feasibility problem for all
+   $L_i$ and $M_k$.
+3. With $V$, $L_i$, and $M_k$ fixed, maximize $\rho$ over a cubic controller
+   $u$ with $u(0)=0$.
+4. With $u$ and $L_i$ fixed, maximize $\rho$ over a quadratic $V$ and the
+   saturation multipliers $M_k$, subject to $V$ being SOS and $V(\mathbf1)=1$.
+5. Repeat steps 2--4 until the relative improvement is below the tolerance or
+   the iteration limit is reached.
+
+The objective in steps 3 and 4 is constrained to be at least the level
+already certified by the preceding step. This does not change either
+subproblem: in exact arithmetic the preceding solution is feasible, which is
+the paper's argument that the sequence of objectives is nondecreasing. It does
+prevent a numerical SDP solution from being accepted as an apparent decrease.
+
+The multipliers returned by the preceding value step remain an existing
+feasible witness for the same $(V,u,\rho)$ if a fresh multiplier solve fails
+numerically; no smaller level is substituted. There is no rho backoff or
+coordinate-rescaling workaround in the algorithm.
+
+## V. Initialization and fixed-LQR comparison
+
+Linearization at upright and the continuous-time Riccati equation give
 
 $$
-\begin{aligned}
-& -\dot V_{\min} + L_1(V - \rho) + M_1\,(u - u_{\min}) \ \text{SOS} &&(11)\\
-& -\dot V_{\max} + L_2(V - \rho) + M_2\,(u_{\max} - u) \ \text{SOS} &&(12)\\
-& -\dot V + L_3(V - \rho) + M_3\,(u - u_{\max}) + M_4\,(u_{\min} - u) \ \text{SOS} &&(13)\\
-& L_i(\bar x),\ M_k(\bar x) \ \text{SOS} &&(14)
-\end{aligned}
+V_{\mathrm{LQR}}(\bar x)=\bar x^\top P\bar x,
+\qquad u_{\mathrm{LQR}}(\bar x)=-K\bar x.
 $$
 
-Each region is written as a set of inequalities that are non-positive where the
-branch is active, so on that branch every multiplier term in (11)–(13) is
-non-positive and the corresponding rate is certified negative. For $m$ inputs
-this requires $3^m$ conditions; the Acrobot has $m = 1$.
+$V_{\mathrm{LQR}}$ is normalized before the alternation. The paper says that a
+sufficiently small constant $\rho$ works well for initialization.
 
-## IV. Bilinear alternation
+Separately, bisection finds the largest certified level for the fixed normalized
+LQR pair. That calculation provides the blue fixed-controller baseline
+corresponding to the comparison in Figure 2. It is not one of the three
+alternating controller-design steps.
 
-The program is not convex: $\dot V$ is linear in $V$, so the products
-$L_i(V - \rho)$ and $L_i \dot V_i$ are bilinear in the decision variables. The
-conditions are, however, linear in $L_i$ and $M_k$ for fixed $V$ and $\rho$, and
-linear in $V$ and $\rho$ for fixed $L_i$ and $M_k$. We therefore alternate
-between the two sets.
+## VI. What is and is not reproduced
 
-In Step 2, $\rho$ appears linearly in the constraints and is optimized directly.
-In Step 1, $L_i$ is a decision variable multiplying $\rho$, so $\rho$ is
-maximized by bisection.
+The formulation reproduces the structure of the Figure 2 calculation:
 
-**Algorithm 1** Region of Attraction under Actuator Limits
+- polynomial dynamics about upright;
+- the three exact saturation branches from Approach 1;
+- LQR initialization;
+- an optimized cubic time-invariant controller;
+- an optimized quadratic Lyapunov function; and
+- the three-step SOS alternation.
 
-$$
-\begin{array}{ll}
-\hline
-1\!: & \text{Initialize } V(\bar x) \text{ from the LQR cost-to-go, scaled to satisfy (5)}\\
-2\!: & \rho_{\text{prev}} \leftarrow 0\\
-3\!: & \textit{converged} \leftarrow \textbf{false}\\
-4\!: & \textbf{while } \neg\,\textit{converged} \ \textbf{do}\\
-5\!: & \quad \textbf{Step 1}: \text{Maximize } \rho \text{ by bisection, searching for } L_i(\bar x)\\
-   & \quad\qquad \text{and } M_k(\bar x) \text{ subject to (11)–(14), with } V(\bar x) \text{ fixed.}\\
-6\!: & \quad \textbf{Step 2}: \text{Maximize } \rho \text{ by searching for } V(\bar x) \text{ and } \rho\\
-   & \quad\qquad \text{subject to (2), (5) and (11)–(13), with } L_i(\bar x),\, M_k(\bar x) \text{ fixed.}\\
-7\!: & \quad \textbf{if } \dfrac{\rho - \rho_{\text{prev}}}{\rho_{\text{prev}}} < \varepsilon \ \textbf{then}\\
-8\!: & \quad\quad \textit{converged} \leftarrow \textbf{true}\\
-9\!: & \quad \textbf{end if}\\
-10\!: & \quad \rho_{\text{prev}} \leftarrow \rho\\
-11\!: & \textbf{end while}\\
-\hline
-\end{array}
-$$
+It does **not** yet reproduce the numerical red and blue curves printed in the
+paper. The experiment used a hardware-identified Acrobot model, but the paper
+does not publish its identified coefficients, its LQR $Q/R$ choices, the SOS
+multiplier degrees, or the final polynomial coefficients. The present
+calculation instead uses the Xin--Kaneda simulation parameters and the Lai et
+al. LQR costs.
 
-Each iteration attains an objective at least as good as the previous one, since
-a solution to the previous iteration remains feasible for the current one. With
-$\rho$ bounded above for any system with a bounded region of attraction, the
-sequence of optimal values converges.
+Consequently, the resulting set is a certificate for a different degree-three
+polynomial surrogate, not a claim that the published Figure 2 has been
+numerically recreated. Exact reproduction requires the original identified
+model and design settings.
 
-## V. The implemented certificate
-
-`evaluations/acrobot_sos_roa.py` runs Step 1 of Algorithm 1 once, with
-$V(\bar x)$ held at the Riccati candidate. The certified level is therefore the
-largest sublevel set of that particular candidate.
-
-The implementation attaches the multiplier to the rate, which is an equivalent
-certificate:
-
-$$
-(\bar x^\top \bar x)\big(V(\bar x) - \rho\big)
-\;-\; L_i(\bar x)\,\dot V_i(\bar x)
-\;-\; \sum_k M_k(\bar x)\,h_{ik}(\bar x) \quad \text{SOS}
-\qquad (15)
-$$
-
-The index $i$ runs over the three branches of (8)–(10). On each, $\dot V_i$ is
-the rate that branch imposes and $h_{ik}$ collects the inequalities that mark
-where it is active:
-
-$$
-\begin{array}{llll}
-i = 1 & \text{unsaturated} & \dot V_1 = \dot V \big|_{\tau = u(\bar x)} &
-  h_{11} = u_{\max} - u(\bar x), \quad h_{12} = u(\bar x) - u_{\min}\\
-i = 2 & \text{upper saturation} & \dot V_2 = \dot V_{\max} &
-  h_{21} = u(\bar x) - u_{\max}\\
-i = 3 & \text{lower saturation} & \dot V_3 = \dot V_{\min} &
-  h_{31} = u_{\min} - u(\bar x)
-\end{array}
-$$
-
-Each $h_{ik}$ is non-negative exactly where its branch is active, which is the
-sign the multiplier terms of (15) require; the same regions appear in (11)–(13)
-with the opposite sign. Wherever
-$\dot V_i \ge 0$ on an active branch, the multiplier terms are non-negative,
-so $(\bar x^\top \bar x)(V - \rho) \ge 0$ and hence $V \ge \rho$ away from
-the origin: the states at which the rate fails lie outside $B_\rho$. The factor
-$\bar x^\top \bar x$ carries the condition through $\bar x = 0$, where
-$\dot V$ vanishes for any $V$.
-
-Here $\rho$ multiplies the known polynomial $\bar x^\top \bar x$, and $L_i$
-multiplies $\dot V_i$, which is fixed along with $V(\bar x)$ throughout Step 1.
-Both are then linear in the decision variables, so $\rho$ is optimized directly
-in one semidefinite program.
-
-The polynomial vector field of Section I introduces a second obligation. The
-semidefinite program reasons about the Taylor expansion, so its certificate
-holds for the expanded field; a returned level is checked against the exact
-dynamics by sampling $\partial B_\rho$ under the saturated feedback, and is
-retained when the observed rate is negative there.
-
-**Algorithm 2** Certified Level for a Fixed Candidate
-
-$$
-\begin{array}{ll}
-\hline
-1\!: & \text{Expand } f,\ g \text{ about } \bar x = 0 \text{ to degrees } 3 \text{ and } 2\\
-2\!: & V(\bar x) \leftarrow \bar x^\top P \bar x, \quad P \text{ from the Riccati equation}\\
-3\!: & u(\bar x) \leftarrow -K\bar x\\
-4\!: & \text{Solve for } \rho,\ L_i(\bar x),\ M_k(\bar x):\\
-   & \quad\qquad \text{maximize } \rho \text{ subject to the three branch}\\
-   & \quad\qquad \text{conditions of Section III, each in the form (15),}\\
-   & \quad\qquad \text{and } L_i(\bar x),\, M_k(\bar x) \ \text{SOS}\\
-5\!: & \textbf{if } \text{the program is infeasible or } \rho \le 0 \ \textbf{then return } \varnothing\\
-6\!: & w \leftarrow \underset{\bar x \,:\, V(\bar x) = \rho}{\max} \ \nabla V(\bar x)^\top
-       \big(f_{\text{exact}} + g_{\text{exact}}\,\mathrm{sat}(u(\bar x))\big)\\
-7\!: & \textbf{if } w \ge 0 \ \textbf{then return } \varnothing \quad
-       \text{\{the exact field contradicts the certificate\}}\\
-8\!: & \textbf{return } \rho\\
-\hline
-\end{array}
-$$
-
-Line 6 is a sampled maximum over the level set, so its force is refutational:
-a negative $w$ leaves the certificate standing, and a non-negative one retires
-it.
-
-Growing the region calls for Step 2 of Algorithm 1, which searches over
-$V(\bar x)$ and is bilinear. That step is left for future work.
-
-## VI. Initialization
-
-The alternation requires an initial Lyapunov candidate. Linearizing about
-$x^\star$ and solving the algebraic Riccati equation
-
-$$
-A^\top S + SA - SBR^{-1}B^\top S + Q = 0
-$$
-
-gives $V_{\text{guess}}(\bar x) = \bar x^\top S \bar x$, scaled to satisfy the
-normalization (5).
+The paper notes that Taylor-expanded trajectories were close to the original
+plant in its experiment. That observation is not a proof for this different
+model. A certificate produced here applies rigorously to the polynomial field;
+validation or a robust certificate is still required before treating it as a
+guarantee for the exact trigonometric plant.

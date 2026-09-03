@@ -19,12 +19,12 @@ The consequence is worth stating plainly: a certificate built on these
 polynomials is rigorous for the polynomial vector field, and only approximate
 for the true plant.  :func:`taylor_fidelity` measures that gap, and any claim
 about the real Acrobot should be checked against the true dynamics separately
-(see ``acrobot_sos_roa.verify_on_true_plant``).
+before it is treated as a plant-level guarantee.
 
 Requires Drake, which is not a dependency of this repository.  Run under an
 environment that has it, with this repository on the path::
 
-    MOSEKLM_LICENSE_FILE=$HOME/mosek/mosek.lic \\
+    MOSEKLM_LICENSE_FILE=/home/seb/mosek/mosek.lic \\
     PYTHONPATH=/path/to/ct-rl /path/to/drake-venv/bin/python \\
         -m evaluations.acrobot_sos_dynamics
 """
@@ -34,7 +34,7 @@ from __future__ import annotations
 import numpy as np
 from pydrake.symbolic import TaylorExpand, Variable, Variables, cos, sin
 
-from controllers.xin_kaneda import PAPER_PARAMS
+from controllers.xin_kaneda import PAPER_PARAMS as XIN_KANEDA_PARAMS
 
 UPRIGHT_STATE = np.array([0.5 * np.pi, 0.0, 0.0, 0.0], dtype=np.float64)
 
@@ -44,7 +44,7 @@ def error_variables(prefix: str = "e") -> np.ndarray:
     return np.array([Variable(f"{prefix}{i}") for i in range(4)])
 
 
-def exact_drift_and_gain(error, params=PAPER_PARAMS):
+def exact_drift_and_gain(error, params=XIN_KANEDA_PARAMS):
     """Symbolic ``f(e), g(e)`` with ``edot = f(e) + g(e) tau``.
 
     Trigonometric and rational, so not usable in an SOS program directly.
@@ -81,11 +81,14 @@ def exact_drift_and_gain(error, params=PAPER_PARAMS):
     return drift, gain
 
 
-def taylor_drift_and_gain(error, params=PAPER_PARAMS, drift_order=3, gain_order=2):
+def taylor_drift_and_gain(
+    error, params=XIN_KANEDA_PARAMS, drift_order=3, gain_order=2
+):
     """``f, g`` Taylor expanded about upright, so both are polynomial.
 
-    ``drift_order = 3`` is the degree Majumdar et al. use.  ``g`` needs one
-    degree less to reach the same order in the product ``g * tau``.
+    ``drift_order = 3`` is the degree Majumdar et al. use. For this model,
+    ``g`` depends on the relative angle through even functions, so its cubic
+    expansion has no degree-three term and ``gain_order = 2`` is equivalent.
     """
     drift, gain = exact_drift_and_gain(error, params)
     origin = {v: 0.0 for v in error}
@@ -95,7 +98,7 @@ def taylor_drift_and_gain(error, params=PAPER_PARAMS, drift_order=3, gain_order=
     )
 
 
-def taylor_fidelity(params=PAPER_PARAMS, drift_order=3, gain_order=2,
+def taylor_fidelity(params=XIN_KANEDA_PARAMS, drift_order=3, gain_order=2,
                     radius=0.35, samples=400, seed=0):
     """Largest deviation of the expanded field from the true plant.
 
