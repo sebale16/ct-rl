@@ -309,6 +309,26 @@ class TestAttractiveRegion(unittest.TestCase):
                 ) / (2.0 * step)
             np.testing.assert_allclose(gradient, numerical, rtol=1e-5, atol=1e-7)
 
+    def test_residual_batch_matches_the_scalar_law_row_by_row(self):
+        rng = np.random.RandomState(23)
+        tolerance = self.region.angle_tolerance
+        states = UPRIGHT_STATE + rng.uniform(-4.0 * tolerance, 4.0 * tolerance, (64, 4))
+        batched = self.region.exact_residual_batch(self.params, states)
+        expected = np.array(
+            [self.region.exact_residual(self.params, s) for s in states]
+        )
+        np.testing.assert_allclose(batched, expected, atol=1e-10)
+        np.testing.assert_array_equal(
+            self.region.contains_batch(self.params, states), expected <= 1.0
+        )
+        self.assertGreater(int(self.region.contains_batch(self.params, states).sum()), 0)
+
+    def test_residual_batch_rejects_the_wrong_shape(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            self.region.exact_residual_batch(self.params, np.zeros(4))
+        with self.assertRaisesRegex(ValueError, "shape"):
+            self.region.exact_residual_batch(self.params, np.zeros((5, 3)))
+
 
 class TestRegionIsSharedAcrossFrames(unittest.TestCase):
     """The one home for equation (17) has to serve both coordinate frames."""
@@ -620,6 +640,40 @@ class TestXKLQRSwitchedController(unittest.TestCase):
     def test_rejects_a_nonpositive_torque_limit(self):
         with self.assertRaisesRegex(ValueError, "torque_limit"):
             XKLQRSwitchedController(self.params, GAINS, torque_limit=0.0)
+
+    def test_actions_matches_call_row_by_row(self):
+        # __call__ latches one-way, so each row needs its own fresh instance
+        # to reproduce actions()'s stateless, per-row membership test.
+        rng = np.random.RandomState(29)
+        hanging = np.array([-0.5 * np.pi, 0.0, 0.0, 0.0])
+        states = np.vstack(
+            [
+                hanging + rng.uniform(-3.0, 3.0, (32, 4)),
+                UPRIGHT_STATE + rng.normal(scale=1e-3, size=(8, 4)),
+            ]
+        )
+        batched = self._controller().actions(states)
+        self.assertEqual(batched.shape, (states.shape[0], 1))
+        self.assertTrue(np.all(np.isfinite(batched)))
+        self.assertTrue(np.all(np.abs(batched) <= 1.0 + 1e-9))
+        for i, state in enumerate(states):
+            expected = self._controller()(state)
+            self.assertAlmostEqual(float(batched[i, 0]), float(expected[0]), places=9)
+        membership = self._controller().lyapunov.region.contains_batch(
+            self.params, states
+        )
+        self.assertGreater(int(membership.sum()), 0)
+        self.assertLess(int(membership.sum()), states.shape[0])
+
+    def test_actions_accepts_a_single_row(self):
+        c = self._controller()
+        one = c.actions(UPRIGHT_STATE)
+        self.assertEqual(one.shape, (1, 1))
+        np.testing.assert_allclose(one, c.actions(UPRIGHT_STATE.reshape(1, -1)))
+
+    def test_actions_rejects_the_wrong_shape(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            self._controller().actions(np.zeros((5, 3)))
 
 
 if __name__ == "__main__":

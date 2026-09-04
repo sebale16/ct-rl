@@ -520,6 +520,46 @@ class AttractiveRegion:
             state[2:],
         )
 
+    def exact_residual_batch(
+        self, params: AcrobotParams, states: np.ndarray
+    ) -> np.ndarray:
+        """Batched counterpart of :meth:`exact_residual`, ``(N, 4) -> (N,)``.
+
+        Same elementwise energy expansion :func:`~controllers.xin_kaneda.
+        torque_batch` uses, so a caller sweeping many states at once --
+        :meth:`XKLQRSwitchedController.actions`'s per-row law choice, for
+        instance -- does not pay a Python call per row.
+        """
+        values = np.asarray(states, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != 4:
+            raise ValueError(
+                f"expected states of shape (N, 4), got {values.shape}"
+            )
+        q1, q2, d1, d2 = values[:, 0], values[:, 1], values[:, 2], values[:, 3]
+        c2 = np.cos(q2)
+        m11 = params.a1 + params.a2 + 2.0 * params.a3 * c2
+        m12 = params.a2 + params.a3 * c2
+        m22 = np.full_like(m11, params.a2)
+        kinetic = 0.5 * (m11 * d1**2 + 2.0 * m12 * d1 * d2 + m22 * d2**2)
+        potential = params.b1 * np.sin(q1) + params.b2 * np.sin(q1 + q2)
+        energy_error = kinetic + potential - params.energy_top
+
+        weighted = np.asarray(self.velocity_weights, dtype=np.float64)
+        velocity_norm = np.sqrt((weighted[0] * d1) ** 2 + (weighted[1] * d2) ** 2)
+        scales = self.scales
+        return np.maximum.reduce(
+            [
+                np.abs(_wrap(q1 - 0.5 * np.pi)) / scales[0],
+                np.abs(_wrap(q1 + q2 - 0.5 * np.pi)) / scales[1],
+                np.abs(energy_error) / scales[2],
+                velocity_norm / scales[3],
+            ]
+        )
+
+    def contains_batch(self, params: AcrobotParams, states: np.ndarray) -> np.ndarray:
+        """Batched counterpart of :meth:`contains`, ``(N, 4) -> (N,)`` bool."""
+        return self.exact_residual_batch(params, states) <= 1.0
+
     def smooth_residual_and_gradient(
         self, params: AcrobotParams, state: np.ndarray
     ) -> Tuple[float, np.ndarray]:
@@ -852,3 +892,37 @@ class XKLQRSwitchedController:
         self.last_commanded_torque = commanded
         self.last_torque = applied
         return np.array([applied / self.params.gear], dtype=np.float64)
+
+    def actions(self, obs: np.ndarray) -> np.ndarray:
+        """Normalized commands for a batch of observations, ``(N, 4) -> (N, 1)``.
+
+        Stateless, like :meth:`~controllers.xin_kaneda.XinKanedaController.
+        actions`: CT-SAC's imitation loss reads this law through here, once
+        per gradient step on a whole minibatch, so it cannot afford a Python
+        call per row. Independently sampled replay states carry no trajectory
+        to latch a switch against, unlike :meth:`__call__`'s one-way latch --
+        so membership is re-tested per row instead, with
+        :meth:`~controllers.acrobot_gated_lyapunov.AttractiveRegion.
+        contains_batch` giving each state whichever law it belongs to right
+        now. Saturation bookkeeping is left alone, as in the batched
+        Xin-Kaneda law: it counts what a trajectory actually commanded, and
+        these states were not necessarily driven by this controller.
+        """
+        values = np.asarray(obs, dtype=np.float64)
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+        if values.ndim != 2 or values.shape[1] != 4:
+            raise ValueError(
+                f"expected observations of shape (N, 4), got {values.shape}"
+            )
+
+        commands = self.swing_up.actions(values).reshape(-1)
+        inside = self.lyapunov.region.contains_batch(self.params, values)
+        if inside.any():
+            selected = values[inside]
+            errors = selected - UPRIGHT_STATE
+            errors[:, :2] = _wrap(errors[:, :2])
+            commanded = -(errors @ self.lyapunov.k.T).reshape(-1)
+            applied = np.clip(commanded, -self.torque_limit, self.torque_limit)
+            commands[inside] = applied / self.params.gear
+        return commands.reshape(-1, 1)
