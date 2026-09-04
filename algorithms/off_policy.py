@@ -157,6 +157,27 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
 
     # ----------------------- Rollout Logic -----------------------
 
+    def _reset_episodic_demonstration_state(self) -> None:
+        """Re-arm a stateful ``demonstration_policy`` on episode boundaries.
+
+        A demonstration controller with memory across calls -- e.g.
+        ``controllers.acrobot_gated_lyapunov.XKLQRSwitchedController``'s
+        one-way swing-up -> local-LQR latch -- tracks progress along ONE
+        continuous trajectory. The env resets to a fresh episode on its own
+        schedule, independent of that memory: without this hook the
+        controller would keep applying whatever law it last latched to (LQR
+        feedback valid only near upright, say) to a freshly reset,
+        far-from-upright state for the rest of the demonstration/imitation
+        window. Only ``algorithms.ct_sac.CTSAC`` sets ``demonstration_policy``
+        and only some controllers expose ``reset()`` (stateless ones, e.g.
+        ``controllers.xin_kaneda.XinKanedaController``'s batched law, don't
+        need it), so both are checked defensively.
+        """
+        policy = getattr(self, "demonstration_policy", None)
+        reset = getattr(policy, "reset", None)
+        if callable(reset):
+            reset()
+
     def _sample_action(self, obs: np.ndarray) -> np.ndarray:
         """
         Exploration policy: random before learning_starts, then policy (+ noise if any).
@@ -403,6 +424,13 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 for i, d in enumerate(dones_arr):
                     if d:
                         self._update_info_buffer(infos[i])
+                if dones_arr.any():
+                    # One demonstration_policy instance is shared across every
+                    # sub-env (see _sample_action's is_vec_env branch), so any
+                    # completed episode re-arms it -- best-effort, since there
+                    # is no per-index latch to distinguish which sub-env made
+                    # it stateful in the first place.
+                    self._reset_episodic_demonstration_state()
                 self._last_obs = (
                     next_obs  # Vec env already returns reset obs for done envs
                 )
@@ -411,6 +439,7 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
                 if done_flag:
                     self._update_info_buffer(infos)
                     self._last_obs, _ = self.env.reset()
+                    self._reset_episodic_demonstration_state()
                 else:
                     self._last_obs = next_obs
 

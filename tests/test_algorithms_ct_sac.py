@@ -243,6 +243,42 @@ class TestDemonstrationWarmStart(unittest.TestCase):
         for obs in calls:
             self.assertEqual(obs.shape, vec_env.observation_space.shape)
 
+    def test_stateful_demonstration_policy_is_reset_on_episode_boundaries(self):
+        """A demo controller with memory (e.g. a one-way swing-up/balance
+        latch) tracks one continuous trajectory; the env resets to a fresh
+        episode on its own schedule. Without re-arming it on every reset, a
+        controller that latched partway through episode 1 would keep
+        applying whatever it last latched to -- valid only near where it
+        switched -- to every later episode's fresh initial state instead of
+        starting over. episode_duration=0.1 at dt=0.02 makes each episode 5
+        steps, so 15 demonstration steps crosses several boundaries."""
+        reset_calls = []
+
+        class _StatefulDemo:
+            def __call__(self, obs):
+                return self.env_action_low
+
+            def reset(self):
+                reset_calls.append(1)
+
+        demo = _StatefulDemo()
+        demo.env_action_low = self.demo_action
+        agent = self._agent(demonstration_policy=demo, demonstration_steps=15)
+        agent.learn(total_timesteps=15)
+        self.assertGreater(len(reset_calls), 0)
+
+    def test_demonstration_policy_without_reset_is_left_alone(self):
+        # Most demo laws (e.g. XinKanedaController's batched act(obs)) are
+        # stateless; the hook must not require a reset method to exist.
+        agent = self._agent(
+            demonstration_policy=lambda obs: self.demo_action,
+            demonstration_steps=15,
+        )
+        try:
+            agent.learn(total_timesteps=15)
+        except Exception as e:
+            self.fail(f"agent.learn() with a resetless demonstration_policy raised: {e}")
+
 
 class _BatchExpert:
     """A constant control law with the batched interface the KL term needs."""
