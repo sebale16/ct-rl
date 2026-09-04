@@ -357,6 +357,15 @@ def _build_demonstration_policy(
     demonstrations this fills the replay buffer with therefore include the
     balance phase the pure Xin-Kaneda law never reaches on its own.
 
+    ``controller_name='xk_sos_switch'`` --
+    :class:`controllers.acrobot_sos_switched.XKSOSSwitchedController`: same
+    one-way latch, but the region and the local law are whatever
+    ``evaluations.acrobot_sos_roa``'s alternation actually certified (a
+    quadratic-Lyapunov sublevel set and a cubic saturated feedback, loaded
+    from ``results/acrobot_sos_roa_tau20_certificate.json`` -- a different,
+    much smaller region than Lai et al.'s, and not the same law as
+    ``xk_lqr_switch``'s plain linear ``-Ke``).
+
     Gains and torque limit come from the task's own
     ``k_v``/``k_d``/``k_p``/``torque_limit`` when the reward config sets
     them (matching the reward's Vdot term to the controller that generated
@@ -367,10 +376,10 @@ def _build_demonstration_policy(
             f"demonstration_controller is only wired for algo='ct_sac', got "
             f"algo={algo!r}"
         )
-    if controller_name not in ("xin_kaneda", "xk_lqr_switch"):
+    if controller_name not in ("xin_kaneda", "xk_lqr_switch", "xk_sos_switch"):
         raise ValueError(
-            "demonstration_controller must be 'xin_kaneda' or "
-            f"'xk_lqr_switch', got {controller_name!r}"
+            "demonstration_controller must be 'xin_kaneda', 'xk_lqr_switch' "
+            f"or 'xk_sos_switch', got {controller_name!r}"
         )
     if env_id != ACROBOT_XK_ENV_ID:
         raise ValueError(
@@ -393,6 +402,7 @@ def _build_demonstration_policy(
 
     from controllers.xin_kaneda import AcrobotParams, Gains, XinKanedaController
     from controllers.acrobot_gated_lyapunov import XKLQRSwitchedController
+    from controllers.acrobot_sos_switched import XKSOSSwitchedController
     from environment.acrobot_xk import (
         DEFAULT_LYAPUNOV_K_D,
         DEFAULT_LYAPUNOV_K_P,
@@ -410,6 +420,8 @@ def _build_demonstration_policy(
     params = AcrobotParams.from_physics(current._env.physics)
     if controller_name == "xk_lqr_switch":
         return XKLQRSwitchedController(params, gains, torque_limit=torque_limit)
+    if controller_name == "xk_sos_switch":
+        return XKSOSSwitchedController(params, gains, torque_limit=torque_limit)
     return XinKanedaController(params, gains, torque_limit=torque_limit)
 
 

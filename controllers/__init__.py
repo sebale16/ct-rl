@@ -28,6 +28,11 @@ from .lai_she import (
     paper_to_xk as lai_she_paper_to_xk,
     xk_to_paper as xk_to_lai_she,
 )
+from .acrobot_sos_switched import (
+    SOSCertificate,
+    XKSOSSwitchedController,
+    load_certificate as load_sos_certificate,
+)
 
 __all__ = [
     "AcrobotParams",
@@ -52,4 +57,7 @@ __all__ = [
     "LaiSheController",
     "lai_she_paper_to_xk",
     "xk_to_lai_she",
+    "SOSCertificate",
+    "XKSOSSwitchedController",
+    "load_sos_certificate",
 ]

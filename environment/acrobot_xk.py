@@ -639,6 +639,7 @@ class BalanceXK(suite_base.Task):
         paper_start: bool = False,
         release_start: bool = False,
         release_angle_range: tuple = RELEASE_ANGLE_RANGE,
+        roa_start_fraction: float = 0.0,
         reward_kind: str = "r0",
         reward_base: str = DEFAULT_REWARD_BASE,
         reward_transform: str = DEFAULT_REWARD_TRANSFORM,
@@ -687,6 +688,18 @@ class BalanceXK(suite_base.Task):
                 f"release_angle_range must satisfy 0 < low < high, got {low}, {high}"
             )
         self.release_angle_range = (low, high)
+        self.roa_start_fraction = float(roa_start_fraction)
+        if not (0.0 <= self.roa_start_fraction <= 1.0):
+            raise ValueError(
+                "roa_start_fraction must be in [0, 1], got "
+                f"{self.roa_start_fraction}"
+            )
+        if self.roa_start_fraction > 0.0 and not self.release_start:
+            raise ValueError(
+                "roa_start_fraction > 0 only replaces some release_start "
+                "draws; pass release_start=True too"
+            )
+        self._sos_certificate = None
         self.reward_kind = str(reward_kind).strip().lower()
         if self.reward_kind not in REWARD_KINDS:
             choices = ", ".join(sorted(REWARD_KINDS))
@@ -889,7 +902,10 @@ class BalanceXK(suite_base.Task):
                 -np.pi, np.pi, 2
             )
             physics.named.data.qvel[["shoulder", "elbow"]] = 0.0
-        elif self.release_start:
+        elif self.release_start and (
+            self.roa_start_fraction <= 0.0
+            or self.random.uniform() >= self.roa_start_fraction
+        ):
             # Straight chain, released from rest, shoulder displaced from
             # hanging by a magnitude drawn uniformly and a random sign.
             low, high = self.release_angle_range
@@ -901,6 +917,15 @@ class BalanceXK(suite_base.Task):
                 0.0,
             ]
             physics.named.data.qvel[["shoulder", "elbow"]] = 0.0
+        elif self.release_start:
+            # roa_start_fraction's draw: a state sampled uniformly (by
+            # volume) from the SOS-certified region of attraction itself,
+            # angles AND rates -- not the release law's zero-velocity,
+            # elbow-locked start. See controllers.acrobot_sos_switched.
+            certificate = self._ensure_sos_certificate()
+            state = certificate.sample_uniform(self.random)
+            physics.named.data.qpos[["shoulder", "elbow"]] = state[:2]
+            physics.named.data.qvel[["shoulder", "elbow"]] = state[2:]
         elif self.paper_start:
             physics.named.data.qpos[["shoulder", "elbow"]] = [
                 PAPER_INITIAL_SHOULDER,
@@ -977,6 +1002,20 @@ class BalanceXK(suite_base.Task):
         if self._last_reward_terms is None:
             return None
         return dict(self._last_reward_terms)
+
+    def _ensure_sos_certificate(self):
+        """Load and cache the SOS-certified region of attraction.
+
+        Needs no physics (unlike :meth:`_ensure_lai_she`): the certificate is
+        a fixed numerical result loaded from
+        ``results/acrobot_sos_roa_tau20_certificate.json``, already in this
+        plant's own paper-frame coordinates.
+        """
+        if self._sos_certificate is None:
+            from controllers.acrobot_sos_switched import load_certificate
+
+            self._sos_certificate = load_certificate()
+        return self._sos_certificate
 
     def _ensure_lai_she(self, physics):
         """Build and cache the Lai-She nonsmooth Lyapunov function.
@@ -1209,6 +1248,7 @@ def swingup_xk(
     paper_start: bool = False,
     release_start: bool = False,
     release_angle_range: tuple = RELEASE_ANGLE_RANGE,
+    roa_start_fraction: float = 0.0,
     reward_kind: str = "r0",
     reward_base: str = DEFAULT_REWARD_BASE,
     reward_transform: str = DEFAULT_REWARD_TRANSFORM,
@@ -1227,7 +1267,13 @@ def swingup_xk(
 
     ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
     from the stock model; both are recoverable from the built model, so a caller
-    can always confirm which plant it is holding.  ``uniform_start=True`` samples
+    can always confirm which plant it is holding.  ``roa_start_fraction``
+    (only meaningful with ``release_start=True``) replaces that fraction of
+    ``release_start`` draws with a state sampled uniformly, by volume, from
+    the SOS-certified region of attraction itself (angles and rates both,
+    not the release law's zero-velocity start) -- see
+    ``controllers.acrobot_sos_switched.SOSCertificate.sample_uniform``.
+    ``uniform_start=True`` samples
     both joint angles over ``[-pi, pi)`` and releases them at exactly zero joint
     velocity; it is mutually exclusive with ``paper_start`` and the near-hanging
     ``release_start``.  ``reward_kind`` chooses the training reward.  For
@@ -1259,6 +1305,7 @@ def swingup_xk(
         paper_start=paper_start,
         release_start=release_start,
         release_angle_range=release_angle_range,
+        roa_start_fraction=roa_start_fraction,
         reward_kind=reward_kind,
         reward_base=reward_base,
         reward_transform=reward_transform,
