@@ -95,6 +95,7 @@ reward-independent metrics recomputed from state, physical time, and torque.
 from __future__ import annotations
 
 import collections
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
@@ -168,12 +169,51 @@ _OMEGA_S = np.sqrt(2.0 * _ENERGY_SPAN / _EXTENDED_M11)
 _V_DOWN = 0.5 * _ENERGY_SPAN**2
 
 
+@dataclass(frozen=True)
+class PlantScales:
+    """Link mass/length multipliers; COM scales with length, inertia with m*l².
+
+    Gravity, damping and actuator capacity are independent of these factors.
+    Unit factors reproduce the published plant exactly.
+    """
+
+    mass1: float = 1.0
+    mass2: float = 1.0
+    length1: float = 1.0
+    length2: float = 1.0
+
+    def __post_init__(self):
+        for name in ("mass1", "mass2", "length1", "length2"):
+            value = float(getattr(self, name))
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and > 0")
+            object.__setattr__(self, name, value)
+
+    @classmethod
+    def coerce(cls, value):
+        return value if isinstance(value, cls) else cls(**(value or {}))
+
+    @property
+    def grouped(self):
+        m1, m2 = LINK1_MASS * self.mass1, LINK2_MASS * self.mass2
+        l1 = LINK1_LENGTH * self.length1
+        c1, c2 = LINK1_COM * self.length1, LINK2_COM * self.length2
+        return (
+            m1 * c1**2 + m2 * l1**2 + LINK1_INERTIA * self.mass1 * self.length1**2,
+            m2 * c2**2 + LINK2_INERTIA * self.mass2 * self.length2**2,
+            m2 * l1 * c2,
+            (m1 * c1 + m2 * l1) * GRAVITY,
+            m2 * c2 * GRAVITY,
+        )
+
+
 @lru_cache(maxsize=64)
 def _elbow_acceleration_abs_bound(
     torque_limit: float,
     damping: float,
     shoulder_rate_limit: float,
     elbow_rate_limit: float,
+    plant_scales: PlantScales = PlantScales(),
 ) -> float:
     """Bound ``|qddot2|`` over the capped state/action closure.
 
@@ -185,6 +225,8 @@ def _elbow_acceleration_abs_bound(
     """
     from scipy.optimize import minimize_scalar
 
+    a1, a2, a3, b1, b2 = plant_scales.grouped
+
     shoulder_rate = float(shoulder_rate_limit)
     elbow_rate = float(elbow_rate_limit)
 
@@ -192,20 +234,20 @@ def _elbow_acceleration_abs_bound(
         q2 = np.asarray(q2, dtype=np.float64)
         cosine = np.cos(q2)
         sine_abs = np.abs(np.sin(q2))
-        m11 = _A1 + _A2 + 2.0 * _A3 * cosine
-        m12 = _A2 + _A3 * cosine
-        determinant = _A1 * _A2 - (_A3 * cosine) ** 2
+        m11 = a1 + a2 + 2.0 * a3 * cosine
+        m12 = a2 + a3 * cosine
+        determinant = a1 * a2 - (a3 * cosine) ** 2
 
-        coriolis = _A3 * sine_abs * (
-            m12
+        coriolis = a3 * sine_abs * (
+            np.abs(m12)
             * (2.0 * shoulder_rate * elbow_rate + elbow_rate**2)
             + m11 * shoulder_rate**2
         )
         damping_force = damping * (
-            m12 * shoulder_rate + m11 * elbow_rate
+            np.abs(m12) * shoulder_rate + m11 * elbow_rate
         )
-        first_gravity = m12 * _B1
-        second_gravity = (m12 - m11) * _B2
+        first_gravity = m12 * b1
+        second_gravity = (m12 - m11) * b2
         gravity = np.sqrt(
             np.maximum(
                 0.0,
@@ -299,6 +341,7 @@ def _lai_she_delta_over_scale(k_v: float, k_d: float, k_p: float) -> float:
 def _raw_reward_rate_lower_bound(
     reward_kind: str,
     *,
+    plant_scales: PlantScales = PlantScales(),
     reward_base: str = DEFAULT_REWARD_BASE,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
     k_p: float = DEFAULT_LYAPUNOV_K_P,
@@ -377,21 +420,30 @@ def _raw_reward_rate_lower_bound(
         if not np.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and > 0")
 
-    shoulder_rate = shoulder_rate_scale_limit * _OMEGA_S
+    plant_scales = PlantScales.coerce(plant_scales)
+    if base == "lai_she" and plant_scales != PlantScales():
+        raise ValueError("lai_she reward bounds currently require the nominal plant")
+    a1, a2, a3, b1, b2 = plant_scales.grouped
+    energy_span = 2.0 * (b1 + b2)
+    extended_m11 = a1 + a2 + 2.0 * a3
+    extended_m12 = a2 + a3
+    omega_s = np.sqrt(2.0 * energy_span / extended_m11)
+    v_down = 0.5 * energy_span**2
+    shoulder_rate = shoulder_rate_scale_limit * omega_s
     elbow_rate = elbow_rate_limit
     elbow_angle = elbow_angle_limit
     kinetic_max = 0.5 * (
-        _EXTENDED_M11 * shoulder_rate**2
-        + 2.0 * _EXTENDED_M12 * shoulder_rate * elbow_rate
-        + _A2 * elbow_rate**2
+        extended_m11 * shoulder_rate**2
+        + 2.0 * extended_m12 * shoulder_rate * elbow_rate
+        + a2 * elbow_rate**2
     )
-    energy_error_abs = max(_ENERGY_SPAN, kinetic_max)
+    energy_error_abs = max(energy_span, kinetic_max)
 
     wrapped_elbow_abs = min(elbow_angle, np.pi)
     baseline_magnitude = (
-        (energy_error_abs / _ENERGY_SPAN) ** 2
+        (energy_error_abs / energy_span) ** 2
         + (wrapped_elbow_abs / np.pi) ** 2
-        + (elbow_rate / _OMEGA_S) ** 2
+        + (elbow_rate / omega_s) ** 2
     )
     if kind == "r0" or (base == "r0" and kind == "r1"):
         return -float(baseline_magnitude)
@@ -401,7 +453,7 @@ def _raw_reward_rate_lower_bound(
     )
     lyapunov_max = (
         state_part_max + 0.5 * k_d * elbow_rate**2
-    ) / _V_DOWN
+    ) / v_down
     if kind == "r1":
         if base == "lai_she":
             lyapunov_max += _lai_she_delta_over_scale(k_v, k_d, k_p)
@@ -441,7 +493,7 @@ def _raw_reward_rate_lower_bound(
         magnitude = (
             coefficient * state_part_max
             + rate_coefficient * elbow_rate**2
-        ) / _V_DOWN
+        ) / v_down
         return -float(magnitude)
 
     acceleration = _elbow_acceleration_abs_bound(
@@ -449,6 +501,7 @@ def _raw_reward_rate_lower_bound(
         damping,
         shoulder_rate,
         elbow_rate,
+        plant_scales,
     )
     energy_rate_abs = (
         elbow_rate * torque_limit
@@ -458,7 +511,7 @@ def _raw_reward_rate_lower_bound(
         energy_error_abs * energy_rate_abs
         + k_d * elbow_rate * acceleration
         + k_p * elbow_angle * elbow_rate
-    ) / _V_DOWN
+    ) / v_down
 
     if base == "r0":
         # The r3 correction lambda eta V is non-negative, so dropping it gives
@@ -475,6 +528,7 @@ def _raw_reward_rate_lower_bound(
 def reward_rate_lower_bound(
     reward_kind: str,
     *,
+    plant_scales: PlantScales = PlantScales(),
     reward_base: str = DEFAULT_REWARD_BASE,
     reward_transform: str = DEFAULT_REWARD_TRANSFORM,
     k_d: float = DEFAULT_LYAPUNOV_K_D,
@@ -492,6 +546,7 @@ def reward_rate_lower_bound(
     """Return the selected reward's transformed terminal lower envelope."""
     raw_bound = _raw_reward_rate_lower_bound(
         reward_kind,
+        plant_scales=plant_scales,
         reward_base=reward_base,
         k_d=k_d,
         k_p=k_p,
@@ -575,11 +630,11 @@ _MODEL_XML = """
     <camera name="fixed" pos="0 -8 0" zaxis="0 -1 0"/>
     <body name="upper_arm" pos="0 0 0">
       <joint name="shoulder"/>
-      <inertial pos="{lc1} 0 0" mass="{m1}" diaginertia="{minor} {i1} {i1}"/>
+      <inertial pos="{lc1} 0 0" mass="{m1}" diaginertia="{minor1} {i1} {i1}"/>
       <geom name="upper_arm" fromto="0 0 0 {l1} 0 0" size="0.05" material="self"/>
       <body name="lower_arm" pos="{l1} 0 0">
         <joint name="elbow"/>
-        <inertial pos="{lc2} 0 0" mass="{m2}" diaginertia="{minor} {i2} {i2}"/>
+        <inertial pos="{lc2} 0 0" mass="{m2}" diaginertia="{minor2} {i2} {i2}"/>
         <geom name="lower_arm" fromto="0 0 0 {l2} 0 0" size="0.049"
               material="self"/>
         <site name="tip" pos="{l2} 0 0" size="0.01"/>
@@ -595,7 +650,8 @@ _MODEL_XML = """
 """
 
 
-def _model_xml(damping: float, torque_limit: float) -> bytes:
+def _model_xml(damping: float, torque_limit: float,
+               plant_scales: PlantScales = PlantScales()) -> bytes:
     """Xin-Kaneda's geometry as a MuJoCo model, at the given damping and gear."""
     if not np.isfinite(damping) or damping < 0.0:
         raise ValueError(f"damping must be finite and >= 0, got {damping}")
@@ -603,22 +659,25 @@ def _model_xml(damping: float, torque_limit: float) -> bytes:
         raise ValueError(
             f"torque_limit must be finite and > 0, got {torque_limit}"
         )
+    scales = PlantScales.coerce(plant_scales)
+    reach = LINK1_LENGTH * scales.length1 + LINK2_LENGTH * scales.length2
     return _MODEL_XML.format(
         gravity=GRAVITY,
         damping=float(damping),
         gear=float(torque_limit),
-        reach=REACH,
-        light_height=REACH + 2.0,
-        floor_height=-(REACH + 3.0),
-        l1=LINK1_LENGTH,
-        l2=LINK2_LENGTH,
-        lc1=LINK1_COM,
-        lc2=LINK2_COM,
-        m1=LINK1_MASS,
-        m2=LINK2_MASS,
-        i1=LINK1_INERTIA,
-        i2=LINK2_INERTIA,
-        minor=_MINOR_INERTIA,
+        reach=reach,
+        light_height=reach + 2.0,
+        floor_height=-(reach + 3.0),
+        l1=LINK1_LENGTH * scales.length1,
+        l2=LINK2_LENGTH * scales.length2,
+        lc1=LINK1_COM * scales.length1,
+        lc2=LINK2_COM * scales.length2,
+        m1=LINK1_MASS * scales.mass1,
+        m2=LINK2_MASS * scales.mass2,
+        i1=LINK1_INERTIA * scales.mass1 * scales.length1**2,
+        i2=LINK2_INERTIA * scales.mass2 * scales.length2**2,
+        minor1=_MINOR_INERTIA * scales.mass1 * scales.length1**2,
+        minor2=_MINOR_INERTIA * scales.mass2 * scales.length2**2,
     ).encode("utf-8")
 
 
@@ -654,6 +713,7 @@ class BalanceXK(suite_base.Task):
         elbow_rate_limit: float = ELBOW_RATE_LIMIT,
         shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
         cap_terminal_penalty: bool = True,
+        plant_scales: PlantScales = PlantScales(),
     ) -> None:
         super().__init__(random=random)
         # When True (default), a state-cap crossing freezes the reward at the
@@ -780,8 +840,10 @@ class BalanceXK(suite_base.Task):
                 "energy and elbow-angle terms retain negative reward "
                 "coefficients"
             )
+        self.plant_scales = PlantScales.coerce(plant_scales)
         self.failure_reward_rate = reward_rate_lower_bound(
             self.reward_kind,
+            plant_scales=self.plant_scales,
             reward_base=self.reward_base,
             reward_transform=self.reward_transform,
             k_d=self.k_d,
@@ -1222,6 +1284,7 @@ def swingup_xk(
     elbow_rate_limit: float = ELBOW_RATE_LIMIT,
     shoulder_rate_scale_limit: float = SHOULDER_RATE_SCALE_LIMIT,
     cap_terminal_penalty: bool = True,
+    plant_scales: Optional[Dict[str, float]] = None,
 ):
     """Construct ``acrobot-swingup-xk``.
 
@@ -1248,8 +1311,9 @@ def swingup_xk(
     the live, actually-computed reward for that terminal state (no penalty
     override, no analytical continuation).
     """
+    plant_scales = PlantScales.coerce(plant_scales)
     physics = mujoco.Physics.from_xml_string(
-        _model_xml(damping, torque_limit), common.ASSETS
+        _model_xml(damping, torque_limit, plant_scales), common.ASSETS
     )
     task = BalanceXK(
         random=random,
@@ -1274,6 +1338,7 @@ def swingup_xk(
         elbow_rate_limit=elbow_rate_limit,
         shoulder_rate_scale_limit=shoulder_rate_scale_limit,
         cap_terminal_penalty=cap_terminal_penalty,
+        plant_scales=plant_scales,
     )
     return control.Environment(
         physics,
