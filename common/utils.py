@@ -213,6 +213,8 @@ def load_sb3_hyperparams_from_table(
     # env meta (env_* columns)
     env_meta: Dict[str, Any] = {}
     for key, val in row.items():
+        if key == "env_id":
+            continue
         if key.startswith("env_"):
             env_key = key[len("env_") :]
             if env_key in {"time_sampling_kwargs", "task_kwargs"}:
@@ -225,6 +227,12 @@ def load_sb3_hyperparams_from_table(
     arch_str = row.get("policy_net_arch", "")
     if arch_str:
         policy_kwargs["net_arch"] = _parse_net_arch(arch_str)
+
+    # SAC/TRPO historically store this policy constructor option in an
+    # unprefixed column.  Keep it out of the algorithm constructor kwargs.
+    log_std_init = row.get("log_std_init", "")
+    if log_std_init is not None and str(log_std_init).strip():
+        policy_kwargs["log_std_init"] = _parse_scalar(log_std_init)
 
     act_name = row.get("policy_activation_fn", "ReLU")
     policy_kwargs["activation_fn"] = _normalize_activation_fn(act_name)
@@ -241,10 +249,15 @@ def load_sb3_hyperparams_from_table(
         "comment",
         "policy_net_arch",
         "policy_activation_fn",
+        "log_std_init",
     }
 
     for key, val in row.items():
         if key in skip_keys or key.startswith("env_") or key.startswith("policy_"):
+            # ``policy_delay`` is an algorithm parameter despite its historical
+            # unprefixed spelling in td3.csv.
+            if key == "policy_delay" and val is not None and str(val).strip():
+                algo_kwargs[key] = _parse_scalar(val)
             continue
         if val is None or str(val).strip() == "":
             continue
