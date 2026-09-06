@@ -11,9 +11,10 @@ evaluations.evaluation_helpers.evaluate_policy_per_step /
 evaluate_sb3_policy_per_step, which already handle both model families
 against the same raw ContinuousEnv.
 
-Episode length is capped (env_max_steps override) purely to keep clips a
-reasonable size for embedding in an artifact -- this is for visualization,
-not scoring, so it isn't run through the fixed 32-seed protocol.
+Runs the full xk_eval episode length (env_max_steps=20000, 20 simulated
+seconds) for each arm; this is for visualization, not scoring, so it uses
+one release-from-rest episode rather than the fixed 32-seed protocol.
+Playback is real-time: render_interval * physics_dt * fps == 1.
 
 Usage:
     MUJOCO_GL=egl python -m benchmarks.render_irregular1m_arm_videos \\
@@ -68,10 +69,16 @@ CT_ALGOS = ("ct_sac", "ct_td3")
 SEED = 20000
 RUN_ID = "irregular1m_v1"
 HP = "benchmarks/hyperparams"
-RENDER_MAX_STEPS = 6000  # cap episode length for clip size, not scoring
-RENDER_INTERVAL = 15
-WIDTH, HEIGHT = 320, 240
-FPS = 24
+RENDER_MAX_STEPS = 20000  # the full xk_eval protocol episode; no artificial cap
+# dt=0.001s per physics step. RENDER_INTERVAL * dt * FPS == 1 keeps playback at
+# real (simulated) time -- 40 steps/frame * 0.001s * 25fps == 1.0. (A previous
+# version used interval=15/fps=24, which played back at ~0.36x -- 2.8x slow
+# motion -- by accident, not by design.)
+RENDER_INTERVAL = 40
+FPS = 25
+# evaluate_policy_per_step/evaluate_sb3_policy_per_step call env.render() with
+# no size override, so frames come out at DMCContinuousEnv.render's default
+# (640x480) -- fine, actual clip sizes stayed well under budget at that size.
 
 
 def _eval_env_kwargs(algo: str, mode: str) -> tuple[dict, dict]:
