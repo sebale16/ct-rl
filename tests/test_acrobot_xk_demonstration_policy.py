@@ -1,11 +1,12 @@
-"""``_build_demonstration_policy``: CT-SAC's analytical-controller warm start
-for acrobot-swingup-xk (see algorithms.ct_sac.CTSAC's demonstration_policy)."""
+"""``build_demonstration_policy``: the shared analytical-controller warm
+start for acrobot-swingup-xk (see common.demonstration and
+algorithms.ct_sac.CTSAC's demonstration_policy)."""
 
 import unittest
 
 import numpy as np
 
-from benchmarks.run_ct_rl import ACROBOT_XK_ENV_ID, _build_demonstration_policy
+from common.demonstration import ACROBOT_XK_ENV_ID, build_demonstration_policy
 from controllers.acrobot_sos_switched import XKSOSSwitchedController
 from controllers.xin_kaneda import XinKanedaController
 from environment.dmc import DMCContinuousEnv
@@ -37,7 +38,7 @@ def _acrobot_env(*, raw_state_obs=True, **task_kwargs):
 class TestBuildDemonstrationPolicy(unittest.TestCase):
     def test_builds_a_working_xin_kaneda_controller_from_the_training_env(self):
         env = _acrobot_env(reward_kind="r0")
-        policy = _build_demonstration_policy(
+        policy = build_demonstration_policy(
             algo="ct_sac",
             env_id=ACROBOT_XK_ENV_ID,
             env_kwargs={"raw_state_obs": True},
@@ -67,7 +68,7 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
             k_p=65.0,
             torque_limit=15.0,
         )
-        policy = _build_demonstration_policy(
+        policy = build_demonstration_policy(
             algo="ct_sac",
             env_id=ACROBOT_XK_ENV_ID,
             env_kwargs={
@@ -89,7 +90,7 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
 
     def test_builds_a_working_xk_sos_switch_controller_from_the_training_env(self):
         env = _acrobot_env(reward_kind="r0")
-        policy = _build_demonstration_policy(
+        policy = build_demonstration_policy(
             algo="ct_sac",
             env_id=ACROBOT_XK_ENV_ID,
             env_kwargs={"raw_state_obs": True},
@@ -107,11 +108,13 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
         batched = policy.actions(obs.reshape(1, -1))
         self.assertEqual(batched.shape, (1, 1))
 
-    def test_rejects_non_ct_sac_algorithms(self):
+    def test_rejects_unsupported_algorithms(self):
+        # ct_sac, ct_td3, sac, and td3 all get the demonstration warm start;
+        # an on-policy algorithm like ppo does not.
         env = _acrobot_env(reward_kind="r0")
-        with self.assertRaisesRegex(ValueError, "only wired for algo='ct_sac'"):
-            _build_demonstration_policy(
-                algo="ct_td3",
+        with self.assertRaisesRegex(ValueError, "only wired for algo in"):
+            build_demonstration_policy(
+                algo="ppo",
                 env_id=ACROBOT_XK_ENV_ID,
                 env_kwargs={"raw_state_obs": True},
                 train_env=env,
@@ -121,7 +124,7 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
     def test_rejects_unknown_controller_names(self):
         env = _acrobot_env(reward_kind="r0")
         with self.assertRaisesRegex(ValueError, "must be 'xin_kaneda'"):
-            _build_demonstration_policy(
+            build_demonstration_policy(
                 algo="ct_sac",
                 env_id=ACROBOT_XK_ENV_ID,
                 env_kwargs={"raw_state_obs": True},
@@ -132,7 +135,7 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
     def test_rejects_non_acrobot_xk_envs(self):
         env = _acrobot_env(reward_kind="r0")
         with self.assertRaisesRegex(ValueError, "requires env_id="):
-            _build_demonstration_policy(
+            build_demonstration_policy(
                 algo="ct_sac",
                 env_id="cartpole-swingup",
                 env_kwargs={"raw_state_obs": True},
@@ -143,7 +146,7 @@ class TestBuildDemonstrationPolicy(unittest.TestCase):
     def test_rejects_envs_without_raw_state_obs(self):
         env = _acrobot_env(raw_state_obs=False, reward_kind="r0")
         with self.assertRaisesRegex(ValueError, "raw_state_obs=True"):
-            _build_demonstration_policy(
+            build_demonstration_policy(
                 algo="ct_sac",
                 env_id=ACROBOT_XK_ENV_ID,
                 env_kwargs={"raw_state_obs": False},

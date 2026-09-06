@@ -41,6 +41,8 @@ from common.sb3_callbacks import (
     SustainedCaptureEvalCallback,
     WallClockStopCallback,
 )
+from common.sb3_demo import demo_seeded_class
+from common.demonstration import build_demonstration_policy
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import (
     curriculum_mastery_capture_spec_for,
@@ -108,6 +110,7 @@ def make_env(env_id, monitor_root, seed, env_meta=None, dataset_path=None):
             "time_sampling_kwargs",
             "return_reward_increment",
             "task_kwargs",
+            "raw_state_obs",
         ]:
             if k in env_meta and env_meta[k] is not None:
                 dmc_kwargs[k] = env_meta[k]
@@ -310,6 +313,23 @@ def run_sb3_benchmark(
         dt_default = train_env.get_attr("dt_default", indices=0)[0]
         algo_kwargs["gamma"] = original_gamma ** (dt / dt_default)
 
+    # Optional analytical-controller demonstration warm start (see
+    # common.demonstration.build_demonstration_policy and, for the
+    # SB3-specific plumbing, common.sb3_demo). `demonstration_steps`, if
+    # set, is applied to the model below; only the controller name needs
+    # resolving into an actual act(obs) -> action object here.
+    demonstration_controller = algo_kwargs.pop("demonstration_controller", None)
+    demonstration_steps_cfg = algo_kwargs.pop("demonstration_steps", None)
+    demonstration_policy = None
+    if demonstration_controller:
+        demonstration_policy = build_demonstration_policy(
+            algo=algo,
+            env_id=env_id,
+            env_kwargs=env_meta,
+            train_env=train_env,
+            controller_name=str(demonstration_controller).strip().lower(),
+        )
+
     # Setup algorithms
     if algo == "sac":
         AlgoClass = SAC
@@ -326,6 +346,13 @@ def run_sb3_benchmark(
         AlgoClass = TRPO
     else:
         raise ValueError(f"Unsupported algo '{algo}'")
+    if demonstration_policy is not None:
+        if algo not in ("sac", "td3"):
+            raise ValueError(
+                "demonstration_controller is only wired for SB3 algo in "
+                f"('sac', 'td3'), got algo={algo!r}"
+            )
+        AlgoClass = demo_seeded_class(AlgoClass)
     DefaultAlgo = partial(AlgoClass, policy_kwargs=policy_kwargs)
 
     # Fixed-name checkpoint (model + replay buffer) a resubmission chain
@@ -351,6 +378,13 @@ def run_sb3_benchmark(
             train_env,
             seed=seed,
             **algo_kwargs,
+        )
+    if demonstration_policy is not None:
+        model.demonstration_policy = demonstration_policy
+        model.demonstration_steps = (
+            int(algo_kwargs.get("learning_starts", 100))
+            if demonstration_steps_cfg is None
+            else int(demonstration_steps_cfg)
         )
     model.set_logger(logger)
 

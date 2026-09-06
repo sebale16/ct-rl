@@ -1,4 +1,4 @@
-from typing import Union, Optional, Type
+from typing import Callable, Union, Optional, Type
 import numpy as np
 import torch as th
 import torch.nn.functional as F
@@ -43,6 +43,8 @@ class CTTD3(OffPolicyAlgorithm):
         target_policy_noise: float = 0.2,  # Used if target_action_noise is None
         target_noise_clip: float = 0.5,
         target_action_noise: Optional[ActionNoise] = None,
+        demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        demonstration_steps: Optional[int] = None,
     ) -> None:
         super().__init__(
             env=env,
@@ -87,6 +89,68 @@ class CTTD3(OffPolicyAlgorithm):
             self.model.critic_parameters, lr=self.lr_schedule(1.0)
         )
         self.optimizers = [self.actor_optimizer, self.critic_optimizer]
+
+        # Demonstration warm start: for the first `demonstration_steps` calls
+        # to _sample_action (default: learning_starts), _sample_action defers
+        # to `demonstration_policy` instead of the base class's random-action
+        # warmup, so the replay buffer starts from states the demonstrator
+        # actually reaches rather than a uniform random walk's states.
+        # Gradient updates are unaffected -- train() still only begins once
+        # num_timesteps > learning_starts, per the base class. Mirrors
+        # algorithms.ct_sac.CTSAC's demonstration_policy/demonstration_steps
+        # (see there for the imitation-loss counterpart this class doesn't
+        # implement).
+        self.demonstration_policy = demonstration_policy
+        self.demonstration_steps = (
+            self.learning_starts
+            if demonstration_steps is None
+            else int(demonstration_steps)
+        )
+        if self.demonstration_steps < 0:
+            raise ValueError(
+                "demonstration_steps must be non-negative, got "
+                f"{demonstration_steps!r}"
+            )
+
+    def _sample_action(self, obs: np.ndarray) -> np.ndarray:
+        """Defer to ``demonstration_policy`` during the demonstration warm start.
+
+        Falls through to the base class (random actions before
+        ``learning_starts``, the trained policy after) once
+        ``demonstration_policy`` is unset or ``num_timesteps`` reaches
+        ``demonstration_steps``.
+        """
+        if (
+            self.demonstration_policy is None
+            or self.num_timesteps >= self.demonstration_steps
+        ):
+            return super()._sample_action(obs)
+
+        is_vec_env = self.is_vec_env
+        n_envs = self.n_envs
+        obs_arr = np.asarray(obs, dtype=np.float32)
+        if is_vec_env:
+            if obs_arr.ndim == 1:
+                obs_arr = obs_arr[None, :]
+            assert (
+                obs_arr.shape[0] == n_envs
+            ), f"obs first dim must be n_envs={n_envs}, got {obs_arr.shape}"
+            action = np.stack(
+                [
+                    np.asarray(
+                        self.demonstration_policy(obs_arr[i]), dtype=np.float32
+                    ).reshape(self.action_dim)
+                    for i in range(n_envs)
+                ],
+                axis=0,
+            )
+        else:
+            if obs_arr.ndim > 1:
+                obs_arr = obs_arr[0]
+            action = np.asarray(
+                self.demonstration_policy(obs_arr), dtype=np.float32
+            ).reshape(self.action_dim)
+        return np.clip(action, self.env.action_space.low, self.env.action_space.high)
 
     def _policy_act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         obs_t = th.as_tensor(obs, device=self.device).float()

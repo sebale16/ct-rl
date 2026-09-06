@@ -37,6 +37,7 @@ CT_SAC_MODES = {
     },
 }
 BASELINE_MODE = f"{STEM}_tau1p25e2_irregular1m"
+DEMO_MODE = f"{STEM}_xkdemo20k_tau1p25e2_irregular1m"
 
 
 def _assert_irregular_contract(case, total, env, log):
@@ -106,6 +107,35 @@ class TestAcrobotXKIrregularBenchmarkModes(unittest.TestCase):
                 self.assertAlmostEqual(algo["gamma"], expected_gamma, places=15)
                 self.assertEqual(algo["tau"], 0.0125)
                 self.assertEqual(algo["learning_starts"], 10_000)
+
+    def test_sac_ct_td3_and_td3_baseline_uses_the_raw_state_observation(self):
+        # xin_kaneda (and every other Acrobot-XK demonstration controller)
+        # reads the raw [q1, q2, qdot1, qdot2] state; the demo-seeded arm
+        # below and its baseline must therefore share raw_state_obs=True,
+        # matching the ct_sac quartet's own env_raw_state_obs=True.
+        loaders = {
+            "sac": load_sb3_hyperparams_from_table,
+            "ct_td3": load_ct_hyperparams_from_table,
+            "td3": load_sb3_hyperparams_from_table,
+        }
+        for algorithm, loader in loaders.items():
+            with self.subTest(algorithm=algorithm):
+                _, env, _, _, _ = loader(algorithm, ENV_ID, BASELINE_MODE)
+                self.assertEqual(str(env["raw_state_obs"]).lower(), "true")
+
+    def test_sac_ct_td3_and_td3_demo_arm_seeds_from_xin_kaneda(self):
+        loaders = {
+            "sac": load_sb3_hyperparams_from_table,
+            "ct_td3": load_ct_hyperparams_from_table,
+            "td3": load_sb3_hyperparams_from_table,
+        }
+        for algorithm, loader in loaders.items():
+            with self.subTest(algorithm=algorithm):
+                total, env, _, algo, log = loader(algorithm, ENV_ID, DEMO_MODE)
+                _assert_irregular_contract(self, total, env, log)
+                self.assertEqual(str(env["raw_state_obs"]).lower(), "true")
+                self.assertEqual(algo["demonstration_controller"], "xin_kaneda")
+                self.assertEqual(algo["demonstration_steps"], 20_000)
 
     def test_sac_log_std_is_a_policy_setting(self):
         _, _, policy, algo, _ = load_sb3_hyperparams_from_table(
