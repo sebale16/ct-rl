@@ -1,34 +1,35 @@
 #!/usr/bin/env python
 """Render the nonsmooth Lyapunov function and its Lai attractive-area switch.
 
-Swing-up uses the Xin-Kaneda law, which is the same energy-and-posture function
-the outer piece of the nonsmooth Lyapunov function is built from, and the
-controller latches to the local Riccati feedback on first entry to Lai et al.'s
-equation-(17) region rather than to the 2007 ``zeta = 0.04`` test.
+Swing-up uses the Xin-Kaneda law. That law is the same energy-and-posture
+function that the outer piece of the nonsmooth Lyapunov function is built from.
+The controller latches to the local Riccati feedback on first entry to the
+equation-(17) region of Lai et al. The 2007 ``zeta = 0.04`` test governs the
+gated candidate instead.
 
-Three panels: the mechanism, the shoulder phase portrait borrowed from
-``render_acrobot_xk_swingup`` with the homoclinic orbit drawn as a reference,
-and a trace of ``V(t)``.  The third panel is the point of the video.  The
-transition band is shaded and the switch instant is marked, so the property the
-offset ``Delta`` buys -- that crossing the gate never steps the value up -- is
-visible rather than asserted.  ``Delta`` itself is drawn as the level the value
-holds while the trajectory rides the orbit.
+The video has three panels. The first is the mechanism. The second is the
+shoulder phase portrait borrowed from ``render_acrobot_xk_swingup``, with the
+homoclinic orbit drawn as a reference. The third is a trace of ``V(t)``, and it
+is the point of the video. The panel shades the transition band and marks the
+switch instant, so a viewer sees the property that the offset ``Delta`` buys. A
+crossing of the gate never steps the value up. ``Delta`` itself appears as the
+level that the value holds while the trajectory rides the orbit.
 
-``--shoulder`` releases the straight chain from a chosen displacement, which
-the plant's own near-hanging start cannot express because it perturbs both
-joints at random.  The default enters the region around 10 s and balances with
-under 1 N.m to spare; ``--shoulder -1.390796`` enters near 4 s at the cost of a
+``--shoulder`` releases the straight chain from a chosen displacement. The
+plant's own near-hanging start cannot express that, because it perturbs both
+joints at random. The default enters the region around 10 s, and balances with
+under 1 N.m to spare. ``--shoulder -1.390796`` enters near 4 s, at the cost of a
 visible overshoot in the value while the local feedback settles.
 
-Entry to the region is not by itself a successful balance.  Sweeping releases
-under this pairing, 30 of 98 enter, and of those only 10 hold upright at the
-plant's 64 N.m; the published linear gain asks for far more than that near the
-boundary, and the value then rises steeply.  The construction is unharmed by
-this -- the rise is the linear law overshooting, and the swing-up and the
-transition band contribute none of it -- but a start has to be chosen with it
-in mind, which is why the default is pinned rather than sampled.
+An entry to the region is no successful balance on its own. Across a sweep of
+releases under this pairing, 30 of 98 enter, and 10 of those hold upright at the
+plant's 64 N.m. The published linear gain asks for far more than that near the
+boundary, and the value then rises steeply. That rise leaves the construction
+intact. It is the linear law that overshoots, and the swing-up and the
+transition band contribute none of it. A caller still has to choose a start with
+that in mind, which is why the default is pinned rather than sampled.
 
-Headless EGL software rendering; frames are piped to ffmpeg.
+Rendering runs headless through EGL software, and the frames go to ffmpeg.
 
     MUJOCO_GL=egl python -m benchmarks.render_acrobot_nslf \\
         --duration 30 --output videos/acrobot_nslf/acrobot_nslf_lqr_switch.mp4
@@ -72,9 +73,9 @@ SWITCH = (150, 120, 255)   # switch marker
 class SwitchedController:
     """Xin-Kaneda swing-up, latching to the local feedback inside ``Sigma_2``.
 
-    The switch is one way, as in Lai et al.: the region is entered once and the
-    balance law keeps it.  ``last_torque`` is the physical elbow torque actually
-    applied, after the plant's own actuator bound.
+    The switch is one way, as in Lai et al. The trajectory enters the region
+    once, and the balance law holds it there. ``last_torque`` is the physical
+    elbow torque applied, after the plant's own actuator bound.
     """
 
     SWING_UP = 1
@@ -276,8 +277,9 @@ def build(args) -> int:
 
     obs, _ = env.reset(seed=args.seed)
     if args.shoulder is not None:
-        # The near-hanging start perturbs both joints at random, so a chosen
-        # release is written in directly; raw_state_obs is exactly this vector.
+        # The near-hanging start perturbs both joints at random. A chosen
+        # release therefore goes in directly, and raw_state_obs is exactly this
+        # vector.
         physics.named.data.qpos[["shoulder", "elbow"]] = [args.shoulder, 0.0]
         physics.named.data.qvel[["shoulder", "elbow"]] = 0.0
         physics.forward()

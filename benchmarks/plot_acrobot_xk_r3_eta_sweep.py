@@ -1,72 +1,73 @@
 #!/usr/bin/env python
 """Sweep ``eta`` in Acrobot-XK ``r2``/``r3`` along analytical-controller episodes.
 
-The analytical Xin--Kaneda controller does not depend on ``eta`` or on the
-discount rate.  Consequently, this script rolls out the 32 fixed release
-starts once, records ``r0``, the normalized Lyapunov terms, and the raw
-state emitted by the environment, and evaluates two reward families offline,
-matching ``environment/acrobot_xk.py:xk_reward_terms`` exactly for either
+The analytical Xin--Kaneda controller depends on neither ``eta`` nor the
+discount rate. This script therefore rolls out the 32 fixed release starts
+once. It records ``r0``, the normalized Lyapunov terms, and the raw state that
+the environment emits. It then evaluates two reward families offline. Both match
+``environment/acrobot_xk.py:xk_reward_terms`` exactly, for either
 ``--reward-base``:
 
     reward_base="lyapunov" (the environment default):
         r2(eta)         = -Vbar - eta * Vdotbar
         r3(eta, lambda) = -Vbar + eta * (lambda * Vbar - Vdotbar)
 
-    reward_base="r0" (r1 substitutes r0, the normalized periodic distance,
-    for -Vbar; the derivative and discount correction still use the
-    original Xin--Kaneda V, unaffected by the substitution):
+    reward_base="r0" (r1 puts r0, the normalized periodic distance, in place
+    of -Vbar. The derivative and the discount correction still use the
+    original Xin--Kaneda V, and the substitution leaves them alone):
         r2(eta)         = r0 - eta * Vdotbar
         r3(eta, lambda) = r0 - eta * Vdotbar + lambda * eta * Vbar
 
-``r3`` is swept at both CT-SAC discount horizons in the benchmark matrix
-(lambda=0.5 /s, 2 s and lambda=0.1 /s, 10 s); ``r2`` has no discount-rate term
-in the implementation, so it is swept once.
+The script sweeps ``r3`` at both CT-SAC discount horizons of the benchmark
+matrix, lambda=0.5 /s over 2 s and lambda=0.1 /s over 10 s. The implementation
+of ``r2`` carries no discount-rate term, so the script sweeps it once.
 
-Every reward above is then reformulated as ``ln(1 / -reward)``, so that
-"better" (less negative, closer to 0) reads as "larger" and the near-zero
-behaviour that a symlog plot used to approximate gets an exact, monotone
-stretch instead.  The transform is undefined once ``reward >= 0``, which
-happens routinely at larger eta (the ``-eta * Vdotbar`` term can overshoot
-past zero), so before transforming, reward is clipped from above to a
-ceiling: the largest ``r1`` (``r0`` or ``-Vbar``) ever reaches anywhere
-along the fixed, eta-independent rollout (``reward_ceiling``).  ``r1`` is
-the pure state-proximity term the reward is built from, so its own maximum
-is as close to the target as this trajectory ever gets -- the same sense in
-which the eq. 74 LQR switching residual (``|x|_zeta < 0.04``,
-``evaluations/acrobot_homoclinic_metrics.py``) is never satisfied on these
-rollouts either (see ``compute_region_masks``).  The ceiling deliberately
-excludes the ``-eta * Vdotbar`` shaping term: using the full eta-dependent
-reward as the ceiling would make it collapse toward 0 as eta grows,
-saturating almost every sample and making "sustained settling" spuriously
-instant -- an artifact of the ceiling, not genuine convergence.
+Every reward above then becomes ``ln(1 / -reward)``. On that scale "better",
+which is less negative and closer to 0, reads as "larger". The near-zero region
+that a symlog plot approximates gets an exact, monotone stretch.
 
-Since the trajectory never enters the LQR region, no eta should be able to
-make the reward claim it did: a sample only counts as genuinely entering it
-if raw reward clears the ceiling by more than ``VIOLATION_TOLERANCE``, which
-filters the floating-point-scale (~1e-8-1e-6) same-sample knife edge every
-eta > 0 trips exactly at the ceiling-defining instant, without also passing
-substantial, growing overshoot elsewhere.  ``never_enters_lqr_level`` is
-that per-eta boolean, and it is *not* satisfied by every eta or reward: past
-a reward- and base-dependent point, "sustained settling" would otherwise
-collapse toward 0 s purely because reward sits above the ceiling for nearly
-the whole episode, not because the trajectory converges faster.  "Best eta"
-is chosen only among eta with ``never_enters_lqr_level`` True; other eta are
-still swept and plotted (hatched) for context.
+The transform is undefined once ``reward >= 0``, which happens often at a larger
+eta, because the ``-eta * Vdotbar`` term can overshoot past zero. The script
+therefore clips reward from above to a ceiling first. The ceiling is the largest
+``r1``, either ``r0`` or ``-Vbar``, reached anywhere along the fixed,
+eta-independent rollout (``reward_ceiling``). ``r1`` is the pure
+state-proximity term that the reward is built from. Its own maximum is as close
+to the target as this trajectory ever gets. In the same sense, the eq. 74
+LQR switching residual (``|x|_zeta < 0.04``,
+``evaluations/acrobot_homoclinic_metrics.py``) never holds on these rollouts
+either. See ``compute_region_masks``. The ceiling leaves out the
+``-eta * Vdotbar`` shaping term on purpose. With the full eta-dependent reward
+as the ceiling, the ceiling collapses toward 0 as eta grows. Almost every sample
+then saturates, and "sustained settling" turns spuriously instant. That is an
+artifact of the ceiling, and not convergence.
 
-"Converged" means the transformed reward remains at or above
-``ln(1/--settling-tolerance)`` (equivalently: raw reward within
-``--settling-tolerance`` of 0 from below, or clipped) for every subsequent
-sample through the end of the episode.  This sustained-settling definition
-rejects transient crossings.
+The trajectory never enters the LQR region, so no eta can let the reward claim
+that it did. A sample counts as a genuine entry only when the raw reward clears
+the ceiling by more than ``VIOLATION_TOLERANCE``. That tolerance filters the
+same-sample knife edge at floating-point scale, about 1e-8 to 1e-6, which every
+eta > 0 trips at the ceiling-defining instant. It still passes a large and
+growing overshoot elsewhere. ``never_enters_lqr_level`` is that per-eta boolean.
+Some eta and some rewards fail it. Past a point that depends on the reward and
+the base, reward sits above the ceiling for nearly the whole episode. "Sustained
+settling" then collapses toward 0 s for that reason, and not because the
+trajectory converges faster. The script picks "best eta" among the eta with
+``never_enters_lqr_level`` True alone. It still sweeps and plots the other eta,
+hatched, for context.
 
-For each eta, the script also splits *transformed* reward samples by two
-state-space regions: the LQR switching set above and the looser homoclinic
-tube (``TubeSpec`` defaults, a superset of the LQR set on the trajectories
-observed here).  The eta chosen as "best" is, among the eligible eta above,
-the fastest-settling one where the mean transformed reward inside the LQR
-set (or its edge proxy) exceeds the mean over the whole tube -- which, given
-the clipping above, holds by construction whenever the LQR set is never
-entered.
+"Converged" means that the transformed reward stays at or above
+``ln(1/--settling-tolerance)`` for every later sample, through to the end of the
+episode. Equivalently, the raw reward stays within ``--settling-tolerance`` of 0
+from below, or clipped. This sustained-settling definition rejects a transient
+crossing.
+
+For each eta, the script also splits the *transformed* reward samples by two
+state-space regions. The first is the LQR switching set above. The second is the
+looser homoclinic tube, at the ``TubeSpec`` defaults, which is a superset of the
+LQR set on the trajectories observed here. Take the eligible eta above. The "best" eta is the fastest-settling one whose
+mean transformed reward inside the LQR set, or inside its edge proxy, exceeds
+the mean over the whole tube. Given
+the clipping above, that holds by construction whenever the run never enters the
+LQR set.
 
 Example
 -------
@@ -148,10 +149,10 @@ def selected_lyapunov_rate_normalized(
     """``Vdotbar``: the actual derivative, or the Xin-Kaneda closed-loop
     counterfactual ``-k_v * qdot2^2``, per ``lyapunov_rate_source``.
 
-    The counterfactual assumes the ideal closed-loop law regardless of what
-    torque the analytical controller actually applied, and unlike the
-    actual derivative it is <= 0 everywhere (a negative-semidefinite
-    surrogate), so ``-eta * Vdotbar`` never cancels r1 -- it only adds.
+    The counterfactual assumes the ideal closed-loop law, at any torque that
+    the analytical controller applied. It is <= 0 everywhere, a
+    negative-semidefinite surrogate, where the actual derivative changes sign.
+    ``-eta * Vdotbar`` therefore only adds to r1, and never cancels it.
     """
     if lyapunov_rate_source == "xk_closed_loop":
         return terms.xk_closed_loop_lyapunov_rate_normalized
@@ -179,10 +180,10 @@ def r3_values(
 ) -> np.ndarray:
     """Evaluate the implemented normalized ``r3`` on recorded terms.
 
-    The discount-rate correction always retains the original Lyapunov
-    ``Vbar``, regardless of ``reward_base`` -- only r1's leading term
-    switches, and the derivative term is whichever ``lyapunov_rate_source``
-    selects (``environment/acrobot_xk.py:xk_reward_terms``).
+    The discount-rate correction always keeps the original Lyapunov ``Vbar``,
+    at any ``reward_base``. Only the leading term of r1 switches. The
+    derivative term is the one that ``lyapunov_rate_source`` selects. See
+    ``environment/acrobot_xk.py:xk_reward_terms``.
     """
     eta = float(eta)
     discount_rate = float(discount_rate)
@@ -355,8 +356,8 @@ class RegionMasks:
     lqr: np.ndarray  # (episodes, len(time)) bool: inside the LQR switching set
     tube: np.ndarray  # (episodes, len(time)) bool: inside the homoclinic tube
     edge_flat_index: int  # flat index of the sample closest to the LQR set,
-    # i.e. the smallest eq. 74 residual recorded -- used as an edge proxy for
-    # the LQR set on rollouts where it is never actually entered.
+    # that is, the smallest eq. 74 residual recorded. It serves as an edge
+    # proxy for the LQR set on a rollout that never enters the set.
 
 
 def compute_region_masks(
@@ -408,30 +409,30 @@ CEILING_EPSILON = 1e-6  # keeps ln(1/-reward) finite even if r1's own max is
 # ever >= 0 (a possibility in principle, not observed here).
 
 # A raw reward sample counts as "entering the LQR region" only once it clears
-# the ceiling by more than this.  The ceiling is realized exactly by some
-# sample (r1's own global max), so *any* eta > 0 perturbs reward at that same
-# sample by -eta*Vdotbar there; if Vdotbar happens to be negative at that one
-# instant, any eta > 0 trips a same-sample violation by a floating-point-
-# scale amount (~1e-8 to 1e-6 on these rollouts) that has nothing to do with
-# genuine, growing overshoot elsewhere in the episode.  This tolerance
-# separates that measure-zero knife edge from real exceedance.
+# the ceiling by more than this. One sample realizes the ceiling exactly, the
+# global maximum of r1. Every eta > 0 therefore perturbs the reward at that same
+# sample by -eta*Vdotbar. When Vdotbar is negative at that one instant, every
+# eta > 0 trips a same-sample violation at floating-point scale, about 1e-8 to
+# 1e-6 on these rollouts. That violation says nothing about a real, growing
+# overshoot elsewhere in the episode. This tolerance separates the
+# measure-zero knife edge from real exceedance.
 VIOLATION_TOLERANCE = 1e-3
 
 
 def reward_ceiling(terms: RecordedTerms, reward_base: str) -> float:
     """The largest ``r1`` ever reaches along the (eta-independent) rollout.
 
-    ``r1`` (``r0`` or ``-Vbar``) is the pure state-proximity term the reward
-    is built from; its own maximum is as close to the target as the fixed
-    analytical trajectory ever gets, in the same sense the eq. 74 LQR
-    switching residual is never satisfied on these rollouts (see
-    ``compute_region_masks``) -- both describe "as close as this trajectory
-    gets," using each metric's own weighting.  Reward is clipped to this
-    ceiling before the ln(1/-reward) transform; it is also the "never enters
-    the LQR region" reference: since the trajectory itself never gets there,
-    no eta should be able to make the reward claim otherwise (see
-    ``VIOLATION_TOLERANCE`` and ``never_enters_lqr_level`` in ``analyze``).
-    It does not vary with eta or reward kind -- one value per reward base.
+    ``r1``, either ``r0`` or ``-Vbar``, is the pure state-proximity term that
+    the reward is built from. Its own maximum is as close to the target as the
+    fixed analytical trajectory ever gets. In the same sense, the eq. 74 LQR
+    switching residual never holds on these rollouts. See
+    ``compute_region_masks``. Both statements describe "as close as this
+    trajectory gets", each under its own weighting. The script clips reward to
+    this ceiling before the ln(1/-reward) transform. The ceiling is also the
+    "never enters the LQR region" reference. The trajectory itself never gets
+    there, so no eta can let the reward claim otherwise. See
+    ``VIOLATION_TOLERANCE`` and ``never_enters_lqr_level`` in ``analyze``. The
+    ceiling holds across eta and reward kind, one value per reward base.
     """
     r1 = r1_values(terms, reward_base)
     return float(r1.max())
@@ -443,10 +444,10 @@ def transform_reward(
     """``ln(1/-reward)``, reward first clipped to ``ceiling``.
 
     Returns ``(transformed, exceedance_fraction, never_enters_lqr_level)``.
-    ``exceedance_fraction`` is measured against the raw ceiling (samples
-    that had to be clipped at all); ``never_enters_lqr_level`` additionally
-    requires clearing ``violation_tolerance`` to ignore the same-sample
-    knife-edge described above.
+    ``exceedance_fraction`` counts against the raw ceiling, that is, the
+    samples that the clip touched at all. ``never_enters_lqr_level`` also
+    requires a clearance of ``violation_tolerance``, which ignores the
+    same-sample knife edge described above.
     """
     clip_value = min(ceiling, -CEILING_EPSILON)
     clipped = np.minimum(reward, clip_value)
@@ -524,11 +525,14 @@ def analyze(
 
 
 def _best_row(rows: list[dict[str, float]]) -> dict[str, float]:
-    """Fastest 90th-percentile settling among etas that never enter the LQR
-    region (``never_enters_lqr_level``, beyond the floating-point-scale
-    knife edge at the ceiling-defining sample -- see ``VIOLATION_TOLERANCE``)
-    and whose LQR-set transformed reward exceeds the tube's; falls back to
-    the unconstrained fastest eta over all rows if none qualify."""
+    """Fastest 90th-percentile settling among the eligible eta.
+
+    An eta is eligible under two conditions. It never enters the LQR region
+    (``never_enters_lqr_level``, past the floating-point-scale knife edge at the
+    ceiling-defining sample, see ``VIOLATION_TOLERANCE``). Its LQR-set
+    transformed reward also exceeds the tube value. If no eta qualifies, the function
+    falls back to the fastest eta over all rows.
+    """
     candidates = [row for row in rows if row["never_enters_lqr_level"]]
     pool = candidates if candidates else rows
     return min(

@@ -1,25 +1,26 @@
 """Reward-independent metrics for Acrobot swing-up toward the homoclinic orbit.
 
-Implements metrics 1-6 of ``docs/reward_shaping_for_acrobot_swingup.md`` as pure
-functions of a recorded trajectory, so the analytical Xin-Kaneda controller and a
-learned CT-SAC policy are scored by identical code and neither is credited for
-the reward it was trained on.
+This module implements metrics 1 to 6 of
+``docs/reward_shaping_for_acrobot_swingup.md``. Each metric is a pure function
+of a recorded trajectory. One body of code therefore scores the analytical
+Xin-Kaneda controller and a learned CT-SAC policy. Neither one takes credit for
+the reward it trained on.
 
-Everything is computed from raw state ``[q1, q2, qdot1, qdot2]`` plus the applied
-torque.  Nothing is read from ``info``, and nothing is shared with the
+Every metric comes from the raw state ``[q1, q2, qdot1, qdot2]`` and the applied
+torque. The module reads nothing from ``info``, and shares nothing with the
 ``v2 ... v6.1`` reward line.
 
 Scales
 ------
-The doc leaves the normalizations to be chosen; all three are derived rather
-than tuned.
+The doc leaves the normalizations open. All three below come from the plant, and
+no one tuned them.
 
-* ``E_s = E_top - E_down = 2 (b1 + b2)`` — the energy a swing-up must supply.
+* ``E_s = E_top - E_down = 2 (b1 + b2)``, the energy a swing-up must supply.
 * ``q_s = pi``.
-* ``omega_s = sqrt(4 (b1 + b2) / (a1 + a2 + 2 a3))`` — the peak shoulder speed on
-  the homoclinic orbit itself, which is also the speed at which the full energy
-  span is carried as kinetic energy in the extended pose.  It normalizes both
-  the elbow rate in ``r0`` and the shoulder rate in ``d_Gamma``.
+* ``omega_s = sqrt(4 (b1 + b2) / (a1 + a2 + 2 a3))``, the peak shoulder speed on
+  the homoclinic orbit. It is also the speed at which the extended pose carries
+  the full energy span as kinetic energy. It normalizes the elbow rate in ``r0``
+  and the shoulder rate in ``d_Gamma``.
 
 The homoclinic orbit
 --------------------
@@ -32,9 +33,9 @@ It passes through the upright pose ``q1 = pi/2`` at rest and reaches
 
 Coordinates
 -----------
-Everything here is in the paper's frame, which is what ``acrobot-swingup-xk``
-reports directly: ``q1`` is measured from the horizontal, upright is
-``q1 = pi/2`` and hanging ``q1 = -pi/2``.
+This module works in the paper's frame, which ``acrobot-swingup-xk`` reports
+directly. ``q1`` runs from the horizontal, so upright is ``q1 = pi/2`` and
+hanging is ``q1 = -pi/2``.
 """
 
 from __future__ import annotations
@@ -79,11 +80,11 @@ class Scales:
 class TubeSpec:
     """The tolerance tube ``H`` around the homoclinic set, and its dwell time.
 
-    Each bound is a fraction of the corresponding scale, and the tube is
-    independent of the reward under test.  The elbow bound is half the other
-    two: ``q_s = pi`` is a much larger scale than the swing-up energy span or
-    the orbit's peak speed, so an equal fraction of it would be a far looser
-    constraint on the pose than on the energy.
+    Each bound is a fraction of its own scale, and the tube stays independent
+    of the reward under test. The elbow bound is half of the other two.
+    ``q_s = pi`` is a much larger scale than the swing-up energy span or the
+    peak speed of the orbit. An equal fraction of it therefore constrains the
+    pose far more loosely than the energy.
     """
 
     energy_tolerance: float = 0.05
@@ -107,10 +108,10 @@ class TubeSpec:
 class Trajectory:
     """One recorded episode.
 
-    ``time`` and ``state`` hold the ``N + 1`` interval endpoints; ``torque`` and
-    ``commanded_torque`` hold the ``N`` per-interval values, with ``torque`` the
-    value the plant actually applied and ``commanded_torque`` what the policy
-    asked for before any actuator limit.
+    ``time`` and ``state`` hold the ``N + 1`` interval endpoints. ``torque`` and
+    ``commanded_torque`` hold the ``N`` per-interval values. ``torque`` is the
+    value that the plant applied. ``commanded_torque`` is the value that the
+    policy asked for, before any actuator limit.
     """
 
     time: np.ndarray
@@ -208,8 +209,9 @@ def orbit_distance(
 ) -> np.ndarray:
     """``d_Gamma``: normalized distance from ``(q1, qdot1)`` to the orbit.
 
-    Gamma is eq. 32 solved for the rate, ``qdot1 = +- omega_s sqrt((1 - sin q1)/2)``;
-    both signed branches are covered by sweeping ``q1`` over a full turn twice.
+    Gamma is eq. 32 solved for the rate,
+    ``qdot1 = +- omega_s sqrt((1 - sin q1)/2)``. A sweep of ``q1`` over a full
+    turn, done twice, covers both signed branches.
     """
     scales = scales or Scales.from_params(params)
     values = np.atleast_2d(np.asarray(state, dtype=np.float64))
@@ -309,8 +311,9 @@ def time_weighted_rms(
 ) -> float:
     """Root of the post-capture time average of ``values`` (already squared).
 
-    ``values`` is given per endpoint; each interval takes the mean of its two
-    endpoints, which is the trapezoid rule the integral in the doc asks for.
+    The caller gives ``values`` per endpoint. Each interval takes the mean of
+    its two endpoints, which is the trapezoid rule that the doc's integral
+    asks for.
     """
     time = np.asarray(time, dtype=np.float64).reshape(-1)
     values = np.asarray(values, dtype=np.float64).reshape(-1)
@@ -487,10 +490,11 @@ def rollout(
     """Drive ``env`` with ``act`` for one episode and record the trajectory.
 
     ``env`` must be a :class:`~environment.dmc.DMCContinuousEnv` built with
-    ``raw_state_obs=True``, so the observation is exactly ``[q1, q2, qd1, qd2]``.
-    The applied torque is recovered as ``gear * ctrl``; the commanded torque is
-    read from the controller when it publishes one, and otherwise equals the
-    applied torque (a learned policy cannot ask for more than it commands).
+    ``raw_state_obs=True``, so that the observation is exactly
+    ``[q1, q2, qd1, qd2]``. The applied torque comes back as ``gear * ctrl``.
+    The commanded torque comes from the controller when the controller
+    publishes one. Otherwise it equals the applied torque, because a learned
+    policy can ask for no more than it commands.
     """
     gear = float(np.asarray(env._env.physics.model.actuator_gear)[0, 0])
     limit = gear if torque_limit is None else float(torque_limit)
@@ -505,9 +509,9 @@ def rollout(
     while True:
         action = act(obs)
         _, _, action, _, obs, next_t, terminated, truncated = env.step_dt(action)[:8]
-        # A pre-built time grid that runs out before the duration check clears
-        # yields a final zero-length step, which carries no physical time and
-        # would break the strictly-increasing invariant.
+        # A pre-built time grid can run out before the duration test passes.
+        # The final step then has zero length. It carries no physical time, and
+        # it breaks the strictly-increasing invariant.
         if float(next_t) <= times[-1]:
             break
         times.append(float(next_t))

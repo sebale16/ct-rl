@@ -201,14 +201,15 @@ def _align_acrobot_xk_eval_termination_limits(
         if key in train_task
     }
     aligned = dict(eval_env_kwargs)
-    # Evaluate at the control rate the policy was trained at.  The eval config
-    # comes from the fixed xk_eval row, which is written at dt=1ms; a policy
-    # trained at a coarser control interval would otherwise be asked to act
-    # 10x more often at evaluation than it ever did in training, which is not
-    # the same policy.  Physics resolution and the 20 s episode are carried
-    # across too so the protocol differs only in the start distribution.
+    # Evaluate at the control rate that the policy trained at. The evaluation
+    # configuration comes from the fixed xk_eval row, written at dt=1ms. A
+    # policy trained at a coarser control interval then acts 10 times more
+    # often at evaluation than in training, and that is a different policy. The
+    # physics resolution and the 20 s episode carry across too, so the protocol
+    # differs in the start distribution alone.
     # NOTE: this changes evaluation for the 16 existing rows written at
-    # dt=0.01/0.0005, which were previously evaluated at 1ms regardless.
+    # dt=0.01/0.0005. Those rows were evaluated at 1ms before, whatever their
+    # training rate.
     for _timing_key in ("dt", "physics_dt", "max_steps", "episode_duration"):
         if _timing_key in train_env_kwargs:
             aligned[_timing_key] = train_env_kwargs[_timing_key]
@@ -232,11 +233,11 @@ def _configure_acrobot_xk_start_distributions(
 ) -> tuple[dict, dict]:
     """Optionally use full-configuration training while keeping fixed eval.
 
-    ``uniform_start`` is an existing XK task reset that samples both joint
-    angles independently over ``[-pi, pi)`` and sets both joint velocities to
-    zero.  It is mutually exclusive with the paper and near-hanging release
-    resets, so enabling the runner override clears both of those flags.
-    Evaluation is always routed through the fixed near-hanging release reset.
+    ``uniform_start`` is an existing XK task reset. It samples both joint
+    angles independently over ``[-pi, pi)``, and sets both joint velocities to
+    zero. It excludes the paper reset and the near-hanging release reset, so
+    the runner override clears both of those flags. Evaluation always runs
+    through the fixed near-hanging release reset.
     """
     if env_id != ACROBOT_XK_ENV_ID:
         if uniform_training_start:
@@ -343,24 +344,24 @@ def _build_demonstration_policy(
 ):
     """Build CT-SAC's ``demonstration_policy`` replay-buffer warm start.
 
-    Two sources, both acting on ``acrobot-swingup-xk``'s raw
-    ``[q1, q2, qdot1, qdot2]`` observation (the same ``frame="paper"``
-    convention the evaluation protocol uses):
+    There are two sources. Both act on the raw ``[q1, q2, qdot1, qdot2]``
+    observation of ``acrobot-swingup-xk``, in the same ``frame="paper"``
+    convention as the evaluation protocol.
 
-    ``controller_name='xin_kaneda'`` -- the analytical Xin-Kaneda swing-up
-    law from ``controllers/xin_kaneda.py``, unconditionally.
+    ``controller_name='xin_kaneda'`` is the analytical Xin-Kaneda swing-up law
+    from ``controllers/xin_kaneda.py``, at every step.
 
-    ``controller_name='xk_lqr_switch'`` --
-    :class:`controllers.acrobot_gated_lyapunov.XKLQRSwitchedController`: the
-    same Xin-Kaneda swing-up law, latching one-way to the local LQR feedback
-    on first entry to Lai et al.'s equation-(17) attractive region. The
-    demonstrations this fills the replay buffer with therefore include the
-    balance phase the pure Xin-Kaneda law never reaches on its own.
+    ``controller_name='xk_lqr_switch'`` is
+    :class:`controllers.acrobot_gated_lyapunov.XKLQRSwitchedController`. It is
+    the same Xin-Kaneda swing-up law with a one-way latch to the local LQR
+    feedback. The latch closes on first entry to the equation-(17) attractive
+    region of Lai et al. The demonstrations that it writes into the replay buffer therefore
+    include the balance phase, which the pure Xin-Kaneda law never reaches.
 
-    Gains and torque limit come from the task's own
-    ``k_v``/``k_d``/``k_p``/``torque_limit`` when the reward config sets
-    them (matching the reward's Vdot term to the controller that generated
-    the demonstrations), and from the paper's Section-7 defaults otherwise.
+    The gains and the torque limit come from the task's own ``k_v``, ``k_d``,
+    ``k_p`` and ``torque_limit`` when the reward configuration sets them. The
+    Vdot term of the reward then matches the controller that generated the
+    demonstrations. Otherwise they come from the paper's Section-7 defaults.
     """
     if algo != "ct_sac":
         raise ValueError(
@@ -830,13 +831,13 @@ def run_algorithm(
         else:
             raise ValueError(f"Unknown dynamics_source '{source}'.")
 
-    # Optional: analytical-controller demonstration warm start (see
-    # algorithms.ct_sac.CTSAC's demonstration_policy / demonstration_steps).
-    # `algo_demonstration_steps`, if set, passes straight through in
-    # algo_kwargs already; only the controller name needs resolving into an
-    # actual act(obs) -> action object here.  The same object is what
-    # `algo_imitation_coef` defaults to imitating, so a row wanting only the
-    # KL term still names the controller here and sets
+    # Optional analytical-controller demonstration warm start. See
+    # demonstration_policy and demonstration_steps in
+    # algorithms.ct_sac.CTSAC. A set `algo_demonstration_steps` already passes
+    # straight through in algo_kwargs. Only the controller name needs a
+    # resolution into a real act(obs) -> action object here. That same object
+    # is the default target of `algo_imitation_coef`. A row that wants the KL
+    # term alone therefore still names the controller here, and sets
     # `algo_demonstration_steps=0` to skip the seeding.
     demonstration_controller = algo_kwargs.pop("demonstration_controller", None)
     if demonstration_controller:

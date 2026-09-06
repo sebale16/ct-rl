@@ -49,7 +49,7 @@ class ActorQCriticModel(Model):
         pi_net_arch: Sequence[int],
         activation_fn: Type[nn.Module] = nn.ReLU,
         log_std_init: float = -0.5,
-        # Forwarded to StochasticActor; the defaults are the inert SAC rails.
+        # Forwarded to StochasticActor. The defaults are the inert SAC rails.
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         n_critics: int = 2,

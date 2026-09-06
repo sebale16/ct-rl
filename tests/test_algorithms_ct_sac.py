@@ -236,7 +236,7 @@ class TestDemonstrationWarmStart(unittest.TestCase):
             self.fail(
                 f"agent.learn() with vectorized demonstration_policy raised: {e}"
             )
-        # num_timesteps advances by n_envs per call; demo is called once per
+        # num_timesteps advances by n_envs per call. The demo runs once per
         # env for each of the ceil(learning_starts / n_envs) qualifying steps.
         expected_calls = -(-agent.learning_starts // n_envs) * n_envs
         self.assertEqual(len(calls), expected_calls)
@@ -404,8 +404,9 @@ class TestImitationKL(unittest.TestCase):
                 self.assertLess(self._mean_gap(agent), 0.5 * baseline_gap)
 
     def test_states_the_law_cannot_score_are_dropped(self):
-        # A law is only defined on part of the state space -- Xin-Kaneda has a
-        # singular set -- so a non-finite row must not poison the update.
+        # A law can be defined on part of the state space alone, and
+        # Xin-Kaneda has a singular set. A non-finite row must therefore never
+        # poison the update.
         for undefined in (0, slice(None)):
             with self.subTest(undefined=str(undefined)):
                 agent = self._agent(

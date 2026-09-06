@@ -70,8 +70,8 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
         discount = math.exp(-rate * reference_dt)
         expected = reference_dt * reward + discount * value_next
 
-        # At dt=T, V(s) must cancel exactly; its magnitude cannot affect the
-        # target or recreate the historical -19 V(s) coefficient.
+        # At dt=T, V(s) must cancel exactly. Its magnitude can affect neither
+        # the target nor the historical -19 V(s) coefficient.
         for value_current in (
             th.tensor([[7.0]], dtype=th.float64),
             th.tensor([[1.0e12]], dtype=th.float64),
@@ -173,9 +173,9 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
             next_t=dt,
             dt=dt,
         )
-        # h != T re-anchors through the current-state value, exactly like an
-        # ordinary irregular transition -- only the endpoint (G_F, not a
-        # learned V(s')) differs from the model-free path.
+        # h != T re-anchors through the current-state value, exactly as an
+        # ordinary irregular transition does. The endpoint alone differs from
+        # the model-free path. It is G_F, and not a learned V(s').
         value_current = th.tensor([[9.0]], dtype=th.float64)
         with patch.object(
             agent, "_state_value", return_value=value_current

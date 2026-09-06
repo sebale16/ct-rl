@@ -314,7 +314,7 @@ class TestRegionIsSharedAcrossFrames(unittest.TestCase):
     """The one home for equation (17) has to serve both coordinate frames."""
 
     def test_residual_is_even_so_both_frames_agree(self):
-        """The 2009 frame is ``x = -e``; every condition is even in ``e``."""
+        """The 2009 frame is ``x = -e``, and every condition is even in ``e``."""
         region = AttractiveRegion()
         rng = np.random.RandomState(43)
         for _ in range(2000):

@@ -595,11 +595,11 @@ class DMCContinuousEnv(ContinuousEnv):
         task = self._env.task
         xk_terms_fn = getattr(task, "xk_diagnostic_terms", None)
         if callable(xk_terms_fn):
-            # The Xin-Kaneda task targets a homoclinic set rather than the
-            # Cartesian tip target used by the v2--v6 task family.  Keep its
-            # schema separate: trying to route it through ``reward_terms``
-            # would either couple checkpoint selection to the configured
-            # reward or require fake tip-distance fields.
+            # The Xin-Kaneda task targets a homoclinic set. The v2 to v6 task
+            # family targets a Cartesian tip position. Keep the two schemas
+            # apart. A route through ``reward_terms`` couples checkpoint
+            # selection to the configured reward, or it demands fake
+            # tip-distance fields.
             diagnostic_terms = xk_terms_fn(self._env.physics)
             info = self._acrobot_xk_scalar_info(diagnostic_terms)
             if "in_homoclinic_tube" not in diagnostic_terms:
@@ -611,12 +611,12 @@ class DMCContinuousEnv(ContinuousEnv):
                 diagnostic_terms["in_homoclinic_tube"]
             )
 
-            # dm_control calls get_reward at a transition endpoint before the
-            # wrapper builds ``info``.  If the task records that decomposition,
-            # expose its numeric pieces for debugging while retaining the
-            # independently recomputed diagnostic terms above.  Do not publish
-            # it on reset: it may describe the final endpoint of the preceding
-            # episode rather than the newly reset state.
+            # dm_control calls get_reward at a transition endpoint, before the
+            # wrapper builds ``info``. If the task records that decomposition,
+            # expose its numeric pieces for debugging, and keep the diagnostic
+            # terms recomputed above. Do not publish it on reset. There it can
+            # describe the final endpoint of the previous episode, and not the
+            # state that the reset just produced.
             if update:
                 reward_terms = getattr(task, "last_reward_terms", None)
                 if callable(reward_terms):
@@ -687,9 +687,10 @@ class DMCContinuousEnv(ContinuousEnv):
     def _acrobot_xk_scalar_info(terms) -> Dict[str, float]:
         """Prefix the numeric scalar fields in one XK term mapping.
 
-        Reward decompositions may also carry non-numeric metadata such as the
-        selected reward name.  Gym ``info`` diagnostics are deliberately kept
-        scalar so monitor/vector wrappers can aggregate them safely.
+        A reward decomposition can also carry non-numeric metadata, such as the
+        name of the selected reward. The Gym ``info`` diagnostics stay scalar on
+        purpose, so that the monitor and vector wrappers can aggregate them
+        safely.
         """
 
         if not hasattr(terms, "items"):
@@ -771,10 +772,10 @@ class DMCContinuousEnv(ContinuousEnv):
         truncated = is_last and not terminated
         effective_discount = ts.discount
 
-        # dm_control checks its internal step limit before asking a task for
-        # termination.  Re-evaluate the Acrobot-XK state caps here so a cap
-        # crossed on the final scheduled step is still classified as a cap,
-        # rather than being silently relabeled as an ordinary time limit.
+        # dm_control reads its internal step limit before it asks a task for
+        # termination. Evaluate the Acrobot-XK state caps again here. A cap
+        # crossed on the final scheduled step then still counts as a cap, and
+        # never turns into an ordinary time limit.
         task = self._env.task
         xk_terms_fn = getattr(task, "xk_diagnostic_terms", None)
         termination_fn = getattr(task, "get_termination", None)
@@ -797,12 +798,13 @@ class DMCContinuousEnv(ContinuousEnv):
         info.update(self._acrobot_reward_info(update=True))
         info.update(self._curriculum_task_info())
 
-        # A state-cap failure stops and resets immediately, but CT-SAC still
-        # needs a defined return over the unexecuted portion of the finite
-        # episode.  The task's reward-rate lower envelope -- the minimum reward
-        # attainable anywhere in the capped state/action closure -- is emitted
-        # on the terminal transition and frozen over that remainder.  The
-        # learner applies its physical discount rate analytically.
+        # A state-cap failure stops and resets at once. CT-SAC still needs a
+        # defined return over the part of the finite episode that never runs.
+        # The terminal transition therefore carries the reward-rate lower
+        # envelope of the task, frozen over that remainder. The lower envelope
+        # is the minimum reward attainable anywhere in the capped state and
+        # action closure. The learner applies its physical discount rate
+        # analytically.
         termination_reason = getattr(task, "last_termination_reason", None)
         if termination_reason is not None and getattr(
             task, "cap_terminal_penalty", True

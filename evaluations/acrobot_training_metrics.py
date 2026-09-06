@@ -1,22 +1,21 @@
 """Reward-independent training-time metric for Acrobot XK comparisons.
 
 Metric 7 in ``docs/reward_shaping_for_acrobot_swingup.md`` is the cumulative
-*simulated physical interaction time* at which a policy first achieves a
-requested strict-capture success rate.  For irregularly sampled CT-SAC this is
-the sum of the realized ``next_t - t`` intervals, not the number of policy
-decisions.  The training callback persists the two inputs in
-``evaluations.npz``:
+*simulated physical interaction time* at which a policy first reaches a
+requested strict-capture success rate. For irregularly sampled CT-SAC that time
+is the sum of the realized ``next_t - t`` intervals. It is not a count of policy
+decisions. The training callback writes the two inputs into ``evaluations.npz``:
 
 * ``capture_simulated_seconds`` is the cumulative training interaction time at
-  each strict-capture evaluation checkpoint; and
-* ``capture_successes`` contains one strict-capture boolean per evaluation
-  episode at that checkpoint.
+  each strict-capture evaluation checkpoint.
+* ``capture_successes`` holds one strict-capture boolean per evaluation episode
+  at that checkpoint.
 
-This metric intentionally does not use reward, optimizer wall-clock time, or
-evaluation interactions.  A crossing is credited at the first *observed*
-checkpoint whose empirical capture rate reaches the target; no interpolation
-is performed.  Legacy timestep-only artifacts require an explicit conversion
-factor because a decision count cannot be converted for irregular sampling.
+The metric leaves out reward, optimizer wall-clock time, and evaluation
+interactions, on purpose. It credits a crossing at the first *observed*
+checkpoint whose empirical capture rate reaches the target, and interpolates
+nothing. A legacy timestep-only artifact needs an explicit conversion factor,
+because a decision count carries no conversion under irregular sampling.
 """
 
 from __future__ import annotations
@@ -64,7 +63,11 @@ def _validated_simulated_seconds(
 
 
 def _validated_timesteps(evaluation_timesteps: Sequence[int]) -> np.ndarray:
-    """Validate optional decision-count provenance (not metric 7's x-axis)."""
+    """Make sure that the optional decision-count provenance is well formed.
+
+    That provenance is a record alone. The x-axis of metric 7 is the simulated
+    interaction time.
+    """
     raw = np.asarray(evaluation_timesteps)
     if raw.ndim != 1 or raw.size == 0:
         raise ValueError("evaluation_timesteps must be a non-empty 1D sequence")
@@ -90,8 +93,9 @@ def _capture_rows(capture_successes, evaluations: int) -> list[np.ndarray]:
     try:
         raw = np.asarray(capture_successes)
     except ValueError:
-        # Ragged rows are valid: a resumed run may have changed its evaluation
-        # episode count.  NumPy 1.24+ requires object dtype for such input.
+        # Ragged rows are valid, because a resumed run can change its
+        # evaluation episode count. NumPy 1.24 and later need object dtype for
+        # such input.
         raw = np.asarray(capture_successes, dtype=object)
 
     if raw.ndim == 0 or raw.ndim > 2:
@@ -188,8 +192,8 @@ class CaptureLearningCurve:
         ):
             raise ValueError("evaluation_episode_counts must be positive integers")
 
-        # Own immutable copies: a frozen dataclass should not change when a
-        # caller mutates the arrays it passed in.
+        # Take private copies. A frozen dataclass must not change when a caller
+        # mutates the arrays it passed in.
         simulated_seconds = simulated_seconds.copy()
         rates = rates.copy()
         counts = numeric_counts.astype(np.int64)

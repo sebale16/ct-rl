@@ -1,28 +1,28 @@
 """Reward-independent fixed-protocol evaluation of a CT-SAC Acrobot-XK policy.
 
-The evaluator loads one ``ActorQCriticModel`` checkpoint using the model
-architecture recorded in ``benchmarks/hyperparams/ct_sac.csv`` and acts with
-the policy mean (``deterministic=True``).  It then scores the resulting state
-and applied-torque trajectories with metrics 1--6 from
-``docs/reward_shaping_for_acrobot_swingup.md``.  Episode reward and return are
-deliberately neither accumulated nor written: ``r0``, ``r1``, ``r2`` and
-``r3`` have different numerical scales and are training-arm metadata, not
-evaluation criteria. ``r3`` additionally records the physical discount rate
-used by its discount-consistent potential term.
+The evaluator loads one ``ActorQCriticModel`` checkpoint. It uses the model
+architecture recorded in ``benchmarks/hyperparams/ct_sac.csv``, and acts with
+the policy mean (``deterministic=True``). It then scores the state and
+applied-torque trajectories with metrics 1 to 6 from
+``docs/reward_shaping_for_acrobot_swingup.md``. It accumulates and writes no
+episode reward and no return, on purpose. ``r0``, ``r1``, ``r2`` and ``r3``
+carry different numerical scales, and they are training-arm metadata rather
+than evaluation criteria. ``r3`` also records the physical discount rate that
+its discount-consistent potential term uses.
 
-By default every checkpoint is evaluated on the document's exact common
-protocol: release-from-rest starts, seeds 20000--20031, a 20 second horizon,
-1 ms control and physics periods, zero damping, and a 20 N m actuator gear.
-The training row's runaway-termination envelope is retained because the rate
-cap is itself an experimental factor, and it is recorded in task metadata.
-The protocol arguments remain configurable for short smoke runs, but every
-chosen value is recorded in both outputs.
+By default every checkpoint runs on the exact common protocol of the document.
+That protocol has release-from-rest starts and seeds 20000 to 20031. It runs a
+20 second horizon, 1 ms control and physics periods, zero damping, and a 20 N m
+actuator gear. The evaluator keeps the runaway-termination envelope of the
+training row, because the rate cap is itself an experimental factor. It writes
+that envelope into the task metadata. The protocol arguments stay open to the caller
+for short smoke runs, and both outputs record every chosen value.
 
-Metric 7 can be added with ``--evaluations-npz``.  That artifact is read by
-``evaluations.acrobot_training_metrics`` and reports the first observed
-cumulative simulated physical time at 50%, 80%, and 90% strict-capture
-success.  Decision counts are never treated as seconds.  A legacy uniform-step
-artifact can be converted only with an explicit ``--legacy-seconds-per-step``.
+``--evaluations-npz`` adds metric 7. ``evaluations.acrobot_training_metrics``
+reads that artifact, and reports the first observed cumulative simulated
+physical time at 50%, 80%, and 90% strict-capture success. Nothing reads a
+decision count as seconds. A legacy uniform-step artifact converts only with an
+explicit ``--legacy-seconds-per-step``.
 
 Example
 -------
@@ -183,7 +183,7 @@ class EvaluationProtocol:
 
 @dataclass(frozen=True)
 class RewardMetadata:
-    """Training-arm identity; reward values never enter the reported metrics."""
+    """Training-arm identity. No reward value enters the reported metrics."""
 
     reward_kind: str
     eta: Optional[float]
@@ -255,10 +255,10 @@ def resolve_reward_metadata(
 ) -> RewardMetadata:
     """Resolve explicit sweep metadata over values stored in ``task_kwargs``.
 
-    Explicit arguments take precedence.  This supports checkpoints produced by
-    a sweep launcher that kept a common model/config row while varying task
-    parameters externally.  The full loaded config hash is also retained in
-    the output, so the provenance of an override remains visible.
+    An explicit argument wins. A sweep launcher can therefore keep one common
+    model and configuration row, and vary the task parameters outside it. The
+    output also keeps the hash of the whole loaded configuration, so the source
+    of an override stays visible.
     """
 
     task_kwargs = dict(train_env_kwargs.get("task_kwargs", {}) or {})
@@ -286,11 +286,10 @@ def build_task_kwargs(
 ) -> dict[str, Any]:
     """Build the task portion of the fixed protocol.
 
-    Lyapunov gains, the reward base, the derivative source, and the
-    runaway-termination envelope are preserved when the training row
-    explicitly set them because they define the experimental task arm.  The
-    remaining plant and reset values that affect the comparison are fixed by
-    ``protocol``.
+    The Lyapunov gains, the reward base, the derivative source, and the
+    runaway-termination envelope define the experimental task arm. This function
+    keeps them when the training row sets them explicitly. ``protocol`` fixes
+    the remaining plant and reset values that affect the comparison.
     """
 
     configured = dict(train_env_kwargs.get("task_kwargs", {}) or {})
@@ -348,7 +347,7 @@ def build_env(
 
 
 def load_training_config(mode: str, hyperparams_dir: Path):
-    """Load the training row through the shared CT-SAC config helper."""
+    """Load the training row through the shared CT-SAC configuration helper."""
 
     from evaluations.evaluate_swingup_final import _load_config_bundle
 
@@ -649,7 +648,10 @@ def write_outputs(
     summary_output: Optional[Path] = None,
     overwrite: bool = False,
 ) -> tuple[Path, Path]:
-    """Write per-episode CSV and aggregate JSON, refusing silent overwrite."""
+    """Write the per-episode CSV and the aggregate JSON.
+
+    The function refuses to overwrite an existing file without ``overwrite``.
+    """
 
     output = Path(output).expanduser().resolve()
     if summary_output is None:

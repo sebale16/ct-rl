@@ -105,9 +105,9 @@ class BaseAlgorithm(ABC):
 
         # Training progress
         self.num_timesteps: int = 0
-        # Sum of the physical durations represented by collected transitions.
-        # For vector environments this is summed over all environment slots,
-        # matching ``num_timesteps``'s convention of counting every slot.
+        # Sum of the physical durations that the collected transitions carry.
+        # For a vector environment the sum runs over every environment slot, as
+        # ``num_timesteps`` also counts every slot.
         self.num_simulated_seconds: float = 0.0
         self._total_timesteps: int = 0
         self._progress_remaining: float = 1.0

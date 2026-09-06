@@ -1,16 +1,17 @@
 """Gated Xin--Kaneda/LQR Lyapunov constructions for the Acrobot.
 
-The Xin--Kaneda function is a global set-stabilization certificate: its zero
-set is the target homoclinic orbit.  An LQR value is instead locally positive
-definite about upright rest.  This module constructs hand-offs between the two
-without changing any environment reward by merely importing it.
+The Xin--Kaneda function is a global set-stabilization certificate. Its zero
+set is the target homoclinic orbit. An LQR value is locally positive definite
+about upright rest. This module builds hand-offs between the two. An import of
+this module changes no environment reward.
 
-Two of them live here.  :class:`GatedLyapunov` blends the pieces on the
-Xin--Kaneda switching test with each piece normalized on its own scale, and
+Two constructions live here. :class:`GatedLyapunov` blends the pieces on the
+Xin--Kaneda switching test. Each piece keeps its own scale, and the result
 carries the reward ridge described under *Important limitation* below.
-:class:`NonsmoothLyapunov` is the published repair: the nonsmooth Lyapunov
-function of Lai, Wu, She and Yang, which puts both pieces on one scale and
-offsets the outer piece so that crossing the gate can only step the value down.
+:class:`NonsmoothLyapunov` is the published repair. It is the nonsmooth
+Lyapunov function of Lai, Wu, She and Yang, which puts both pieces on one scale
+and offsets the outer piece. A crossing of the gate can then only step the
+value down.
 
 ## Gated candidate
 
@@ -18,31 +19,31 @@ The 2007 paper declares the local-controller switching region through
 
     |e1| + |e2| + 0.1 |e3| + 0.1 |e4| < zeta,  zeta = 0.04,
 
-where ``e = [q1 - pi/2, q2, qdot1, qdot2]``.  The gate uses a differentiable,
-conservative approximation of that residual: each ``|w_i e_i|`` is replaced
-by ``sqrt((w_i e_i)^2 + epsilon^2)``.  The smooth residual upper-bounds the
-printed one, so the active gate remains inside the published switching region.
+where ``e = [q1 - pi/2, q2, qdot1, qdot2]``. The gate uses a differentiable and
+conservative approximation of that residual. It replaces each ``|w_i e_i|``
+with ``sqrt((w_i e_i)^2 + epsilon^2)``. The smooth residual upper-bounds the
+printed one, so the active gate stays inside the published switching region.
 A quintic smootherstep changes from the Xin--Kaneda value outside the 0.04
 boundary to the normalized LQR value inside a 0.02 boundary.
 
-This is deliberately called a *candidate*.  Smoothly combining two Lyapunov
-functions does not by itself prove that the result decreases under a blended
-controller.  :meth:`GatedLyapunov.rate` includes the gate-gradient term needed
-to test that property under any supplied state derivative.
+The name says *candidate* on purpose. A smooth combination of two Lyapunov
+functions is no proof that the result decreases under a blended controller.
+:meth:`GatedLyapunov.rate` includes the gate-gradient term that a test of that
+property needs, for any supplied state derivative.
 
 ## Nonsmooth Lyapunov function
 
 Lai, Wu, She and Yang build one Lyapunov function for the whole motion space
-out of a swing-up piece and a local Riccati piece, and require the switched
-function to decrease across the switching surface.  Their equation (71) meets
-that requirement by adding to the swing-up piece a constant ``Delta`` equal to
-the largest local value the attractive region admits, so the outer piece
+out of a swing-up piece and a local Riccati piece. They require the switched
+function to decrease across the switching surface. Their equation (71) meets
+that requirement. It adds a constant ``Delta`` to the swing-up piece, equal to
+the largest local value that the attractive region admits. The outer piece then
 dominates the inner one everywhere the switch can happen.
 
-The region is their equation (17) rather than the 2007 switching test: two
-angle conditions and an energy band, with speed entering through the energy
-alone.  ``docs/acrobot_xk_gated_lyapunov.md`` records the sweeps behind the
-default tolerances, which tighten the printed angle box.
+The region here is their equation (17). It has two angle conditions and an
+energy band, and speed enters through the energy alone. The 2007 switching test
+governs the gated candidate above. ``docs/acrobot_xk_gated_lyapunov.md`` records
+the sweeps behind the default tolerances, which tighten the printed angle box.
 """
 
 from __future__ import annotations
@@ -60,8 +61,8 @@ UPRIGHT_STATE = np.array([0.5 * np.pi, 0.0, 0.0, 0.0], dtype=np.float64)
 LQR_SWITCH_WEIGHTS = np.array([1.0, 1.0, 0.1, 0.1], dtype=np.float64)
 
 # Lai et al. (2009) equation (17) prints eps1 = eps2 = pi/6 and eps_E = 1 J.
-# The angle tolerance is tightened here; ``docs/acrobot_xk_gated_lyapunov.md``
-# records the sweep that motivates it.
+# This module tightens the angle tolerance. ``docs/acrobot_xk_gated_lyapunov.md``
+# records the sweep behind that choice.
 LAI_ANGLE_TOLERANCE = np.pi / 30.0
 LAI_ENERGY_TOLERANCE = 1.0
 
@@ -130,7 +131,8 @@ def lqr_switch_residual(
 def upright_linearization(params: AcrobotParams) -> Tuple[np.ndarray, np.ndarray]:
     """Continuous-time ``(A, B)`` at ``q = (pi/2, 0), qdot = 0``.
 
-    The input is the physical elbow torque, not the normalized MuJoCo command.
+    The input is the physical elbow torque. A caller that works with the
+    normalized MuJoCo command must scale it by the gear first.
     """
     mass = params.mass_matrix(0.0)
     gravity_stiffness = np.array(
@@ -153,9 +155,9 @@ def upright_linearization(params: AcrobotParams) -> Tuple[np.ndarray, np.ndarray
 class LQRDesign:
     """Design choices for the local Riccati value and its gate.
 
-    ``Q = I`` and ``R = 0.5`` match the local design used for this same
-    published Acrobot parameter set in Lai et al. (2009); Xin--Kaneda specify
-    the switching test but not a unique Riccati cost.
+    ``Q = I`` and ``R = 0.5`` match the local design that Lai et al. (2009) use
+    for this same published Acrobot parameter set. Xin--Kaneda give the
+    switching test alone, and leave the Riccati cost open.
     """
 
     q: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
@@ -201,11 +203,11 @@ def riccati_feedback(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Solve the CARE for ``(A, B)`` and return ``(K, P)``.
 
-    ``K = R^-1 B^T P`` is the gain of equation (46), and ``P`` is symmetrized
-    before it is returned so that quadratic forms built on it are exact.  Both
-    this module and :mod:`controllers.lai_she` reach the Riccati step through
-    here; they keep their own plants and linearizations, which differ in the
-    inertia the two papers print.
+    ``K = R^-1 B^T P`` is the gain of equation (46). The function symmetrizes
+    ``P`` before it returns, so that quadratic forms built on ``P`` are exact.
+    Both this module and :mod:`controllers.lai_she` reach the Riccati step
+    through here. Each keeps its own plant and linearization, because the two
+    papers print different inertia.
     """
     weights = np.diag(np.asarray(q, dtype=np.float64))
     cost = np.array([[float(r)]], dtype=np.float64)
@@ -231,8 +233,9 @@ def lqr_scale_on_switch_region(
     """Maximum ``e.T P e`` over the paper's weighted-L1 switching region.
 
     A convex quadratic attains its maximum over the weighted-L1 polytope at a
-    vertex ``e = +/- switch_threshold / weight_i``.  Dividing the local value
-    by this scale therefore places every state in the paper region in ``[0, 1]``.
+    vertex ``e = +/- switch_threshold / weight_i``. A division of the local
+    value by this scale therefore puts every state of the paper region in
+    ``[0, 1]``.
     """
     p = np.asarray(p, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
@@ -340,7 +343,7 @@ class GatedLyapunov:
         return float(value), gradient
 
     def rate(self, state: np.ndarray, state_derivative: np.ndarray) -> float:
-        """Directional derivative, including the derivative of the smooth gate."""
+        """Directional derivative. It carries the derivative of the smooth gate."""
         derivative = np.asarray(state_derivative, dtype=np.float64)
         if derivative.shape != (4,):
             raise ValueError(
@@ -408,24 +411,24 @@ class AttractiveRegion:
         |x1| <= eps_1,   |x1 + x2| <= eps_2,
         ||(w3 x3, w4 x4)|| <= eps_5,   |E - E_top| <= eps_E,
 
-    both angles wrapped.  The velocity condition is vacuous at the paper's own
-    weights, so speed enters only through the energy band -- which is what
-    makes the region reachable by a swing-up that regulates energy.
+    with both angles wrapped. The velocity condition is vacuous at the paper's
+    own weights, so speed enters through the energy band alone. A swing-up that
+    regulates energy can therefore reach the region.
 
-    The conditions read the same in either coordinate frame.  The 2009 paper
-    measures the shoulder from upright, ``x = [x1, x2, x3, x4]``, while this
-    repository's Xin--Kaneda plant measures it from the horizontal; the two are
-    related by ``x = -e`` with ``e`` the wrapped upright error, and every
-    condition above is even in its argument.  :meth:`residual_of` therefore
-    takes the four scalars directly and serves both frames, with
-    :meth:`exact_residual` the convenience wrapper for the Xin--Kaneda frame.
+    The conditions read the same in either coordinate frame. The 2009 paper
+    measures the shoulder from upright, ``x = [x1, x2, x3, x4]``. The
+    Xin--Kaneda plant of this repository measures it from the horizontal. The
+    two frames are related by ``x = -e``, where ``e`` is the wrapped upright
+    error, and every condition above is even in its argument.
+    :meth:`residual_of` therefore takes the four scalars directly and serves
+    both frames. :meth:`exact_residual` wraps it for the Xin--Kaneda frame.
 
     ``transition_fraction`` places the inner boundary, inside which the gate is
     fully local, at that fraction of the outer boundary.
     """
 
     angle_tolerance: float = LAI_ANGLE_TOLERANCE
-    #: Tolerance on the second angle condition; ``None`` reuses the first.
+    #: Tolerance on the second angle condition. ``None`` reuses the first.
     tip_tolerance: Optional[float] = None
     energy_tolerance: float = LAI_ENERGY_TOLERANCE
     velocity_weights: Tuple[float, float] = (1e-3, 1e-3)
@@ -459,7 +462,7 @@ class AttractiveRegion:
 
     @property
     def effective_tip_tolerance(self) -> float:
-        """``eps_2``, defaulting to ``eps_1`` as the paper takes it."""
+        """``eps_2``. The default is ``eps_1``, as the paper takes it."""
         return (
             self.angle_tolerance if self.tip_tolerance is None else self.tip_tolerance
         )
@@ -484,10 +487,11 @@ class AttractiveRegion:
         energy_error: float,
         velocity: np.ndarray,
     ) -> float:
-        """Largest of the four normalized violations; ``<= 1`` inside.
+        """Largest of the four normalized violations. Inside it is ``<= 1``.
 
-        The angle arguments must already be wrapped.  This is the single home
-        of equation (17); both coordinate frames reach the region through it.
+        The caller must wrap the angle arguments first. This method is the one
+        home of equation (17), and both coordinate frames reach the region
+        through it.
         """
         velocity = np.asarray(velocity, dtype=np.float64).reshape(-1)
         if velocity.shape != (2,):
@@ -525,10 +529,10 @@ class AttractiveRegion:
     ) -> Tuple[float, np.ndarray]:
         """Differentiable upper bound on :meth:`exact_residual`.
 
-        Each ``|.|`` is smoothed, the velocity norm is smoothed the same way,
-        and the maximum is replaced by a ``p``-norm.  Every replacement only
-        ever raises the residual, so any state given nonzero local membership
-        lies strictly inside the printed region.
+        The method smooths each ``|.|``, smooths the velocity norm the same
+        way, and replaces the maximum with a ``p``-norm. Every replacement
+        raises the residual, so every state with nonzero local membership lies
+        strictly inside the printed region.
         """
         energy, energy_gradient = _energy_and_gradient(params, state)
         state = np.asarray(state, dtype=np.float64)
@@ -580,17 +584,17 @@ def max_local_value_on_region(
 ) -> float:
     """``Delta``: the maximum of ``e.T P e`` over the attractive region.
 
-    This is Lai et al.'s equation (71).  Their own choice is the crude bound
-    ``sum |P_ij| x_i,max x_j,max`` of their equation (72), which at this
-    module's default tolerances overshoots the true maximum by 5.7 and would
-    put the offset almost six times above the whole range of the swing-up
-    piece; the maximum itself is used instead.
+    This is equation (71) of Lai et al. Their own choice is the crude bound
+    ``sum |P_ij| x_i,max x_j,max`` of their equation (72). At the default
+    tolerances of this module that bound overshoots the true maximum by 5.7.
+    It puts the offset almost six times above the whole range of the swing-up
+    piece. This function uses the true maximum.
 
-    For each admissible pose the energy band caps the kinetic energy, so the
-    velocities are confined to an ellipsoid and a convex quadratic attains its
-    maximum on that ellipsoid's boundary.  The boundary is a circle after a
-    Cholesky change of variables, and is searched on a grid with parabolic
-    refinement; the poses themselves are gridded.
+    For each admissible pose the energy band caps the kinetic energy. The
+    velocities then lie in an ellipsoid, and a convex quadratic attains its
+    maximum on the boundary of that ellipsoid. A Cholesky change of variables
+    turns the boundary into a circle. The function searches the circle on a
+    grid with parabolic refinement, and grids the poses as well.
     """
     p = np.asarray(p, dtype=np.float64)
     if p.shape != (4, 4) or not np.all(np.isfinite(p)):
@@ -645,22 +649,22 @@ class NonsmoothLyapunov:
 
     Lai, Wu, She and Yang, *Comprehensive Unified Control Strategy for
     Underactuated Two-Link Manipulators*, IEEE Trans. SMC-B 39(2), 2009, build
-    one Lyapunov function for the whole motion space out of two pieces: a
-    swing-up piece (their equation 20) that is the Xin--Kaneda function plus a
-    constant ``Delta``, and a local Riccati piece ``e.T P e`` (equation 44) on
-    the attractive area.  Their Definition 3 requires the switched function to
-    decrease across the switching surface, and equation (71) secures that by
-    setting ``Delta`` to the largest local value the region admits.
+    one Lyapunov function for the whole motion space out of two pieces. The
+    swing-up piece (their equation 20) is the Xin--Kaneda function plus a
+    constant ``Delta``. The local Riccati piece ``e.T P e`` (equation 44) covers
+    the attractive area. Their Definition 3 requires the switched function to
+    decrease across the switching surface. Equation (71) secures that, and sets
+    ``Delta`` to the largest local value that the region admits.
 
-    Two things follow, and both differ from :class:`GatedLyapunov`.  The pieces
+    Two things follow, and both differ from :class:`GatedLyapunov`. The pieces
     share one scale, the Xin--Kaneda value at hanging rest, so their levels are
-    comparable at all.  And the outer piece carries ``Delta``, so it dominates
-    the inner piece everywhere in the region: entering the gate can only step
-    the value down.  That removes the ridge the earlier construction leaves
-    along the homoclinic orbit.
+    comparable. The outer piece also carries ``Delta``, so it dominates the
+    inner piece everywhere in the region. An entry into the gate can then only
+    step the value down. That removes the ridge that the earlier construction
+    leaves along the homoclinic orbit.
 
-    The constant shifts the value, never its gradient, so a reward built on
-    this function has the same shaping during swing-up as one built on the
+    The constant shifts the value and leaves its gradient alone. A reward built
+    on this function therefore shapes the swing-up exactly as one built on the
     bare Xin--Kaneda value.
     """
 
@@ -668,10 +672,10 @@ class NonsmoothLyapunov:
     gains: Gains
     region: AttractiveRegion = field(default_factory=AttractiveRegion)
     design: LQRDesign = field(default_factory=LQRDesign)
-    #: Skip the search for ``Delta`` and use this value.  Constructing the
-    #: offset costs a second or so, which is worth avoiding when one process
-    #: builds many identical copies; a value below the region's true maximum
-    #: reinstates the ridge, so pass one obtained from a matching search.
+    #: Skip the search for ``Delta`` and use this value. The search costs about
+    #: a second, which matters when one process builds many identical copies.
+    #: A value below the true maximum of the region brings the ridge back, so
+    #: pass a value that comes from a matching search.
     delta_override: Optional[float] = None
     a: np.ndarray = field(init=False, repr=False)
     b: np.ndarray = field(init=False, repr=False)
@@ -744,7 +748,7 @@ class NonsmoothLyapunov:
         return float(value), gradient
 
     def rate(self, state: np.ndarray, state_derivative: np.ndarray) -> float:
-        """Directional derivative, including the derivative of the smooth gate."""
+        """Directional derivative. It carries the derivative of the smooth gate."""
         derivative = np.asarray(state_derivative, dtype=np.float64)
         if derivative.shape != (4,):
             raise ValueError(
@@ -760,11 +764,11 @@ class NonsmoothLyapunov:
     def clf_margin(self, state: np.ndarray, torque_limit: float) -> float:
         """Smallest achievable rate of the local piece under a torque bound.
 
-        Returns ``min_{|tau| <= limit} d/dt (e.T P e) / s``.  A negative value
-        says some admissible torque decreases the local piece there, which is
-        what a reward built on it needs; it is weaker than asking the linear
-        feedback ``-K e`` to do the decreasing, and it is the property that
-        survives when no balancing controller is ever switched in.
+        Returns ``min_{|tau| <= limit} d/dt (e.T P e) / s``. A negative value
+        says that some admissible torque decreases the local piece there, which
+        is what a reward built on it needs. The condition is weaker than a
+        demand that the linear feedback ``-K e`` do the decreasing. It also
+        holds when the run never switches a balancing controller in.
         """
         if not np.isfinite(torque_limit) or torque_limit <= 0.0:
             raise ValueError("torque_limit must be finite and positive")
@@ -782,18 +786,20 @@ class NonsmoothLyapunov:
 
 
 class XKLQRSwitchedController:
-    """Xin-Kaneda swing-up, latching one-way to the local LQR feedback.
+    """Xin-Kaneda swing-up with a one-way latch to the local LQR feedback.
 
-    Same construction as :class:`NonsmoothLyapunov`'s two pieces, run as a
-    controller rather than a reward: the exact Xin-Kaneda law drives the
-    swing-up, and on first entry to :class:`AttractiveRegion` -- Lai et
-    al.'s equation-(17) region -- control latches to the local Riccati
-    feedback ``tau = -K e`` and never switches back (``benchmarks/render_
-    acrobot_nslf.py``'s ``SwitchedController`` renders exactly this law; this
-    is the reusable form, with the plain ``act(obs) -> action`` interface
-    :class:`~controllers.xin_kaneda.XinKanedaController` uses, so it drops
-    into anything that already accepts that controller -- including CT-SAC's
-    ``demonstration_policy``).
+    The two pieces are the same construction as :class:`NonsmoothLyapunov`,
+    run as a controller instead of a reward. The exact Xin-Kaneda law drives the
+    swing-up. :class:`AttractiveRegion` is the equation-(17) region of Lai et
+    al. On first entry to it, control latches to the local Riccati feedback
+    ``tau = -K e``, and never switches back.
+
+    The ``SwitchedController`` in ``benchmarks/render_acrobot_nslf.py`` renders
+    exactly this law. This class is the reusable form. It carries the plain
+    ``act(obs) -> action`` interface of
+    :class:`~controllers.xin_kaneda.XinKanedaController`, so it drops into
+    anything that already accepts that controller, the ``demonstration_policy``
+    of CT-SAC included.
     """
 
     SWING_UP = 1

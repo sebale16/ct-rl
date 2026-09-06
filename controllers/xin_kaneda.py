@@ -8,29 +8,29 @@ The control law is a single expression that appears in two papers:
   of the Acrobot", Int. J. Robust Nonlinear Control 17:1503-1524, eq. (18),
   with ``k_E`` normalized to 1.
 
-The law is invariant under a common scaling of ``(k_E, k_V, k_D, k_P)``, so only
-the ratios matter and this module fixes ``k_E = 1`` throughout, following 2007.
-The 2002 thresholds are still computed (``kd_min_theorem4``, ``eta_star``,
-``xi_star``) because they are the published fixtures the tests check against and
-because they show how much the 2002 bounds over-pay.
+The law is invariant under a common scaling of ``(k_E, k_V, k_D, k_P)``, so
+only the ratios matter. This module fixes ``k_E = 1`` throughout, as 2007 does.
+It still computes the 2002 thresholds (``kd_min_theorem4``, ``eta_star``,
+``xi_star``) for two reasons. They are the published fixtures that the tests
+compare against, and they show how much the 2002 bounds over-pay.
 
 Coordinates
 -----------
-Everything here works in the papers' frame: ``q1`` is measured from the
-horizontal, upright is ``q1 = pi/2`` and hanging ``q1 = -pi/2``.  The
-``acrobot-swingup-xk`` plant is built in exactly those coordinates, so its
-``qpos``/``qvel`` need no conversion and ``gear * ctrl`` is ``tau2`` outright.
+This module works in the papers' frame. It measures ``q1`` from the horizontal,
+so upright is ``q1 = pi/2`` and hanging is ``q1 = -pi/2``. The
+``acrobot-swingup-xk`` plant uses exactly those coordinates. Its ``qpos`` and
+``qvel`` need no conversion, and ``gear * ctrl`` is ``tau2`` directly.
 
-The stock dm_control Acrobot instead measures the shoulder from the upward
-vertical, upright ``qpos = (0, 0)`` and hanging ``(pi, 0)``.  That frame is a
+The stock dm_control Acrobot measures the shoulder from the upward vertical.
+There upright is ``qpos = (0, 0)`` and hanging is ``(pi, 0)``. That frame is a
 reflection of this one,
 
     q1_paper = pi/2 - q1_stock,  q2_paper = -q2_stock,  qdot_paper = -qdot_stock
 
-with the torque flipping to match.  ``M(q)`` is invariant under it (it depends
-on ``cos q2`` only) and the mechanical energies differ by the constant
-``2*(b1 + b2)`` from the height reference.  :func:`obs_to_paper` applies the map,
-and :class:`XinKanedaController` will do so when constructed with
+and the torque flips to match. ``M(q)`` is invariant under the map, because it
+depends on ``cos q2`` alone. The mechanical energies differ by the constant
+``2*(b1 + b2)`` from the height reference. :func:`obs_to_paper` applies the map.
+:class:`XinKanedaController` applies it too when you construct it with
 ``frame="upward_vertical"``.
 
 Dynamics
@@ -54,18 +54,18 @@ from typing import Optional, Tuple
 import numpy as np
 
 
-# Grid resolution for the one-dimensional extremal problems below.  They are all
-# smooth and 2*pi-periodic in the elbow angle, so a dense sweep followed by a
-# parabolic refinement is exact to well past the precision the published
-# constants are quoted at.
+# Grid resolution for the one-dimensional extremal problems below. Each problem
+# is smooth and 2*pi-periodic in the elbow angle. A dense sweep and then a
+# parabolic refinement is exact well past the precision of the published
+# constants.
 _GRID = 200_001
 
 
 def _refine(f, grid: np.ndarray, index: int, *, maximize: bool) -> float:
-    """Parabolic refinement of an extremum bracketed at ``grid[index]``.
+    """Refine an extremum bracketed at ``grid[index]`` with a parabola.
 
-    Returns the extremal *value* of ``f``.  Minimization is handled by fitting
-    the parabola to ``-f`` and evaluating ``f`` at the located abscissa.
+    Returns the extremal *value* of ``f``. For a minimum, the function fits the
+    parabola to ``-f`` and then evaluates ``f`` at the abscissa it locates.
     """
     if index <= 0 or index >= grid.size - 1:
         return float(f(grid[index]))
@@ -98,10 +98,10 @@ class Gains:
 class AcrobotParams:
     """Mechanical parameters in the papers' ``(a, b)`` grouping.
 
-    ``gear`` is the actuator scaling of the plant the controller commands: the
-    dm_control Acrobot takes ``ctrl`` in ``[-1, 1]`` and applies
-    ``tau = gear * ctrl``.  It plays no part in the dynamics here and is carried
-    only so the controller can emit a normalized command.
+    ``gear`` is the actuator scaling of the plant that the controller commands.
+    The dm_control Acrobot takes ``ctrl`` in ``[-1, 1]`` and applies
+    ``tau = gear * ctrl``. The dynamics here make no use of ``gear``. This class
+    holds it only so that the controller can emit a normalized command.
     """
 
     a1: float
@@ -117,7 +117,7 @@ class AcrobotParams:
             value = float(getattr(self, name))
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and > 0, got {value}")
-        # Positive definiteness of M(q) for every q; the papers assume it and
+        # Positive definiteness of M(q) for every q. The papers assume it, and
         # every threshold below divides by det M.
         if self.a1 * self.a2 <= self.a3**2:
             raise ValueError(
@@ -138,7 +138,7 @@ class AcrobotParams:
         return 2.0 * (self.b1 + self.b2)
 
     def m11(self, q2):
-        """Upper-left entry of ``M``; a function of the elbow angle alone."""
+        """Upper-left entry of ``M``. It depends on the elbow angle alone."""
         return self.a1 + self.a2 + 2.0 * self.a3 * np.cos(q2)
 
     def det_m(self, q2):
@@ -179,7 +179,7 @@ class AcrobotParams:
         """``F(q2) = sqrt(b1^2 + b2^2 + 2 b1 b2 cos q2)``, eq. (24) of 2007.
 
         The extreme value of the potential over the poses where the shoulder
-        gravity torque vanishes, which is what makes condition (25) exact.
+        gravity torque vanishes. That extreme value makes condition (25) exact.
         """
         return np.sqrt(self.b1**2 + self.b2**2 + 2.0 * self.b1 * self.b2 * np.cos(q2))
 
@@ -189,9 +189,9 @@ class AcrobotParams:
     def from_physics(cls, physics) -> "AcrobotParams":
         """Recover ``(a, b)`` from a dm_control Acrobot ``Physics``.
 
-        Reads the two links' masses, centre-of-mass offsets, hinge-axis
-        inertias, and the joint offset, so the result tracks any edit to the
-        model XML (damping and gear changes included).
+        The method reads the masses, center-of-mass offsets, and hinge-axis
+        inertias of the two links, plus the joint offset. The result therefore
+        tracks any edit to the model XML, damping and gear changes included.
         """
         model = physics.model
         if int(model.nbody) != 3 or int(model.nq) != 2 or int(model.nv) != 2:
@@ -202,11 +202,11 @@ class AcrobotParams:
         mass = np.asarray(model.body_mass, dtype=np.float64)
         ipos = np.asarray(model.body_ipos, dtype=np.float64)
         bpos = np.asarray(model.body_pos, dtype=np.float64)
-        # Read the layout off the model instead of assuming one: the link
-        # direction is the axis the elbow is offset along, and the relevant
-        # principal inertia is the one about the hinge axis.  This keeps the
-        # recovery valid both for a model laid out along +z (the dm_control
-        # Acrobot) and one laid out along +x (the paper-coordinate plant).
+        # Read the layout off the model rather than assume one. The link
+        # direction is the axis that the elbow is offset along, and the relevant
+        # principal inertia is the one about the hinge axis. The recovery then
+        # holds for a model laid out along +z (the dm_control Acrobot) and for
+        # one laid out along +x (the paper-coordinate plant).
         link_axis = int(np.argmax(np.abs(bpos[2])))
         hinge = np.abs(np.asarray(model.jnt_axis, dtype=np.float64)[0])
         inertia_axis = int(np.argmax(hinge))
@@ -249,10 +249,10 @@ PAPER_PARAMS = AcrobotParams(
 def kd_min(params: AcrobotParams) -> float:
     """Condition (25) of 2007: the exact no-singularity threshold on ``k_D``.
 
-    ``k_D > max_q2 (F(q2) + E_r) det M(q2) / M11(q2)`` is *necessary and
-    sufficient* for the denominator of the control law to stay away from zero
-    for every initial state and all future time (Proposition 1).  The 2002
-    bound :func:`kd_min_theorem4` is sufficient only, and larger.
+    Proposition 1 proves that ``k_D > max_q2 (F(q2) + E_r) det M(q2) / M11(q2)``
+    is *necessary and sufficient*. Under that bound the denominator of the
+    control law stays away from zero, for every initial state and for all future
+    time. The 2002 bound :func:`kd_min_theorem4` is sufficient only, and larger.
     """
     grid = np.linspace(0.0, 2.0 * np.pi, _GRID)
 
@@ -269,8 +269,8 @@ def kd_min(params: AcrobotParams) -> float:
 def kd_min_theorem4(params: AcrobotParams) -> float:
     """Condition (13) of 2002 at ``k_E = 1``: ``2 E_top / rho*``.
 
-    Kept for comparison; it is the sufficient bound Theorem 4 uses, obtained by
-    replacing ``E_r - P(q)`` with the cruder ``2 E_r``.
+    This module keeps the bound for comparison. It is the sufficient bound of
+    Theorem 4, which replaces ``E_r - P(q)`` with the cruder ``2 E_r``.
     """
     return 2.0 * params.energy_top / rho_star(params)
 
@@ -278,10 +278,10 @@ def kd_min_theorem4(params: AcrobotParams) -> float:
 def kp_min(params: AcrobotParams) -> float:
     """Condition (43) of 2007: ``(2/pi) min(b1^2, b2^2)``.
 
-    Proposition 4's threshold.  It does not remove the closed-loop equilibria
-    with ``q2 != 0``; it makes their number finite, and they are then shown to
-    be unstable and hyperbolic, so the initial conditions converging to them
-    form a set of Lebesgue measure zero.
+    The threshold of Proposition 4. It leaves a finite number of closed-loop
+    equilibria with ``q2 != 0``. The paper then proves that those equilibria are
+    unstable and hyperbolic. The initial conditions that converge to them
+    therefore form a set of Lebesgue measure zero.
     """
     return (2.0 / np.pi) * min(params.b1**2, params.b2**2)
 
@@ -289,9 +289,9 @@ def kp_min(params: AcrobotParams) -> float:
 def kp_min_exact(params: AcrobotParams) -> float:
     """Condition (51) of 2007: ``b1 b2 sup_{q2 != 0} Z(q2)``.
 
-    The exact form of the requirement that :func:`kp_min` bounds in closed form
-    via ``sup Z <= (2/pi) min(b1/b2, b2/b1)`` (their Appendix C).  ``Z`` is the
-    same function 2002 calls ``eta``.
+    The exact form of the requirement. :func:`kp_min` bounds it in closed form
+    with ``sup Z <= (2/pi) min(b1/b2, b2/b1)``, from Appendix C of 2007. ``Z``
+    is the same function that 2002 calls ``eta``.
     """
     return params.b1 * params.b2 * eta_star(params)
 
@@ -299,11 +299,11 @@ def kp_min_exact(params: AcrobotParams) -> float:
 def kp_boundary(params: AcrobotParams) -> float:
     """``2 b1 b2``: the threshold that both papers' strong results share.
 
-    It is condition (57) of 2002 Theorem 4, condition (63) of 2007 Corollary 1,
-    and the spectral boundary of 2007 Proposition 5 at the hanging equilibrium
-    — the same number in all three roles.  Above it the closed loop has no
-    equilibrium with ``q2 != 0``; below it the hanging equilibrium gains a third
-    right-half-plane eigenvalue and the escape from hanging speeds up by two
+    The same number fills three roles. It is condition (57) of 2002 Theorem 4.
+    It is condition (63) of 2007 Corollary 1. It is also the spectral boundary
+    of 2007 Proposition 5 at the hanging equilibrium. Above it the closed loop has no
+    equilibrium with ``q2 != 0``. Below it the hanging equilibrium gains a third
+    right-half-plane eigenvalue, and the escape from hanging speeds up by two
     orders of magnitude.
     """
     return 2.0 * params.b1 * params.b2
@@ -328,9 +328,9 @@ def _beta_delta(params: AcrobotParams, q2):
 def eta_star(params: AcrobotParams) -> float:
     """``eta* = sup_{q2 != 0} (delta - beta - 1) sin q2 / (delta q2)``.
 
-    eq. (34)/(36) of 2002, identical to ``sup Z`` in eq. (50) of 2007.  The 2002
+    eq. (34)/(36) of 2002, identical to ``sup Z`` in eq. (50) of 2007. The 2002
     paper takes the maximum over ``[pi, 3 pi / 2]``, where the numerator is
-    positive; the sweep here covers a full period, which contains it.
+    positive. The sweep here covers a full period, which contains that interval.
     """
     grid = np.linspace(1e-6, 2.0 * np.pi - 1e-6, _GRID)
 
@@ -344,10 +344,10 @@ def eta_star(params: AcrobotParams) -> float:
 def xi_star(params: AcrobotParams) -> float:
     """``xi* = sup_{q2 != 0} (delta + beta + 1) sin q2 / (delta q2) = 2``.
 
-    eq. (55)/(56) of 2002, eq. (65)/(66) of 2007.  The supremum is the limit at
-    ``q2 -> 0``, where ``delta -> 1 + beta``, giving exactly 2 for every plant;
-    this is why :func:`kp_boundary` is always ``2 b1 b2`` and why ``eta*`` never
-    binds in the 2002 Theorem-4 condition.
+    eq. (55)/(56) of 2002, eq. (65)/(66) of 2007. The supremum is the limit at
+    ``q2 -> 0``, where ``delta -> 1 + beta``. The value is exactly 2 for every
+    plant. That is why :func:`kp_boundary` is always ``2 b1 b2``, and why
+    ``eta*`` never binds in the 2002 Theorem-4 condition.
     """
     grid = np.linspace(1e-9, 2.0 * np.pi - 1e-9, _GRID)
 
@@ -362,12 +362,13 @@ def alpha(params: AcrobotParams) -> float:
     """Condition (31) of 2002: the mechanical non-degeneracy quantity.
 
     Theorem 2 of 2002 needs ``alpha != 0``, which the paper calls a mild
-    condition on the mechanical parameters.  Reported so a caller can confirm it
-    for whatever plant is in use.
+    condition on the mechanical parameters. This function reports the value, so
+    that a caller can make sure that the condition holds for its own plant.
 
     2002 writes this in its ``theta`` grouping, where ``theta4 = b1 / g`` and
-    ``theta5 = b2 / g`` are mass moments rather than gravity torques; the
-    gravity factors are divided out here so the value matches the published one.
+    ``theta5 = b2 / g`` are mass moments. The ``b1`` and ``b2`` used here are
+    gravity torques, so this function divides the gravity factors out and the
+    value matches the published one.
     """
     a1, a2, a3 = params.a1, params.a2, params.a3
     t4, t5 = params.b1 / params.gravity, params.b2 / params.gravity
@@ -387,7 +388,7 @@ def alpha(params: AcrobotParams) -> float:
 
 
 def assert_admissible(params: AcrobotParams, gains: Gains) -> None:
-    """Raise unless the gains satisfy the 2007 conditions for this plant."""
+    """Raise an error if the gains fail the 2007 conditions for this plant."""
     if alpha(params) == 0.0:
         raise ValueError(
             "mechanical condition (31) fails for this plant: alpha = 0"
@@ -420,7 +421,7 @@ def homoclinic_speed(params: AcrobotParams) -> float:
 
 
 def asymptotic_torque_bound(params: AcrobotParams) -> float:
-    """Bound (69) of 2007 on ``|tau2|`` as the orbit is approached.
+    """Bound (69) of 2007 on ``|tau2|`` as the state approaches the orbit.
 
     ``(a2 b1 + a3 b1 - a1 b2 - a3 b2) / (a1 + a2 + 2 a3)``, free of the gains
     and of the initial state.
@@ -463,10 +464,10 @@ def torque_batch(
 ) -> np.ndarray:
     """:func:`torque` evaluated over a batch, ``states`` of shape ``(N, 4)``.
 
-    Rows sitting on the law's singularity come back as ``nan`` rather than
-    raising, so a caller sweeping states it did not choose -- a replay buffer,
-    say -- can drop those rows instead of losing the whole batch.  Whenever a
-    row is admissible the value matches :func:`torque` to floating-point.
+    A row on the law's singularity comes back as ``nan`` and raises no error.
+    A replay buffer, for example, sweeps states it did not choose. Such a caller
+    drops those rows and keeps the rest of the batch. For an admissible
+    row the value matches :func:`torque` to floating-point.
     """
     values = np.asarray(states, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != 4:
@@ -526,9 +527,10 @@ def closed_loop(
 ) -> Tuple[np.ndarray, float]:
     """Closed-loop drift in paper coordinates, and the applied torque.
 
-    ``damping`` adds ``-damping * qdot`` as a passive joint force; it is zero in
-    the papers, and any positive value voids their Lyapunov argument (the
-    identity ``Edot = qdot2 tau2`` becomes ``Edot = qdot2 tau2 - damping |qdot|^2``).
+    ``damping`` adds ``-damping * qdot`` as a passive joint force. It is zero in
+    the papers. Any positive value voids their Lyapunov argument, because the
+    identity ``Edot = qdot2 tau2`` becomes
+    ``Edot = qdot2 tau2 - damping |qdot|^2``.
     """
     commanded = torque(params, gains, state)
     applied = (
@@ -546,9 +548,9 @@ def closed_loop(
 def hanging_jacobian(params: AcrobotParams, gains: Gains) -> np.ndarray:
     """Jacobian of the closed loop at the hanging equilibrium ``(-pi/2, 0, 0, 0)``.
 
-    Hanging is an exact equilibrium of the closed loop: the gravity torques
-    vanish there and ``q2 = qdot2 = 0``, so the law commands zero.  Its spectrum
-    is what 2007 Proposition 5 classifies.
+    Hanging is an exact equilibrium of the closed loop. The gravity torques
+    vanish there and ``q2 = qdot2 = 0``, so the law commands zero. 2007
+    Proposition 5 classifies its spectrum.
     """
     base = np.array([-0.5 * np.pi, 0.0, 0.0, 0.0])
     step = 1e-5
@@ -566,8 +568,8 @@ def hanging_regime(params: AcrobotParams, gains: Gains) -> dict:
     """Classify the hanging equilibrium per 2007 Proposition 5.
 
     Returns the number of right-half-plane eigenvalues, the dominant real part,
-    the implied escape time constant, and which of the two papers' regimes the
-    gains sit in.
+    and the implied escape time constant. Returns also which of the two papers'
+    regimes the gains sit in.
     """
     eigenvalues = np.linalg.eigvals(hanging_jacobian(params, gains))
     dominant = float(np.max(eigenvalues.real))
@@ -594,11 +596,11 @@ def hanging_regime(params: AcrobotParams, gains: Gains) -> dict:
 def obs_to_paper(obs: np.ndarray) -> np.ndarray:
     """Map an *upward-vertical* raw-state observation into paper coordinates.
 
-    The stock dm_control Acrobot measures the shoulder from the upward vertical,
-    so ``obs = [q1, q2, qdot1, qdot2]`` there becomes
-    ``[pi/2 - q1, -q2, -qdot1, -qdot2]``, with the elbow torque flipping to
-    match.  ``acrobot-swingup-xk`` is built directly in the paper's frame and
-    needs no such map; this exists for the stock model.
+    The stock dm_control Acrobot measures the shoulder from the upward vertical.
+    There ``obs = [q1, q2, qdot1, qdot2]`` becomes
+    ``[pi/2 - q1, -q2, -qdot1, -qdot2]``, and the elbow torque flips to match.
+    ``acrobot-swingup-xk`` uses the paper's frame directly and needs no map.
+    This function exists for the stock model.
     """
     values = np.asarray(obs, dtype=np.float64).reshape(-1)
     if values.shape != (4,):
@@ -613,28 +615,29 @@ def obs_to_paper(obs: np.ndarray) -> np.ndarray:
     )
 
 
-# How a plant's raw state relates to the paper's coordinates.  ``paper`` is the
-# identity, and is what ``acrobot-swingup-xk`` provides.
+# How the raw state of a plant relates to the paper's coordinates. ``paper`` is
+# the identity, and is what ``acrobot-swingup-xk`` provides.
 FRAMES = ("paper", "upward_vertical")
 
 
 class XinKanedaController:
     """The energy-based swing-up law as an ``act(obs) -> action`` callable.
 
-    Consumes dm_control raw-state observations and emits a normalized command in
-    ``[-1, 1]``, so the evaluation harness can score this controller and a
-    learned policy through one code path.
+    The controller takes dm_control raw-state observations and emits a
+    normalized command in ``[-1, 1]``. The evaluation harness can therefore
+    score this controller and a learned policy through one code path.
 
-    ``frame`` says how the observation relates to the paper's coordinates:
-    ``"paper"`` (the default, and what ``acrobot-swingup-xk`` provides) is the
-    identity, while ``"upward_vertical"`` applies :func:`obs_to_paper` and flips
-    the commanded torque, which is what the stock dm_control Acrobot needs.
+    ``frame`` says how the observation relates to the paper's coordinates.
+    ``"paper"`` is the identity, is the default, and is what
+    ``acrobot-swingup-xk`` provides. ``"upward_vertical"`` applies
+    :func:`obs_to_paper` and flips the commanded torque, which is what the stock
+    dm_control Acrobot needs.
 
-    ``torque_limit`` describes the plant's actuator: the command is clipped to
-    it before being normalized by ``params.gear``.  Passing ``None`` takes the
-    limit from ``params.gear``, which is how the dm_control model expresses it.
-    Clipping voids the Lyapunov argument, so :attr:`saturated_steps` tracks how
-    often it bound.
+    ``torque_limit`` describes the plant's actuator. The controller clips the
+    command to that limit and then normalizes it by ``params.gear``. ``None``
+    takes the limit from ``params.gear``, which is how the dm_control model
+    expresses it. Clipping voids the Lyapunov argument, so
+    :attr:`saturated_steps` counts the steps where the limit bound.
     """
 
     def __init__(
@@ -660,9 +663,9 @@ class XinKanedaController:
             raise ValueError(
                 f"torque_limit must be finite and > 0, got {self.torque_limit}"
             )
-        # The plant applies tau = gear * ctrl with ctrl in [-1, 1], so a limit
-        # above the gear could not be commanded and would silently be clipped
-        # again by the actuator.
+        # The plant applies tau = gear * ctrl with ctrl in [-1, 1]. A limit
+        # above the gear is not commandable, and the actuator clips it again
+        # without any report.
         if self.torque_limit > float(params.gear) * (1.0 + 1e-12):
             raise ValueError(
                 f"torque_limit {self.torque_limit} exceeds what the plant can "
@@ -695,7 +698,7 @@ class XinKanedaController:
         self.steps += 1
         if abs(commanded) > self.torque_limit:
             self.saturated_steps += 1
-        # The plant takes a normalized command scaled by its gear.  In the
+        # The plant takes a normalized command scaled by its gear. In the
         # upward-vertical frame the reflection also flips the torque sign.
         sign = 1.0 if self.frame == "paper" else -1.0
         return np.array([sign * applied / self.params.gear], dtype=np.float64)
@@ -704,11 +707,11 @@ class XinKanedaController:
         """Normalized commands for a batch of observations, ``(N, 4) -> (N, 1)``.
 
         The batched counterpart of :meth:`__call__`, for callers that score many
-        states at once -- CT-SAC's imitation loss reads the law through here.
-        Two differences follow from those states not being ones this controller
-        drove: the saturation bookkeeping is left alone, since it counts what
-        was actually commanded on a trajectory, and states on the law's
-        singularity yield ``nan`` instead of raising, for the caller to mask.
+        states at once. The imitation loss of CT-SAC reads the law through here.
+        This controller did not drive those states, so two things differ. The
+        saturation counters stay untouched, because they count what the
+        controller commanded on a trajectory. States on the law's singularity
+        yield ``nan`` and raise no error, and the caller masks them.
         """
         values = np.asarray(obs, dtype=np.float64)
         if values.ndim == 1:

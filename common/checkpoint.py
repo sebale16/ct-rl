@@ -6,10 +6,11 @@ Full training-state checkpointing for off-policy continuous-time algorithms
 The built-in ``algorithm.save`` only persists the actor-critic weights (plus a
 learned-dynamics sidecar). That is enough to *evaluate* a trained model but not
 to *resume* training: the replay buffer, optimizer moments, entropy temperature,
-decision-step/simulated-time counters and RNG state are all lost. On a queue
-with a hard wall time (e.g. LS6 ``development`` at 2 h) a >2 h run must
-therefore checkpoint the *entire* trainer state near the wall and pick up
-exactly where it left off in the next job of a resubmission chain.
+decision-step/simulated-time counters and RNG state are all lost. Some queues
+have a hard wall time, LS6 ``development`` at 2 h for example. A run longer
+than that wall must therefore checkpoint the *entire* trainer state near the
+wall. The next job of a resubmission chain then picks up exactly where the
+previous job stopped.
 
 A checkpoint is a directory with three parts:
 
@@ -52,8 +53,9 @@ _COUNTER_ATTRS = (
     "_value_updates",
     "_dynamics_updates",
     "alpha",
-    # guarded-pipeline counters (structured/learned modes only; saved iff present)
-    # so guard-hit rates are inspectable from the checkpoint's train_state.pt.
+    # Guarded-pipeline counters, for the structured and learned modes alone.
+    # The checkpoint saves them when they are present, so that train_state.pt
+    # shows the guard-hit rates.
     "_dynamics_fit_rejections",
     "_dynamics_publish_rejections",
     "_dynamics_rollbacks",
@@ -189,10 +191,9 @@ def load_checkpoint(
         ):
             arr = data[name]
             getattr(buf, name)[...] = arr
-        # Older checkpoints predate the distinction between objective
-        # terminals and reset boundaries and carry no cap-failure annotations.
-        # Preserve their historical behavior while initializing the new
-        # fields deterministically.
+        # An older checkpoint predates the split between objective terminals
+        # and reset boundaries, and carries no cap-failure annotations. Keep its
+        # historical behavior, and initialize the new fields deterministically.
         if "episode_ends" in data:
             buf.episode_ends[...] = data["episode_ends"]
         else:

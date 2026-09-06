@@ -20,11 +20,11 @@ CARTPOLE_STRICT_CAPTURE_INFO_KEY = "cartpole_strict_capture"
 STRICT_CAPTURE_DURATION_SECONDS = 1.0
 CURRICULUM_CAPTURE_DURATION_SECONDS = 5.0
 STRICT_CAPTURE_ENV_ID = "acrobot-swingup-v4.1"
-# The legacy Acrobot capture-oriented tasks share one physical checkpoint rule
-# even when their rewards differ; Acrobot XK and CartPole v2 each publish their
-# own reward-independent endpoint predicates.  For v6 this is load-bearing
-# rather than cosmetic: its reward is a cost, so reward-only selection can
-# prefer a policy merely because it spends less time swinging.
+# The legacy Acrobot capture-oriented tasks share one physical checkpoint rule,
+# even where their rewards differ. Acrobot XK and CartPole v2 each publish their
+# own reward-independent endpoint predicates. For v6 the rule carries real
+# weight. Its reward is a cost, so a reward-only selection can prefer a policy
+# because that policy spends less time swinging.
 STRICT_CAPTURE_ENV_IDS = frozenset(
     {
         "acrobot-swingup-v4.1",

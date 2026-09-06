@@ -128,10 +128,10 @@ def evaluate_policy_per_episode(
                 f"episode, got {len(exact_episode_seeds)} for {n_eval_episodes}"
             )
 
-    # A fixed initial reset makes every callback invocation evaluate the same
-    # episode/reset and irregular-time streams.  Subsequent episode resets
-    # advance those freshly rooted local streams deterministically unless an
-    # exact per-episode protocol seed list is supplied.
+    # A fixed initial reset makes every callback call evaluate the same
+    # episode, reset and irregular-time streams. A later episode reset advances
+    # those freshly rooted local streams deterministically, unless the caller
+    # supplies an exact per-episode protocol seed list.
     initial_seed = (
         exact_episode_seeds[0]
         if exact_episode_seeds is not None
@@ -324,7 +324,7 @@ def evaluate_policy_per_episode(
                 running_dt[0] = 0.0
 
                 # A single env must reset explicitly. Do not reset after the
-                # final requested episode, and reseed every episode when the
+                # final requested episode. Reseed every episode when the
                 # evaluation protocol supplies an exact seed list.
                 if len(episode_returns) < n_eval_episodes:
                     next_seed = (

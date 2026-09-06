@@ -136,8 +136,8 @@ def _parse_dict_from_string(value: str) -> Optional[Dict[str, Any]]:
     Convert a string like "key1=val1;key2=val2" into a dictionary.
     Values are parsed into booleans, numbers, strings, or ``None``.
 
-    Boolean parsing is intentionally local to dictionary-valued CSV cells.
-    Other scalar hyperparameters retain the historical ``_parse_scalar``
+    Boolean parsing stays local to dictionary-valued CSV cells, on purpose.
+    Every other scalar hyperparameter keeps the historical ``_parse_scalar``
     behavior.
     """
     if not value or not isinstance(value, str):
@@ -228,8 +228,8 @@ def load_sb3_hyperparams_from_table(
     if arch_str:
         policy_kwargs["net_arch"] = _parse_net_arch(arch_str)
 
-    # SAC/TRPO historically store this policy constructor option in an
-    # unprefixed column.  Keep it out of the algorithm constructor kwargs.
+    # SAC and TRPO historically store this policy constructor option in an
+    # unprefixed column. Keep it out of the algorithm constructor kwargs.
     log_std_init = row.get("log_std_init", "")
     if log_std_init is not None and str(log_std_init).strip():
         policy_kwargs["log_std_init"] = _parse_scalar(log_std_init)
@@ -254,8 +254,8 @@ def load_sb3_hyperparams_from_table(
 
     for key, val in row.items():
         if key in skip_keys or key.startswith("env_") or key.startswith("policy_"):
-            # ``policy_delay`` is an algorithm parameter despite its historical
-            # unprefixed spelling in td3.csv.
+            # ``policy_delay`` is an algorithm parameter, even though td3.csv
+            # historically spells it without a prefix.
             if key == "policy_delay" and val is not None and str(val).strip():
                 algo_kwargs[key] = _parse_scalar(val)
             continue

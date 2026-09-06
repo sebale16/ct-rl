@@ -6,12 +6,13 @@ Two modes:
     One gain/plant configuration over a range of seeds.
 
 ``--sweep frontier``
-    The torque-versus-time frontier.  ``k_P`` is swept from just above the
-    Proposition-4 floor (eq. 43) up past the ``2 b1 b2`` boundary, with damping
-    on and off.  Below the boundary the hanging equilibrium has three unstable
-    eigenvalues and the swing-up is fast but torque-hungry; above it the law
-    asks for much less torque and the escape from hanging slows by orders of
-    magnitude.  The sweep measures that trade on the plant.
+    The torque-versus-time frontier. The sweep runs ``k_P`` from just above
+    the Proposition-4 floor (eq. 43) up past the ``2 b1 b2`` boundary, with
+    damping on and with damping off. Below the boundary the hanging equilibrium
+    has three unstable eigenvalues, and the swing-up is fast and torque-hungry.
+    Above the boundary the law asks for much less torque, and the escape from
+    hanging slows by orders of magnitude. The sweep measures that trade on the
+    plant.
 
 Examples
 --------
@@ -107,7 +108,7 @@ DEFAULT_TORQUE_LIMIT = 20.0
 # The plant XML's own integration step.
 MODEL_TIMESTEP = 0.01
 
-# Xin-Kaneda's own Section 7 gains; k_D clears the eq. 25 floor of 35.741.
+# Xin-Kaneda's own Section 7 gains. k_D clears the eq. 25 floor of 35.741.
 DEFAULT_K_V = 66.3
 DEFAULT_K_D = 35.8
 
@@ -139,14 +140,14 @@ def _parse_seeds(text: str) -> List[int]:
 def build_env(
     arm: Arm, seed: int, dt: float, physics_dt: Optional[float] = None
 ) -> DMCContinuousEnv:
-    """Build the plant for one arm; ``max_steps`` is set from ``t_max``.
+    """Build the plant for one arm. ``t_max`` sets ``max_steps``.
 
-    The wrapper realizes a control period as a whole number of physics steps
-    (``nsub = max(1, round(dt / physics_dt))``), so asking for a period finer
-    than the model's own timestep is otherwise a silent no-op.  Defaulting the
-    physics step to ``min(dt, MODEL_TIMESTEP)`` makes a fine ``dt`` take effect,
-    which matters for the LQR switching test: its residual dips below the
-    threshold only briefly, so a coarse period can step over the crossing.
+    The wrapper realizes a control period as a whole number of physics steps,
+    ``nsub = max(1, round(dt / physics_dt))``. A request for a period finer than
+    the model's own timestep therefore changes nothing on its own. A physics
+    step that defaults to ``min(dt, MODEL_TIMESTEP)`` makes a fine ``dt`` take
+    effect. That matters for the LQR switching test. Its residual dips below the
+    threshold for a short time only, so a coarse period steps over the crossing.
     """
     step = min(dt, MODEL_TIMESTEP) if physics_dt is None else float(physics_dt)
     return DMCContinuousEnv(
@@ -278,8 +279,8 @@ def frontier_arms(
 def summarize_frontier(rows: Sequence[dict], energy_span: float) -> List[str]:
     """State, per plant, the cheapest ``k_P`` that reaches the orbit.
 
-    The frontier's point: torque demand falls monotonically as ``k_P`` rises
-    toward ``2 b1 b2`` while the escape from hanging slows, so the question is
+    The frontier makes one point. Torque demand falls monotonically as ``k_P``
+    rises toward ``2 b1 b2``, and the escape from hanging slows. The question is
     whether the two ends overlap anywhere inside a given actuator budget.
     """
     lines: List[str] = []

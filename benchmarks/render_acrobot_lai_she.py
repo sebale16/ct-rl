@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Render the Lai--She 2009 WCLF Acrobot controller and its LQR switch.
 
-The mechanism uses the paper's Table-II plant directly in its upward-vertical
-coordinates.  A phase portrait and status bar expose the WCLF swing-up, the
-published equation-(75) LQR switch, energy error, and physical torque.
+The mechanism uses the paper's Table-II plant directly, in its upward-vertical
+coordinates. A phase portrait and a status bar show the WCLF swing-up, the
+published equation-(75) LQR switch, the energy error, and the physical torque.
 
     MUJOCO_GL=egl .venv/bin/python -m benchmarks.render_acrobot_lai_she
 """

@@ -94,11 +94,12 @@ class StochasticActor(nn.Module):
         squash_output: bool = True,
         device: str = "auto",
         # Numerical rail on the spread. The defaults are the conventional SAC
-        # bounds and are inert on every run measured so far -- the learned
-        # log_std across 188 acrobot-xk checkpoints spans [-2.33, +0.08], well
-        # inside them -- so they guard against runaway rather than shape a
-        # healthy run. Tighten log_std_min only to deliberately floor the
-        # spread, e.g. against an imitation term that rewards concentration.
+        # bounds, and they stay inert on every run measured so far. Across 188
+        # acrobot-xk checkpoints the learned log_std spans [-2.33, +0.08], well
+        # inside them. The rails therefore guard against a runaway, and leave
+        # the shape of a healthy run alone. Tighten log_std_min only to floor
+        # the spread on purpose, against an imitation term that rewards
+        # concentration for example.
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
     ) -> None:

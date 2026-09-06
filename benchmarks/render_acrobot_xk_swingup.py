@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """Render the Xin-Kaneda controller swinging the Acrobot up from hanging.
 
-Produces an MP4 with the mechanism on the left and the shoulder phase portrait
-on the right.  The phase panel draws the homoclinic orbit ``Gamma`` (eq. 32 of
-Xin & Kaneda 2007) as a fixed reference and traces ``(q1, qdot1)`` onto it, so
-"reaching the orbit" is visible rather than asserted: the trajectory spirals
-outward from hanging at rest and then rides the reference curve.
+The script writes an MP4 with the mechanism on the left and the shoulder phase
+portrait on the right. The phase panel draws the homoclinic orbit ``Gamma``
+(eq. 32 of Xin & Kaneda 2007) as a fixed reference, and traces ``(q1, qdot1)``
+onto it. A viewer therefore sees the trajectory reach the orbit. It spirals
+outward from hanging at rest, and then rides the reference curve.
 
-Headless EGL software rendering; frames are piped to ffmpeg, so no
-``imageio-ffmpeg`` is needed.
+Rendering runs headless through EGL software, and the frames go to ffmpeg. The
+script needs no ``imageio-ffmpeg``.
 
     MUJOCO_GL=egl python -m benchmarks.render_acrobot_xk_swingup \\
         --duration 25 --output videos/acrobot_xk_swingup.mp4
@@ -234,8 +234,9 @@ def build(args) -> int:
             payload = np.ascontiguousarray(composite).tobytes()
             ffmpeg.stdin.write(payload)
             frames += 1
-            # Hold on the switch: the residual dips under the threshold only
-            # briefly, so at real-time playback the moment would be one frame.
+            # Hold on the switch. The residual dips under the threshold for a
+            # short time only, and at real-time playback that moment fills one
+            # frame.
             if residual < args.lqr_threshold and switched_at is None:
                 switched_at = float(env.cur_t)
                 for _ in range(int(round(args.hold * args.fps))):

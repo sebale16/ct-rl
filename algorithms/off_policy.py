@@ -26,11 +26,11 @@ def _realized_simulated_seconds(
 ) -> float:
     """Return the physical duration represented by one vector rollout step.
 
-    ``VecContinuousEnv`` auto-resets completed slots, so its returned
-    ``next_t`` is zero for those slots.  The actual terminal episode time is
-    preserved in ``info["terminal_next_t"]`` and must be restored before
-    subtracting the local episode start time.  Durations are summed across
-    environment slots, just as ``num_timesteps`` counts every slot.
+    ``VecContinuousEnv`` auto-resets a completed slot, so the ``next_t`` it
+    returns for that slot is zero. ``info["terminal_next_t"]`` holds the true
+    terminal episode time. The caller must restore it before it subtracts the
+    local episode start time. The durations sum across environment slots, as
+    ``num_timesteps`` also counts every slot.
     """
     start = np.asarray(t, dtype=np.float64).reshape(-1)
     end = np.asarray(next_t, dtype=np.float64).reshape(-1).copy()
@@ -56,9 +56,9 @@ def _realized_simulated_seconds(
     durations = end - start
     if not np.all(np.isfinite(durations)):
         raise ValueError("environment timestamps must produce finite durations")
-    # Tolerate only roundoff-scale negative values. A materially negative
-    # duration indicates a broken timestamp/auto-reset contract and must not
-    # silently corrupt the training-time metric.
+    # Tolerate a negative value at roundoff scale alone. A larger negative
+    # duration says that the timestamp or auto-reset contract is broken, and it
+    # must never corrupt the training-time metric.
     tolerance = 1e-9
     if np.any(durations < -tolerance):
         raise ValueError(
@@ -231,11 +231,11 @@ class OffPolicyAlgorithm(BaseAlgorithm, ABC):
         if action.ndim == 1:
             action = action[None, :]
         reward = np.asarray(reward).reshape(-1)
-        # ``done`` is the reset/episode-boundary mask supplied by the rollout
-        # loop.  True task termination is the critic's bootstrap mask; an
-        # ordinary time-limit truncation still bootstraps from its stashed
-        # terminal observation.  Optional arguments keep direct legacy callers
-        # backward compatible (their old ``done`` retains its old meaning).
+        # ``done`` is the reset and episode-boundary mask that the rollout loop
+        # supplies. True task termination is the bootstrap mask of the critic.
+        # An ordinary time-limit truncation still bootstraps from its stashed
+        # terminal observation. The optional arguments keep a direct legacy
+        # caller working, and its old ``done`` keeps its old meaning.
         episode_end = np.asarray(done).reshape(-1)
         if terminated is None:
             objective_done = episode_end.copy()
