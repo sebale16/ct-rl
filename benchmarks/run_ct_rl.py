@@ -38,7 +38,11 @@ from common.callbacks import (
     WallClockCheckpointCallback,
 )
 from common.checkpoint import load_checkpoint
-from common.demonstration import ACROBOT_XK_ENV_ID, build_demonstration_policy
+from common.demonstration import (
+    ACROBOT_XK_ENV_ID,
+    ACROBOT_XK_EVAL_SEEDS,
+    build_demonstration_policy,
+)
 from evaluations.sustained_capture import (
     curriculum_mastery_capture_spec_for,
     strict_capture_spec_for,
@@ -159,7 +163,6 @@ ROLLOUT_INFO_KEYS["acrobot-swingup-v6.1"] = ROLLOUT_INFO_KEYS[
 ]
 
 ACROBOT_XK_EVAL_MODE = "xk_eval"
-ACROBOT_XK_EVAL_SEEDS = tuple(range(20000, 20032))
 ACROBOT_XK_TERMINATION_TASK_KEYS = (
     "elbow_angle_limit",
     "elbow_rate_limit",

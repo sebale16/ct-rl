@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
@@ -150,6 +150,74 @@ def evaluate_sb3_policy_with_capture(
         raise RuntimeError(
             f"expected {n_eval_episodes} episodes, got {len(episode_rewards)}"
         )
+    return SB3CaptureEvaluation(
+        rewards=episode_rewards,
+        lengths=episode_lengths,
+        capture_successes=capture_successes,
+        capture_durations=capture_durations,
+    )
+
+
+def evaluate_sb3_policy_at_fixed_seeds(
+    model: Any,
+    env: Any,
+    episode_seeds: Sequence[int],
+    *,
+    deterministic: bool,
+    capture_spec: SustainedCaptureSpec,
+) -> SB3CaptureEvaluation:
+    """Evaluate an SB3 policy on a single (non-vectorized) env, resetting
+    each episode from an exact seed instead of letting the env's own RNG
+    carry over between episodes.
+
+    Mirrors ``evaluations.evaluation_helpers.evaluate_policy_per_episode``'s
+    single-env ``exact_episode_seeds`` branch -- the CT evaluator's fixed
+    32-episode acrobot-xk protocol (seeds 20000-20031) -- adapted to SB3's
+    predict()/step() interface, so an SB3 checkpoint can be scored against
+    literally the same reset states a CT algorithm's checkpoint is, not just
+    the same task/time-regime. Unlike ``evaluate_sb3_policy_with_capture``,
+    ``env`` here is a single raw env (e.g. ``benchmarks.run_discrete_rl.
+    make_env``'s return value), not a VecEnv: a VecEnv auto-resets a done
+    sub-env from inside ``step()``, with no hook to supply that reset's
+    seed, which is exactly what an exact per-episode protocol needs control
+    over.
+    """
+    episode_seeds = [int(s) for s in episode_seeds]
+    if not episode_seeds:
+        raise ValueError("episode_seeds must be non-empty")
+
+    episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    capture_successes: list[bool] = []
+    capture_durations: list[float] = []
+
+    for seed in episode_seeds:
+        obs, reset_info = env.reset(seed=seed)
+        tracker = SustainedCaptureTracker(1, capture_spec, [reset_info])
+        running_reward = 0.0
+        running_length = 0
+        while True:
+            action, _ = model.predict(obs, deterministic=deterministic)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = bool(terminated or truncated)
+            running_reward += float(reward)
+            running_length += 1
+            capture_result = tracker.update_slot(0, info, done=done)
+            if not done:
+                continue
+            if capture_result is None:
+                raise RuntimeError("missing terminal strict-capture result")
+            monitor_episode = info.get("episode")
+            if monitor_episode is None:
+                episode_rewards.append(running_reward)
+                episode_lengths.append(running_length)
+            else:
+                episode_rewards.append(float(monitor_episode["r"]))
+                episode_lengths.append(int(monitor_episode["l"]))
+            capture_successes.append(capture_result.success)
+            capture_durations.append(capture_result.max_duration_seconds)
+            break
+
     return SB3CaptureEvaluation(
         rewards=episode_rewards,
         lengths=episode_lengths,

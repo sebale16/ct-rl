@@ -16,6 +16,15 @@ from __future__ import annotations
 #: demonstration controller wired up.
 ACROBOT_XK_ENV_ID = "acrobot-swingup-xk"
 
+#: The fixed 32-episode release-from-rest evaluation protocol for
+#: acrobot-swingup-xk: reset seeds 20000-20031, one episode each, regardless
+#: of --n_eval_episodes. Lives here (not run_ct_rl.py, where it originated)
+#: so both the CT and SB3 evaluators can reset from literally the same
+#: states -- see common.sb3_callbacks.evaluate_sb3_policy_at_fixed_seeds and
+#: evaluations.evaluation_helpers.evaluate_policy_per_episode's
+#: episode_seeds parameter.
+ACROBOT_XK_EVAL_SEEDS = tuple(range(20000, 20032))
+
 
 def build_demonstration_policy(
     *,

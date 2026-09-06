@@ -42,10 +42,15 @@ from common.sb3_callbacks import (
     MasteryCurriculumCallback,
     SustainedCaptureEvalCallback,
     WallClockStopCallback,
+    evaluate_sb3_policy_at_fixed_seeds,
     evaluate_sb3_policy_with_capture,
 )
 from common.sb3_demo import demo_seeded_class
-from common.demonstration import build_demonstration_policy
+from common.demonstration import (
+    ACROBOT_XK_ENV_ID,
+    ACROBOT_XK_EVAL_SEEDS,
+    build_demonstration_policy,
+)
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import (
     capture_selection_rank,
@@ -205,46 +210,82 @@ def evaluate_sb3_checkpoint(
         raise ValueError(f"Unsupported algo '{algo}'")
     model = AlgoClass.load(str(checkpoint_path), env=None)
 
-    eval_n_envs = int(eval_env_meta.get("n_envs", 1))
-    eval_env = make_vec_env(
-        make_env,
-        n_envs=eval_n_envs,
-        seed=seed + 1000,
-        env_kwargs=dict(
+    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+
+    # acrobot-swingup-xk has a fixed 32-episode release-from-rest protocol
+    # (reset seeds 20000-20031, one episode each): the same states
+    # run_ct_rl.py's eval_mode="xk_eval" resolution scores a CT checkpoint
+    # against. A VecEnv auto-resets a done sub-env from inside step(), with
+    # no hook to supply that reset's seed, so this needs a single raw env
+    # and the exact-seed evaluator instead of the batched one below.
+    if env_id == ACROBOT_XK_ENV_ID and capture_spec is not None:
+        n_eval_episodes = len(ACROBOT_XK_EVAL_SEEDS)
+        print(
+            "[evaluation] fixed protocol seeds "
+            f"{ACROBOT_XK_EVAL_SEEDS[0]}-{ACROBOT_XK_EVAL_SEEDS[-1]} "
+            f"({n_eval_episodes} episodes)",
+            flush=True,
+        )
+        eval_env = make_env(
             env_id=env_id,
             monitor_root=Path(save_root_dir) / "_eval_only_monitor",
             seed=seed + 1000,
             env_meta=eval_env_meta,
             dataset_path=EVAL_NPZ,
-        ),
-    )
-
-    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
-    try:
-        if capture_spec is not None:
-            results = evaluate_sb3_policy_with_capture(
+        )
+        try:
+            results = evaluate_sb3_policy_at_fixed_seeds(
                 model,
                 eval_env,
-                n_eval_episodes=n_eval_episodes,
+                ACROBOT_XK_EVAL_SEEDS,
                 deterministic=deterministic,
-                render=False,
                 capture_spec=capture_spec,
             )
             capture_rate, mean_capture_duration = capture_selection_rank(
                 results.capture_successes, results.capture_durations
             )
             rewards, lengths = results.rewards, results.lengths
-        else:
-            capture_rate = mean_capture_duration = None
-            rewards, lengths = evaluate_policy(
-                model,
-                eval_env,
-                n_eval_episodes=n_eval_episodes,
-                deterministic=deterministic,
-                return_episode_rewards=True,
-            )
-    finally:
-        eval_env.close()
+        finally:
+            eval_env.close()
+    else:
+        eval_n_envs = int(eval_env_meta.get("n_envs", 1))
+        eval_env = make_vec_env(
+            make_env,
+            n_envs=eval_n_envs,
+            seed=seed + 1000,
+            env_kwargs=dict(
+                env_id=env_id,
+                monitor_root=Path(save_root_dir) / "_eval_only_monitor",
+                seed=seed + 1000,
+                env_meta=eval_env_meta,
+                dataset_path=EVAL_NPZ,
+            ),
+        )
+        try:
+            if capture_spec is not None:
+                results = evaluate_sb3_policy_with_capture(
+                    model,
+                    eval_env,
+                    n_eval_episodes=n_eval_episodes,
+                    deterministic=deterministic,
+                    render=False,
+                    capture_spec=capture_spec,
+                )
+                capture_rate, mean_capture_duration = capture_selection_rank(
+                    results.capture_successes, results.capture_durations
+                )
+                rewards, lengths = results.rewards, results.lengths
+            else:
+                capture_rate = mean_capture_duration = None
+                rewards, lengths = evaluate_policy(
+                    model,
+                    eval_env,
+                    n_eval_episodes=n_eval_episodes,
+                    deterministic=deterministic,
+                    return_episode_rewards=True,
+                )
+        finally:
+            eval_env.close()
 
     rewards = np.asarray(rewards, dtype=np.float64)
     lengths = np.asarray(lengths, dtype=np.int64)
