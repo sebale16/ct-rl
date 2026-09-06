@@ -39,6 +39,7 @@ from common.sb3_callbacks import (
     CurriculumFractionCallback,
     MasteryCurriculumCallback,
     SustainedCaptureEvalCallback,
+    WallClockStopCallback,
 )
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import (
@@ -146,6 +147,9 @@ def run_sb3_benchmark(
     curriculum_steps: int | None = None,
     curriculum_success_threshold: float = 0.8,
     curriculum_consecutive_evals: int = 1,
+    resume: bool = False,
+    max_seconds: float | None = None,
+    run_id: str | None = None,
 ):
     """
     Runs a single Stable-Baselines3 benchmark experiment.
@@ -223,8 +227,12 @@ def run_sb3_benchmark(
         env_meta["return_reward_increment"] = True
 
     # Build logs and saved_models save paths
-    log_dir = build_save_path(log_root_dir, algo, env_id, mode, seed, env_meta, desc)
-    save_dir = build_save_path(save_root_dir, algo, env_id, mode, seed, env_meta, desc)
+    log_dir = build_save_path(
+        log_root_dir, algo, env_id, mode, seed, env_meta, desc, run_id=run_id
+    )
+    save_dir = build_save_path(
+        save_root_dir, algo, env_id, mode, seed, env_meta, desc, run_id=run_id
+    )
 
     # Create train environment through make_vec_env helper
     n_envs = int(env_meta.get("n_envs", 4))
@@ -304,29 +312,46 @@ def run_sb3_benchmark(
 
     # Setup algorithms
     if algo == "sac":
-        DefaultAlgo = partial(SAC, policy_kwargs=policy_kwargs)
+        AlgoClass = SAC
     elif algo == "ppo":
-        DefaultAlgo = partial(PPO, policy_kwargs=policy_kwargs)
+        AlgoClass = PPO
     elif algo == "td3":
-        DefaultAlgo = partial(TD3, policy_kwargs=policy_kwargs)
+        AlgoClass = TD3
     elif algo == "trpo":
         if TRPO is None:
             raise ImportError(
                 "TRPO selected but sb3_contrib is not installed. "
                 "Install with `pip install sb3-contrib`."
             )
-        DefaultAlgo = partial(TRPO, policy_kwargs=policy_kwargs)
+        AlgoClass = TRPO
     else:
         raise ValueError(f"Unsupported algo '{algo}'")
+    DefaultAlgo = partial(AlgoClass, policy_kwargs=policy_kwargs)
+
+    # Fixed-name checkpoint (model + replay buffer) a resubmission chain
+    # resumes from; WallClockStopCallback overwrites it near the job's wall
+    # time. Distinct from CheckpointCallback's step-numbered snapshots below,
+    # which are periodic progress dumps, not a resume point.
+    checkpoint_path = save_dir / "checkpoint"
+    resumed_steps = 0
 
     # Currently use logger instead of setting params: tensorboard_log=str(log_dir), verbose=0
     logger = configure(str(log_dir), ["tensorboard", "csv", "json"])
-    model = DefaultAlgo(
-        "MlpPolicy",
-        train_env,
-        seed=seed,
-        **algo_kwargs,
-    )
+    if resume and checkpoint_path.with_suffix(".zip").exists():
+        print(f"[resume] loading checkpoint from {checkpoint_path}", flush=True)
+        model = AlgoClass.load(str(checkpoint_path), env=train_env)
+        replay_buffer_path = checkpoint_path.with_suffix(".pkl")
+        if replay_buffer_path.exists() and hasattr(model, "load_replay_buffer"):
+            model.load_replay_buffer(str(checkpoint_path))
+        resumed_steps = int(model.num_timesteps)
+        print(f"[resume] resumed at {resumed_steps}/{total_timesteps} steps", flush=True)
+    else:
+        model = DefaultAlgo(
+            "MlpPolicy",
+            train_env,
+            seed=seed,
+            **algo_kwargs,
+        )
     model.set_logger(logger)
 
     # Setup callbacks
@@ -475,6 +500,14 @@ def run_sb3_benchmark(
     # progress_bar_callback = ProgressBarCallback()
     callbacks.append(log_callback)
 
+    wall_clock_callback = None
+    if max_seconds is not None:
+        wall_clock_callback = WallClockStopCallback(
+            checkpoint_path=str(checkpoint_path),
+            max_seconds=max_seconds,
+        )
+        callbacks.append(wall_clock_callback)
+
     callback = CallbackList(callbacks)
 
     # Train
@@ -489,14 +522,30 @@ def run_sb3_benchmark(
     print(f"env_meta={env_meta}\n")
     print(f"eval_env_meta={eval_env_meta}\n")
     try:
-        model.learn(
-            total_timesteps=total_timesteps,
-            callback=callback,
-            tb_log_name=f"{algo}_{env_id}",
-            log_interval=10**9,  # Disable SB3's episode-based logging
-        )
-        model.save(str(save_dir / "final_model"))
-        print("Training finished.")
+        if resumed_steps >= total_timesteps:
+            print(
+                f"[resume] checkpoint already at {resumed_steps}/"
+                f"{total_timesteps} steps; skipping training.",
+                flush=True,
+            )
+        else:
+            model.learn(
+                total_timesteps=total_timesteps - resumed_steps,
+                reset_num_timesteps=(resumed_steps == 0),
+                callback=callback,
+                tb_log_name=f"{algo}_{env_id}",
+                log_interval=10**9,  # Disable SB3's episode-based logging
+            )
+        if wall_clock_callback is not None and wall_clock_callback.stopped:
+            print(
+                f"Paused for wall time at {model.num_timesteps}/"
+                f"{total_timesteps} steps; checkpoint saved to "
+                f"{checkpoint_path}.",
+                flush=True,
+            )
+        else:
+            model.save(str(save_dir / "final_model"))
+            print("Training finished.")
     finally:
         if curriculum_probe_env is not None:
             curriculum_probe_env.close()
@@ -612,6 +661,27 @@ def parse_args():
         default="Q3_2025",
         help="Evaluation quarters for the trading environment",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from <save_dir>/checkpoint.zip (+ replay buffer) if present.",
+    )
+    parser.add_argument(
+        "--max_seconds",
+        type=float,
+        default=None,
+        help="Wall-clock budget (seconds). When set, a resumable checkpoint is "
+        "saved and training stops early on approaching this budget (or on "
+        "SIGTERM/SIGUSR1) so a resubmission chain can pick up with --resume.",
+    )
+    parser.add_argument(
+        "--run_id",
+        type=str,
+        default=None,
+        help="Fixed run identifier used in the run directory name instead of a "
+        "timestamp; pass the same run_id across chunks of a resubmission "
+        "chain so they share one log/save/checkpoint directory.",
+    )
     return parser.parse_args()
 
 
@@ -647,6 +717,9 @@ def main():
                 curriculum_consecutive_evals=(
                     args.curriculum_consecutive_evals
                 ),
+                resume=args.resume,
+                max_seconds=args.max_seconds,
+                run_id=args.run_id,
             )
         except (FileNotFoundError, KeyError) as e:
             print(f"\nCould not run {algo_name} due to a configuration error: {e}\n")

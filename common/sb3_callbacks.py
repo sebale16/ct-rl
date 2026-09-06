@@ -493,3 +493,81 @@ class CurriculumFractionCallback(BaseCallback):
     def _on_step(self) -> bool:
         self._apply()
         return True
+
+
+class WallClockStopCallback(BaseCallback):
+    """
+    Stop SB3 training gracefully when the job approaches its wall time (or
+    receives a termination signal), saving the model and replay buffer at the
+    stop point so a resubmission chain can resume from it.
+
+    Mirrors ``common.callbacks.WallClockCheckpointCallback``'s trigger
+    (elapsed time >= ``max_seconds``, or SIGTERM / SIGUSR1) for the CT
+    algorithms, adapted to SB3's own save format: ``model.save(path)`` and
+    ``model.save_replay_buffer(path)`` under ``checkpoint_path`` (no
+    extension; SB3 appends ``.zip`` / ``.pkl``).
+
+    ``stopped`` is set True iff a checkpoint was written because of this
+    callback, letting the runner distinguish "paused for wall time" from
+    "finished".
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        max_seconds: float,
+        catch_signals: bool = True,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.checkpoint_path = str(checkpoint_path)
+        self.max_seconds = float(max_seconds)
+        self.catch_signals = bool(catch_signals)
+        self.stopped = False
+        self._start_time = 0.0
+        self._signal_received = False
+
+    def _on_training_start(self) -> None:
+        import time as _time
+
+        self._start_time = _time.monotonic()
+        if self.catch_signals:
+            import signal
+
+            def _handler(signum, frame):
+                self._signal_received = True
+
+            for sig in (signal.SIGTERM, signal.SIGUSR1):
+                try:
+                    signal.signal(sig, _handler)
+                except (ValueError, OSError):
+                    # Not in the main thread, or signal unavailable; time
+                    # budget remains as the trigger.
+                    pass
+
+    def _should_stop(self) -> bool:
+        import time as _time
+
+        if self._signal_received:
+            return True
+        return (_time.monotonic() - self._start_time) >= self.max_seconds
+
+    def _on_step(self) -> bool:
+        if self.stopped:
+            return False
+        if not self._should_stop():
+            return True
+
+        reason = "signal" if self._signal_received else "wall-time budget"
+        if self.verbose > 0:
+            print(
+                f"\n[WallClockStop] {reason} reached at {self.num_timesteps} "
+                f"steps; saving checkpoint to {self.checkpoint_path}",
+                flush=True,
+            )
+        self.model.save(self.checkpoint_path)
+        self.model.save_replay_buffer(self.checkpoint_path)
+        if self.verbose > 0:
+            print("[WallClockStop] checkpoint written; stopping.", flush=True)
+        self.stopped = True
+        return False

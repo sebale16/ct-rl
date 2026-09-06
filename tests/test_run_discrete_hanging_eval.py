@@ -209,6 +209,7 @@ class DiscreteHangingEvaluationTests(unittest.TestCase):
         )
         model.learn.assert_called_once_with(
             total_timesteps=1000,
+            reset_num_timesteps=True,
             callback=callback_list,
             tb_log_name="ppo_acrobot-swingup-v4.1",
             log_interval=10**9,
