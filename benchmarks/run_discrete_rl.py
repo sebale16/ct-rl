@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from functools import partial
 import argparse
+import json
 from pathlib import Path
 import os
 from itertools import count
 
 
 import gymnasium as gym
+import numpy as np
 from environment.dmc import DMCContinuousEnv
 from environment.trading_env import TradingContinuousEnv
 from stable_baselines3 import SAC, PPO, TD3
@@ -40,14 +42,17 @@ from common.sb3_callbacks import (
     MasteryCurriculumCallback,
     SustainedCaptureEvalCallback,
     WallClockStopCallback,
+    evaluate_sb3_policy_with_capture,
 )
 from common.sb3_demo import demo_seeded_class
 from common.demonstration import build_demonstration_policy
 from data.trading.config import TRAIN_NPZ, EVAL_NPZ, GROUPS
 from evaluations.sustained_capture import (
+    capture_selection_rank,
     curriculum_mastery_capture_spec_for,
     strict_capture_spec_for,
 )
+from stable_baselines3.common.evaluation import evaluate_policy
 from environment.tip_curriculum import (
     FRACTION_CURRICULUM_ENV_IDS,
     PERFORMANCE_CURRICULUM_ENV_IDS,
@@ -130,6 +135,140 @@ def make_env(env_id, monitor_root, seed, env_meta=None, dataset_path=None):
     env = Monitor(env, str(monitor_path))
 
     return env
+
+
+def evaluate_sb3_checkpoint(
+    algo: str,
+    env_id: str,
+    mode: str,
+    eval_mode: str | None,
+    seed: int,
+    hyperparams_dir: str,
+    save_root_dir: str,
+    checkpoint: str | None,
+    eval_which: str,
+    n_eval_episodes: int,
+    desc: str = "",
+    run_id: str | None = None,
+    output: str | None = None,
+    deterministic: bool = True,
+) -> dict:
+    """Load an already-trained SB3 checkpoint and evaluate it -- no training.
+
+    Exists because ``run_sb3_benchmark``'s own evaluation only ever runs
+    *during* training, against whatever ``--eval_mode`` (or the training
+    mode, if unset) was passed at launch time. That makes it easy to leave
+    two runs evaluated under different protocols by omission -- e.g. a run
+    trained and evaluated entirely under irregular time, next to a CT
+    algorithm's run whose eval silently resolves to the fixed regular-time
+    ``xk_eval`` protocol. A standalone pass makes the eval protocol an
+    explicit, after-the-fact choice: point it at any trained checkpoint and
+    any ``--eval_mode``, independent of what the run trained (or was
+    evaluated) with.
+
+    Uses the same strict-capture evaluator (common.sb3_callbacks) as
+    training's SustainedCaptureEvalCallback when the env has one configured
+    (see evaluations.sustained_capture.strict_capture_spec_for), so the
+    reported fields match training's eval/* metrics; falls back to SB3's
+    plain evaluate_policy (reward only) otherwise.
+    """
+    print(
+        f"\n{'='*50}\nEvaluating SB3 {algo.upper()} checkpoint on {env_id} "
+        f"(train mode: {mode}, eval_mode: {eval_mode or mode}, seed: {seed})\n"
+        f"{'='*50}"
+    )
+
+    _, train_env_meta, _, _, _ = load_sb3_hyperparams_from_table(
+        algo=algo, env_id=env_id, mode=mode, hyperparams_dir=hyperparams_dir
+    )
+    if eval_mode:
+        _, eval_env_meta, _, _, _ = load_sb3_hyperparams_from_table(
+            algo=algo, env_id=env_id, mode=eval_mode, hyperparams_dir=hyperparams_dir
+        )
+    else:
+        eval_env_meta = train_env_meta
+
+    save_dir = build_save_path(
+        save_root_dir, algo, env_id, mode, seed, train_env_meta, desc, run_id=run_id
+    )
+    if checkpoint is not None:
+        checkpoint_path = Path(checkpoint)
+    elif eval_which == "best":
+        checkpoint_path = save_dir / "best_model" / "best_model"
+    else:
+        checkpoint_path = save_dir / "final_model"
+    if not Path(str(checkpoint_path) + ".zip").exists():
+        raise FileNotFoundError(f"No checkpoint at {checkpoint_path}.zip")
+
+    AlgoClass = {"sac": SAC, "ppo": PPO, "td3": TD3, "trpo": TRPO}.get(algo)
+    if AlgoClass is None:
+        raise ValueError(f"Unsupported algo '{algo}'")
+    model = AlgoClass.load(str(checkpoint_path), env=None)
+
+    eval_n_envs = int(eval_env_meta.get("n_envs", 1))
+    eval_env = make_vec_env(
+        make_env,
+        n_envs=eval_n_envs,
+        seed=seed + 1000,
+        env_kwargs=dict(
+            env_id=env_id,
+            monitor_root=Path(save_root_dir) / "_eval_only_monitor",
+            seed=seed + 1000,
+            env_meta=eval_env_meta,
+            dataset_path=EVAL_NPZ,
+        ),
+    )
+
+    capture_spec = strict_capture_spec_for(algorithm=algo, env_id=env_id)
+    try:
+        if capture_spec is not None:
+            results = evaluate_sb3_policy_with_capture(
+                model,
+                eval_env,
+                n_eval_episodes=n_eval_episodes,
+                deterministic=deterministic,
+                render=False,
+                capture_spec=capture_spec,
+            )
+            capture_rate, mean_capture_duration = capture_selection_rank(
+                results.capture_successes, results.capture_durations
+            )
+            rewards, lengths = results.rewards, results.lengths
+        else:
+            capture_rate = mean_capture_duration = None
+            rewards, lengths = evaluate_policy(
+                model,
+                eval_env,
+                n_eval_episodes=n_eval_episodes,
+                deterministic=deterministic,
+                return_episode_rewards=True,
+            )
+    finally:
+        eval_env.close()
+
+    rewards = np.asarray(rewards, dtype=np.float64)
+    lengths = np.asarray(lengths, dtype=np.int64)
+    summary = {
+        "algo": algo,
+        "env_id": env_id,
+        "mode": mode,
+        "eval_mode": eval_mode or mode,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path) + ".zip",
+        "n_eval_episodes": int(n_eval_episodes),
+        "mean_reward": float(np.mean(rewards)),
+        "std_reward": float(np.std(rewards)),
+        "mean_ep_length": float(np.mean(lengths)),
+        "strict_capture_success_rate": capture_rate,
+        "strict_capture_mean_max_duration": mean_capture_duration,
+    }
+    print(json.dumps(summary, indent=2))
+    if output:
+        out_path = Path(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, indent=2))
+        print(f"Wrote eval summary to {out_path}")
+    return summary
 
 
 def run_sb3_benchmark(
@@ -716,6 +855,37 @@ def parse_args():
         "timestamp; pass the same run_id across chunks of a resubmission "
         "chain so they share one log/save/checkpoint directory.",
     )
+    parser.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="Skip training: load an already-trained checkpoint (see "
+        "--eval_checkpoint/--eval_which) and evaluate it against --eval_mode "
+        "(or --mode if unset). Lets a finished run be re-scored under a "
+        "different eval protocol without retraining.",
+    )
+    parser.add_argument(
+        "--eval_checkpoint",
+        type=str,
+        default=None,
+        help="--eval_only: explicit path to the model to load (without the "
+        ".zip extension). Defaults to <save_dir>/final_model or "
+        "<save_dir>/best_model/best_model per --eval_which.",
+    )
+    parser.add_argument(
+        "--eval_which",
+        type=str,
+        default="final",
+        choices=("final", "best"),
+        help="--eval_only: which default checkpoint to load when "
+        "--eval_checkpoint is not given.",
+    )
+    parser.add_argument(
+        "--eval_output",
+        type=str,
+        default=None,
+        help="--eval_only: path to write the evaluation summary as JSON "
+        "(also printed to stdout regardless).",
+    )
     return parser.parse_args()
 
 
@@ -726,6 +896,28 @@ def main():
         eval_range = args.eval_range
     else:
         eval_range = None
+
+    if args.eval_only:
+        for algo_name in algos_to_run:
+            try:
+                evaluate_sb3_checkpoint(
+                    algo=algo_name.lower(),
+                    env_id=args.env_id,
+                    mode=args.mode,
+                    eval_mode=args.eval_mode,
+                    seed=args.seed,
+                    hyperparams_dir=args.hyperparams_dir,
+                    save_root_dir=args.save_root,
+                    checkpoint=args.eval_checkpoint,
+                    eval_which=args.eval_which,
+                    n_eval_episodes=args.n_eval_episodes,
+                    desc=args.desc,
+                    run_id=args.run_id,
+                    output=args.eval_output,
+                )
+            except (FileNotFoundError, KeyError) as e:
+                print(f"\nCould not evaluate {algo_name} due to a configuration error: {e}\n")
+        return
 
     for algo_name in algos_to_run:
         try:
