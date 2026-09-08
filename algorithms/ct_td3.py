@@ -45,7 +45,24 @@ class CTTD3(OffPolicyAlgorithm):
         target_action_noise: Optional[ActionNoise] = None,
         demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         demonstration_steps: Optional[int] = None,
+        # Reward/time semantics, mirroring CTSAC.  ``target_reference_dt`` is
+        # the interval T at which Q is defined, in seconds, instead of the
+        # simulator's native control timestep.  ``reward_is_rate`` says the
+        # environment exposes a physical reward RATE, which the CT target
+        # converts to one reference interval as ``T * r`` -- without it a task
+        # whose reward is a rate is credited ~1/T too heavily relative to the
+        # bootstrap term (Acrobot-XK: |Q| ~ 960 against CTSAC's ~10 on the
+        # identical task, because CTSAC declares reward_is_rate and this class
+        # historically could not).
+        target_reference_dt: Optional[float] = None,
+        reward_is_rate: bool = False,
     ) -> None:
+        reward_is_rate = bool(reward_is_rate)
+        if reward_is_rate and target_reference_dt is None:
+            raise ValueError(
+                "target_reference_dt must be explicit when reward_is_rate is "
+                "configured"
+            )
         super().__init__(
             env=env,
             model=model,
@@ -66,6 +83,22 @@ class CTTD3(OffPolicyAlgorithm):
             raise ValueError(
                 "CTTD3 requires a deterministic policy and a target actor in ActorQCriticModel."
             )
+
+        # Reference interval T.  Overrides the env-derived dt_default so the
+        # target's time rescaling and reward conversion never depend on a
+        # simulator clock.  beta stays -log(gamma) per reference interval, so
+        # the physical discount rate is beta / T.
+        if target_reference_dt is not None:
+            reference_dt = float(target_reference_dt)
+            if not np.isfinite(reference_dt) or reference_dt <= 0.0:
+                raise ValueError(
+                    "target_reference_dt must be finite and > 0 seconds, got "
+                    f"{target_reference_dt!r}"
+                )
+            self.dt_default = reference_dt
+            self.time_rescale = 1.0 / reference_dt
+        self.target_reference_dt = float(self.dt_default)
+        self.reward_is_rate = reward_is_rate
 
         self.tau = float(tau)
         self.policy_delay = int(policy_delay)
@@ -163,6 +196,172 @@ class CTTD3(OffPolicyAlgorithm):
 
         return actions_np[0] if single else actions_np
 
+    # ------------------------ Critic target ------------------------
+    def _critic_target(
+        self,
+        batch: ReplayBatch,
+        q_target_current: th.Tensor,
+        q_target_next: th.Tensor,
+    ) -> th.Tensor:
+        """Build one target batch without bootstrapping through cap failures.
+
+        Mirrors ``CTSAC._critic_target``.  Ordinary rows keep the finite-
+        difference generator target; a state-cap failure takes a separate
+        analytical route over the unexecuted episode remainder and is never
+        passed through a learned endpoint value.  Splitting before target
+        evaluation matters -- merely overwriting afterward would still let a
+        non-finite learned terminal value poison the batch.
+
+        The finite-difference branch keeps this class's rescaled-time
+        convention; the absorbing branch takes seconds and rescales internally
+        so that its nominal-interval test is made against ``dt_default``
+        directly (see ``_absorbing_failure_target``).
+        """
+        dt = batch.dt * self.time_rescale
+        cap_mask = batch.cap_failures.reshape(-1) > 0.5
+        regular_mask = ~cap_mask
+        target = th.empty_like(batch.rewards)
+
+        if bool(th.any(cap_mask)):
+            cap_dones = batch.dones[cap_mask]
+            cap_ends = batch.episode_ends[cap_mask]
+            if bool(th.any(cap_dones <= 0.5)) or bool(th.any(cap_ends <= 0.5)):
+                raise ValueError(
+                    "cap-failure replay rows must be true terminal episode ends"
+                )
+            target[cap_mask] = self._absorbing_failure_target(
+                q_target_current[cap_mask],
+                batch.rewards[cap_mask],
+                batch.dt[cap_mask],
+                batch.failure_reward_rates[cap_mask],
+                batch.failure_remaining_times[cap_mask],
+            )
+
+        if bool(th.any(regular_mask)):
+            target[regular_mask] = self._finite_difference_target(
+                q_target_current[regular_mask],
+                q_target_next[regular_mask],
+                batch.rewards[regular_mask],
+                batch.dones[regular_mask],
+                dt[regular_mask],
+            )
+
+        self.logger.record(
+            "train/cap_failure_fraction", cap_mask.to(th.float32).mean().item()
+        )
+        return target.detach()
+
+    def _target_reward_term(self, rewards: th.Tensor) -> th.Tensor:
+        """Convert configured rewards to one target-reference interval.
+
+        ``T * r`` for a physical reward rate, ``r`` for the legacy convention
+        where the environment already exposes an amount per reference
+        interval.  Neither depends on the realized duration ``h``: the CT
+        target credits the rate over one reference interval and lets the
+        generator increment carry the duration.
+        """
+        return (
+            rewards * self.target_reference_dt
+            if self.reward_is_rate
+            else rewards
+        )
+
+    def _finite_difference_target(
+        self,
+        q_current: th.Tensor,
+        q_next: th.Tensor,
+        rewards: th.Tensor,
+        dones: th.Tensor,
+        dt: th.Tensor,
+    ) -> th.Tensor:
+        """Model-free generator target over the rescaled duration ``dt``."""
+        gamma_dt = th.exp(-self.beta * dt)
+        fraction = (gamma_dt * q_next - q_current) / (dt + 1e-8)
+        future_val = q_current + fraction
+        self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
+        return self._target_reward_term(rewards) + (1 - dones) * future_val
+
+    def _absorbing_failure_target(
+        self,
+        q_current: th.Tensor,
+        rewards: th.Tensor,
+        dt: th.Tensor,
+        failure_reward_rates: th.Tensor,
+        failure_remaining_times: th.Tensor,
+    ) -> th.Tensor:
+        r"""Analytical cap target over the unexecuted episode remainder.
+
+        The counterpart of ``CTSAC._absorbing_failure_target``, written in this
+        class's rescaled-time units.  For rescaled duration ``rho = h / T``,
+        rescaled remaining time ``Rt = R / T``, discount exponent ``beta`` per
+        reference interval and the configured reward's finite lower envelope
+        ``r_F``, the frozen absorbing value is
+
+        ``C_F = r_F (1 - exp(-beta Rt)) / beta``
+
+        (or ``r_F Rt`` at zero discount).  It replaces the learned
+        ``Q(s', a')`` endpoint.  At the nominal ``rho == 1`` interval the
+        current-value anchor cancels exactly:
+
+        ``y_F = r_F + exp(-beta) C_F``
+
+        and off-nominal rows re-anchor through the current value exactly as an
+        ordinary irregular transition does.  CT-SAC anchors on ``V(s)``; the
+        deterministic-policy analogue here is the batch-action ``Q(s, a)`` this
+        class already uses as its finite-difference anchor.
+
+        ``C_F`` is expressed per reference interval, matching this class's
+        per-interval reward convention -- it is CT-SAC's ``G_F`` divided by the
+        reference interval ``T``, since ``beta = lambda T``.
+
+        ``dt`` and ``failure_remaining_times`` arrive in seconds and are
+        rescaled here.  The nominal test is made in seconds, as CT-SAC does:
+        rescaling first would put a float multiply between the stored duration
+        and the reference, and a near-miss there costs the exact cancellation
+        of the anchor.
+        """
+        if bool(th.any(dt <= 0.0)):
+            raise ValueError("dt values must be strictly positive")
+        rates = failure_reward_rates
+        if not bool(th.all(th.isfinite(rates))):
+            raise ValueError("failure reward rates must be finite")
+        if not bool(th.all(th.isfinite(failure_remaining_times))) or bool(
+            th.any(failure_remaining_times < 0.0)
+        ):
+            raise ValueError("failure remaining times must be finite and >= 0")
+
+        nominal = dt == dt.new_tensor(self.dt_default)
+        rho = dt * self.time_rescale
+        remaining = failure_remaining_times * self.time_rescale
+
+        # C_F is linear in r_F, so the reward conversion applies to the frozen
+        # remainder too; with reward_is_rate this makes C_F equal CTSAC's
+        # physical G_F rather than G_F / T.
+        rate_term = self._target_reward_term(rates)
+        gamma_dt = th.exp(-self.beta * rho)
+        if self.beta == 0.0:
+            continuation = rate_term * remaining
+        else:
+            continuation = rate_term * (
+                -th.expm1(-self.beta * remaining) / self.beta
+            )
+
+        endpoint = gamma_dt * continuation
+        # rho == 1 reduces to the ordinary target; the anchor cancels exactly.
+        future = th.where(
+            nominal,
+            endpoint,
+            q_current + (endpoint - q_current) / rho,
+        )
+        target = self._target_reward_term(rewards) + future
+        if not bool(th.all(th.isfinite(target))):
+            raise ValueError("non-finite absorbing cap-failure target")
+        self.logger.record(
+            "train/failure_continuation_max_abs",
+            continuation.abs().max().item(),
+        )
+        return target
+
     def train(self, gradient_steps: int, batch_size: int) -> None:
         for _ in range(gradient_steps):
             self._gradient_step_counter += 1
@@ -171,9 +370,6 @@ class CTTD3(OffPolicyAlgorithm):
             obs = batch.observations
             actions = batch.actions
             next_obs = batch.next_observations
-            rewards = batch.rewards
-            dones = batch.dones
-            dt = batch.dt
 
             ## Critic update
             with th.no_grad():
@@ -197,11 +393,9 @@ class CTTD3(OffPolicyAlgorithm):
                 q_target_next = self.model.target_min_q(next_obs, next_actions)
 
                 # Construct Q_fast target
-                dt *= self.time_rescale
-                gamma_dt = th.exp(-self.beta * dt)
-                fraction = (gamma_dt * q_target_next - q_target_current) / (dt + 1e-8)
-                future_val = q_target_current + fraction
-                q_fast_target = rewards + (1 - dones) * future_val
+                q_fast_target = self._critic_target(
+                    batch, q_target_current, q_target_next
+                )
 
             # Calculate critic loss
             current_q_list = self.model.q_values(obs, actions)
@@ -211,7 +405,6 @@ class CTTD3(OffPolicyAlgorithm):
             critic_loss.backward()
             self.critic_optimizer.step()
 
-            self.logger.record("train/fraction", th.max(th.abs(fraction)).item())
             self.logger.record("train/critic_loss", critic_loss.item())
 
             ## Delayed policy and target updates

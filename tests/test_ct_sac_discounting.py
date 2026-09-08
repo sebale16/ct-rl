@@ -1,4 +1,4 @@
-"""Physical-time discount and CT-SAC finite-difference target contracts."""
+"""Physical-time discount and CT-SAC/CT-TD3 target contracts."""
 
 import math
 import unittest
@@ -8,6 +8,7 @@ import numpy as np
 import torch as th
 
 from algorithms.ct_sac import CTSAC, ModelBasedTargetNumericalError
+from algorithms.ct_td3 import CTTD3
 from common.buffers import ReplayBatch
 from environment import DMCContinuousEnv
 from models.actor_q_critic import ActorQCriticModel
@@ -559,3 +560,256 @@ class TestCTSACPhysicalDiscounting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCTTD3CapFailureTarget(unittest.TestCase):
+    """CT-TD3's cap-failure target, which mirrors ``CTSAC``'s.
+
+    CT-TD3 works in rescaled time, so its per-interval continuation ``C_F`` is
+    CT-SAC's physical ``G_F`` divided by the reference interval ``T``.  These
+    tests state the contract in CT-TD3's own units and then cross-check the
+    correspondence against CT-SAC directly.
+    """
+
+    def _agent(self, dt=0.02, **kwargs):
+        env = DMCContinuousEnv(
+            "cartpole",
+            "swingup",
+            time_sampling="uniform",
+            dt=dt,
+            episode_duration=0.1,
+        )
+        self.addCleanup(env.close)
+        model = ActorQCriticModel(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            q_net_arch=[8],
+            pi_net_arch=[8],
+            deterministic_policy=True,
+            use_actor_target=True,
+            device="cpu",
+        )
+        return CTTD3(
+            env=env,
+            model=model,
+            device="cpu",
+            learning_starts=10,
+            batch_size=4,
+            buffer_size=32,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _batch(*, dt, rewards, rate, remaining, next_q_is_nan=True, n_obs=5):
+        """A one-row, all-cap batch. ``next_observations`` is deliberately NaN:
+        a cap target that reaches for a learned endpoint would propagate it."""
+        return ReplayBatch(
+            observations=th.zeros((1, n_obs), dtype=th.float64),
+            actions=th.zeros((1, 1), dtype=th.float64),
+            next_observations=th.full(
+                (1, n_obs), float("nan") if next_q_is_nan else 0.0,
+                dtype=th.float64,
+            ),
+            rewards=rewards,
+            dones=th.ones((1, 1), dtype=th.float64),
+            episode_ends=th.ones((1, 1), dtype=th.float64),
+            cap_failures=th.ones((1, 1), dtype=th.float64),
+            failure_reward_rates=rate,
+            failure_remaining_times=remaining,
+            t=th.zeros((1, 1), dtype=th.float64),
+            next_t=dt,
+            dt=dt,
+        )
+
+    def test_nominal_cap_target_cancels_the_current_value_anchor(self):
+        agent = self._agent(gamma=0.98)
+        beta = agent.beta
+        # DMCContinuousEnv overrides dt_default with control_timestep(), so
+        # the nominal interval is the env's, not the constructor's dt kwarg.
+        self.assertAlmostEqual(agent.dt_default, 0.01, places=12)
+        dt = th.tensor([[agent.dt_default]], dtype=th.float64)  # rho == 1
+        rewards = th.tensor([[-0.4]], dtype=th.float64)
+        rate = th.tensor([[-50.0]], dtype=th.float64)
+        remaining = th.tensor([[0.08]], dtype=th.float64)
+        batch = self._batch(dt=dt, rewards=rewards, rate=rate, remaining=remaining)
+
+        # Rescaled remaining time; C_F is the per-interval frozen return.
+        remaining_scaled = remaining * agent.time_rescale
+        continuation = _absorbing_continuation(rate, remaining_scaled, beta)
+        expected = rewards + math.exp(-beta) * continuation
+
+        # At rho == 1 the anchor must cancel exactly, whatever its magnitude.
+        for q_cur in (
+            th.tensor([[9.0]], dtype=th.float64),
+            th.tensor([[1.0e12]], dtype=th.float64),
+        ):
+            actual = agent._critic_target(
+                batch, q_cur, th.full((1, 1), float("nan"), dtype=th.float64)
+            )
+            th.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_irregular_cap_transition_reanchors_through_the_absorbing_value(self):
+        agent = self._agent(gamma=0.98)
+        beta = agent.beta
+        dt = th.tensor([[0.05]], dtype=th.float64)  # rho == 2.5
+        rewards = th.tensor([[-0.4]], dtype=th.float64)
+        rate = th.tensor([[-50.0]], dtype=th.float64)
+        remaining = th.tensor([[0.08]], dtype=th.float64)
+        batch = self._batch(dt=dt, rewards=rewards, rate=rate, remaining=remaining)
+        q_cur = th.tensor([[9.0]], dtype=th.float64)
+
+        rho = float(dt) * agent.time_rescale
+        continuation = _absorbing_continuation(
+            rate, remaining * agent.time_rescale, beta
+        )
+        endpoint = math.exp(-beta * rho) * continuation
+        expected = rewards + q_cur + (endpoint - q_cur) / rho
+
+        actual = agent._critic_target(
+            batch, q_cur, th.full((1, 1), float("nan"), dtype=th.float64)
+        )
+        th.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_cap_target_matches_ct_sac_up_to_the_reference_interval(self):
+        """CT-TD3's per-interval target is CT-SAC's physical one divided by T."""
+        T = 0.01  # DMC cartpole-swingup control_timestep
+        discount_rate = 0.5  # physical, s^-1
+        td3 = self._agent(gamma=math.exp(-discount_rate * T))
+        self.assertAlmostEqual(td3.dt_default, T, places=12)
+        sac_env = DMCContinuousEnv(
+            "cartpole", "swingup", time_sampling="uniform", dt=T,
+            episode_duration=0.1,
+        )
+        self.addCleanup(sac_env.close)
+        sac = CTSAC(
+            env=sac_env,
+            model=ActorQCriticModel(
+                observation_space=sac_env.observation_space,
+                action_space=sac_env.action_space,
+                q_net_arch=[8], pi_net_arch=[8], device="cpu",
+            ),
+            device="cpu", learning_starts=10, batch_size=4, buffer_size=32,
+            discount_rate=discount_rate, target_reference_dt=T,
+            reward_is_rate=True,
+        )
+        self.assertAlmostEqual(td3.beta, discount_rate * T, places=12)
+
+        rewards = th.tensor([[-0.4]], dtype=th.float64)
+        rate = th.tensor([[-50.0]], dtype=th.float64)
+        remaining = th.tensor([[4.0]], dtype=th.float64)
+        anchor = th.tensor([[9.0]], dtype=th.float64)
+
+        for h in (T, 0.5 * T, 3.0 * T):
+            dt = th.tensor([[h]], dtype=th.float64)
+            td3_target = td3._critic_target(
+                self._batch(dt=dt, rewards=rewards, rate=rate, remaining=remaining),
+                anchor,
+                th.full((1, 1), float("nan"), dtype=th.float64),
+            )
+            # CT-SAC's anchor is V(s); feed it the same number so only the
+            # scale convention differs.
+            with patch.object(sac, "_state_value", return_value=anchor * T):
+                sac_target = sac._absorbing_failure_target(
+                    th.zeros((1, sac_env.observation_space.shape[0]),
+                             dtype=th.float64),
+                    rewards, dt, rate, remaining,
+                    th.tensor(0.1, dtype=th.float64),
+                )
+            th.testing.assert_close(
+                td3_target, sac_target / T, rtol=1e-10, atol=1e-10
+            )
+
+    def test_mixed_batch_splits_caps_before_regular_target_evaluation(self):
+        agent = self._agent(gamma=0.98)
+        dt = th.tensor([[0.02], [0.02]], dtype=th.float64)
+        rewards = th.tensor([[-0.4], [0.25]], dtype=th.float64)
+        batch = ReplayBatch(
+            observations=th.zeros((2, 5), dtype=th.float64),
+            actions=th.zeros((2, 1), dtype=th.float64),
+            next_observations=th.zeros((2, 5), dtype=th.float64),
+            rewards=rewards,
+            dones=th.tensor([[1.0], [0.0]], dtype=th.float64),
+            episode_ends=th.tensor([[1.0], [0.0]], dtype=th.float64),
+            cap_failures=th.tensor([[1.0], [0.0]], dtype=th.float64),
+            failure_reward_rates=th.tensor([[-50.0], [0.0]], dtype=th.float64),
+            failure_remaining_times=th.tensor([[0.08], [0.0]], dtype=th.float64),
+            t=th.zeros((2, 1), dtype=th.float64),
+            next_t=dt,
+            dt=dt,
+        )
+        q_cur = th.tensor([[9.0], [2.0]], dtype=th.float64)
+        # A non-finite next-Q on the CAP row only: it must never be read.
+        q_next = th.tensor([[float("nan")], [3.0]], dtype=th.float64)
+
+        actual = agent._critic_target(batch, q_cur, q_next)
+        self.assertTrue(bool(th.all(th.isfinite(actual))))
+        # The ordinary row is untouched by the split.
+        expected_regular = agent._finite_difference_target(
+            q_cur[1:], q_next[1:], rewards[1:], batch.dones[1:],
+            dt[1:] * agent.time_rescale,
+        )
+        th.testing.assert_close(
+            actual[1:], expected_regular, rtol=1e-12, atol=1e-12
+        )
+
+    def test_cap_rows_must_be_terminal_episode_ends(self):
+        agent = self._agent(gamma=0.98)
+        dt = th.tensor([[0.02]], dtype=th.float64)
+        batch = self._batch(
+            dt=dt,
+            rewards=th.tensor([[-0.4]], dtype=th.float64),
+            rate=th.tensor([[-50.0]], dtype=th.float64),
+            remaining=th.tensor([[0.08]], dtype=th.float64),
+        )
+        batch.dones = th.zeros((1, 1), dtype=th.float64)
+        with self.assertRaises(ValueError):
+            agent._critic_target(
+                batch, th.zeros((1, 1), dtype=th.float64),
+                th.zeros((1, 1), dtype=th.float64),
+            )
+
+    def test_reward_is_rate_makes_the_cap_target_equal_ct_sac_exactly(self):
+        """With reward_is_rate the T factor moves inside, so CT-TD3's target
+        is CT-SAC's own, not CT-SAC's divided by the reference interval."""
+        T = 0.01
+        discount_rate = 0.5
+        td3 = self._agent(gamma=math.exp(-discount_rate * T),
+                          target_reference_dt=T, reward_is_rate=True)
+        self.assertTrue(td3.reward_is_rate)
+        self.assertAlmostEqual(td3.target_reference_dt, T, places=12)
+        self.assertAlmostEqual(td3.beta, discount_rate * T, places=12)
+
+        sac_env = DMCContinuousEnv("cartpole", "swingup", time_sampling="uniform",
+                                   dt=T, episode_duration=0.1)
+        self.addCleanup(sac_env.close)
+        sac = CTSAC(
+            env=sac_env,
+            model=ActorQCriticModel(
+                observation_space=sac_env.observation_space,
+                action_space=sac_env.action_space,
+                q_net_arch=[8], pi_net_arch=[8], device="cpu",
+            ),
+            device="cpu", learning_starts=10, batch_size=4, buffer_size=32,
+            discount_rate=discount_rate, target_reference_dt=T, reward_is_rate=True,
+        )
+        rewards = th.tensor([[-0.4]], dtype=th.float64)
+        rate = th.tensor([[-50.0]], dtype=th.float64)
+        remaining = th.tensor([[4.0]], dtype=th.float64)
+        anchor = th.tensor([[9.0]], dtype=th.float64)
+
+        for h in (T, 0.5 * T, 3.0 * T):
+            dt = th.tensor([[h]], dtype=th.float64)
+            td3_target = td3._critic_target(
+                self._batch(dt=dt, rewards=rewards, rate=rate, remaining=remaining),
+                anchor, th.full((1, 1), float("nan"), dtype=th.float64),
+            )
+            with patch.object(sac, "_state_value", return_value=anchor):
+                sac_target = sac._absorbing_failure_target(
+                    th.zeros((1, sac_env.observation_space.shape[0]), dtype=th.float64),
+                    rewards, dt, rate, remaining, th.tensor(0.1, dtype=th.float64),
+                )
+            th.testing.assert_close(td3_target, sac_target, rtol=1e-10, atol=1e-10)
+
+    def test_reward_is_rate_requires_an_explicit_reference_interval(self):
+        with self.assertRaises(ValueError):
+            self._agent(gamma=0.98, reward_is_rate=True)
