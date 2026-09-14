@@ -1,0 +1,14 @@
+=== exit status: 0 ===
+=== final evaluation line per run ===
+--- stage_a_hard_seed0
+{"update": 10000, "training_physical_seconds": 99.67000000001403, "evaluation": {"near_upright": {"return": -444.9457500693171, "success": 0.0, "retained_success": 0.0, "max_hold_seconds": 0.0016250000000000001, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.0043025986125157165, "torque_squared_integral": 129.671497028268, "saturation_fraction": 0.8335325778004263, "state_limit_failure": 1.0, "physical_seconds": 0.3808125000000003}}}
+--- stage_a_hard_seed1
+{"update": 10000, "training_physical_seconds": 99.7680000000141, "evaluation": {"near_upright": {"return": -388.254953351097, "success": 0.0, "retained_success": 0.0, "max_hold_seconds": 0.0055625000000000015, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.017791151707752934, "torque_squared_integral": 658.9877803690159, "saturation_fraction": 0.8484542189226901, "state_limit_failure": 1.0, "physical_seconds": 1.8431249999999988}}}
+--- stage_a_hard_seed2
+{"update": 10000, "training_physical_seconds": 99.76900000001412, "evaluation": {"near_upright": {"return": -387.6013599413114, "success": 0.0, "retained_success": 0.0, "max_hold_seconds": 0.0020625, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.00286973081118278, "torque_squared_integral": 637.7365634586636, "saturation_fraction": 0.7992125873946617, "state_limit_failure": 1.0, "physical_seconds": 1.8459375}}}
+--- stage_a_soft_seed0
+{"update": 10000, "training_physical_seconds": 99.7850000000141, "evaluation": {"near_upright": {"return": -386.8669350453939, "success": 0.0, "retained_success": 0.0, "max_hold_seconds": 0.24068750000000017, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.12121317334996798, "torque_squared_integral": 175.2150567930775, "saturation_fraction": 0.22066947900880493, "state_limit_failure": 1.0, "physical_seconds": 1.7910000000000006}}}
+--- stage_a_soft_seed1
+{"update": 10000, "training_physical_seconds": 99.78000000001413, "evaluation": {"near_upright": {"return": -361.63172148070214, "success": 0.125, "retained_success": 0.0, "max_hold_seconds": 0.30381249999999876, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.14085798508633868, "torque_squared_integral": 433.1173493439664, "saturation_fraction": 0.3519759691125124, "state_limit_failure": 1.0, "physical_seconds": 2.6519999999999877}}}
+--- stage_a_soft_seed2
+{"update": 10000, "training_physical_seconds": 99.59400000001395, "evaluation": {"near_upright": {"return": -420.32308132620733, "success": 0.0, "retained_success": 0.0, "max_hold_seconds": 0.009500000000000005, "terminal_hold_seconds": 0.0, "occupancy_fraction": 0.01653456222506819, "torque_squared_integral": 346.7121160873454, "saturation_fraction": 0.9256607961036583, "state_limit_failure": 1.0, "physical_seconds": 0.9138750000000007}}}

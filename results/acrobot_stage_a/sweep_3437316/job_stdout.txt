@@ -1,0 +1,16 @@
+launched 12 runs
+=== exit status: 0 ===
+=== |eta| crossing 0.2 and peak success, per run ===
+run                    peak succ    @upd  cross@upd  cross@vtime  succ_end  |eta|_end
+A_baseline_seed0           0.500    5000       5400        108.0     0.000      1.000
+A_baseline_seed1           0.500    3000       4300         86.0     0.000      1.774
+A_baseline_seed2           0.375    3000       4200         84.0     0.000      1.614
+B_tau0p0125_seed0          0.562    6000       3900         78.0     0.000      1.376
+B_tau0p0125_seed1          0.438    1000       3400         68.0     0.000      2.151
+B_tau0p0125_seed2          0.312    2000       4000         80.0     0.000      2.458
+C_vstep0p01_seed0          0.500   20000       7400         74.0     0.500      0.951
+C_vstep0p01_seed1          0.562   10000       7500         75.0     0.000      2.050
+C_vstep0p01_seed2          0.500    4000       4200         42.0     0.000      4.966
+D_vstep0p005_seed0         0.500   20000       7500         37.5     0.000      2.029
+D_vstep0p005_seed1         0.125   16000      10300         51.5     0.062      2.913
+D_vstep0p005_seed2         0.562    8000       3800         19.0     0.000      3.014
