@@ -26,6 +26,10 @@ CSV_ARGUMENTS = {
     "algo_discount_rate": "discount_rate", "algo_value_step": "value_step",
     "algo_learning_rate": "learning_rate", "algo_target_rate": "target_rate",
     "algo_grad_clip": "grad_clip", "algo_temperature": "temperature",
+    "algo_auto_temperature": "auto_temperature",
+    "algo_temperature_learning_rate": "temperature_learning_rate",
+    "algo_target_entropy": "target_entropy",
+    "algo_temperature_min": "temperature_min", "algo_temperature_max": "temperature_max",
     "algo_quadrature_points": "quadrature_points", "algo_exploration_std": "exploration_std",
     "algo_batch_size": "batch_size", "algo_buffer_size": "buffer_size",
     "log_eval_freq": "eval_every", "log_eval_episodes": "eval_episodes",
@@ -33,6 +37,14 @@ CSV_ARGUMENTS = {
         "angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight",
         "velocity_scale", "effort_weight")},
 }
+
+
+def parse_bool(value):
+    if value.lower() in ("true", "1"):
+        return True
+    if value.lower() in ("false", "0"):
+        return False
+    raise ValueError("expected true/false or 1/0")
 
 
 def load_preset(directory, mode, argument_types):
@@ -83,7 +95,8 @@ class StageAArgumentParser(argparse.ArgumentParser):
         if selected.checkpoint:
             self.set_defaults(hyperparams_source=None)
         else:
-            types = {action.dest: action.type for action in self._actions}
+            types = {action.dest: parse_bool if isinstance(action, argparse.BooleanOptionalAction) else action.type
+                     for action in self._actions}
             try:
                 defaults, source = load_preset(selected.hyperparams_dir, selected.mode, types)
             except (OSError, ValueError) as exc:

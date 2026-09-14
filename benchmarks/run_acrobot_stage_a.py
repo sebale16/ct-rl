@@ -6,6 +6,7 @@ No learned PH model, actor network, LQR warm start, or controller switch is used
 from __future__ import annotations
 
 from dataclasses import asdict
+import argparse
 import hashlib
 import json
 import math
@@ -97,6 +98,11 @@ def parser():
     p.add_argument("--momentum-scale", type=float, default=10.)
     p.add_argument("--grad-clip", type=float, default=10.)
     p.add_argument("--temperature", type=float, default=0., help="0: clipped analytic policy; >0: truncated-Gaussian policy")
+    p.add_argument("--auto-temperature", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--temperature-learning-rate", type=float, default=3e-4)
+    p.add_argument("--target-entropy", type=float, default=-1., help="differential entropy in normalized action a in [-1,1]")
+    p.add_argument("--temperature-min", type=float, default=1e-4)
+    p.add_argument("--temperature-max", type=float, default=10.)
     p.add_argument("--quadrature-points", type=int, default=128)
     p.add_argument("--exploration-std", type=float, default=0.02,
                    help="normalized action noise for deterministic training only; evaluation has none")
@@ -109,6 +115,25 @@ def parser():
     p.add_argument("--incoming-states", type=Path, help="training NPZ: states[N,4] q/v and explicit frame")
     p.add_argument("--incoming-eval-states", type=Path, help="held-out NPZ from separate swing-up trajectories")
     return p
+
+
+def build_agent(args):
+    """Shared physical/value configuration for training and target diagnostics."""
+    if args.checkpoint:
+        agent = AcrobotPHValue.load(args.checkpoint, device=args.device)
+        env_config = StageAConfig(**agent.metadata["environment"])
+    else:
+        env_config = StageAConfig(dt=args.dt, physics_dt=args.physics_dt,
+                                 episode_seconds=args.episode_seconds, hold_seconds=args.hold_seconds,
+                                 discount_rate=args.discount_rate, angle_radius=args.angle_radius,
+                                 velocity_radius=args.velocity_radius, capture_angle=args.capture_angle,
+                                 capture_velocity=args.capture_velocity, velocity_limit=args.velocity_limit,
+                                 elbow_limit=args.elbow_limit, incoming_probability=args.incoming_probability)
+        reward = UprightReward(**{key: getattr(args, key) for key in UprightReward.__dataclass_fields__})
+        flow = ValueFlowConfig(**{key: getattr(args, key) for key in ValueFlowConfig.__dataclass_fields__})
+        agent = AcrobotPHValue(AcrobotOracle(damping=args.damping, torque_limit=args.torque_limit), reward, flow,
+                               device=args.device)
+    return agent, env_config
 
 
 def run(args):
@@ -131,24 +156,7 @@ def run(args):
             raise ValueError("incoming training requires --incoming-eval-states from held-out trajectories")
         if {row.tobytes() for row in train_bank} & {row.tobytes() for row in eval_bank}:
             raise ValueError("training and evaluation incoming banks overlap")
-    if args.checkpoint:
-        agent = AcrobotPHValue.load(args.checkpoint, device=args.device)
-        env_config = StageAConfig(**agent.metadata["environment"])
-    else:
-        env_config = StageAConfig(dt=args.dt, physics_dt=args.physics_dt,
-                                 episode_seconds=args.episode_seconds, hold_seconds=args.hold_seconds,
-                                 discount_rate=args.discount_rate, angle_radius=args.angle_radius,
-                                 velocity_radius=args.velocity_radius, capture_angle=args.capture_angle,
-                                 capture_velocity=args.capture_velocity, velocity_limit=args.velocity_limit,
-                                 elbow_limit=args.elbow_limit, incoming_probability=args.incoming_probability)
-        reward = UprightReward(**{key: getattr(args, key) for key in UprightReward.__dataclass_fields__})
-        flow = ValueFlowConfig(discount_rate=args.discount_rate, value_step=args.value_step,
-                               learning_rate=args.learning_rate, temperature=args.temperature,
-                               quadrature_points=args.quadrature_points, target_rate=args.target_rate,
-                               hidden_width=args.hidden_width, momentum_scale=args.momentum_scale,
-                               grad_clip=args.grad_clip)
-        agent = AcrobotPHValue(AcrobotOracle(damping=args.damping, torque_limit=args.torque_limit), reward, flow,
-                               device=args.device)
+    agent, env_config = build_agent(args)
     train_env = AcrobotStageAEnv(env_config, agent.oracle, agent.reward, incoming_states=train_bank)
     eval_env = AcrobotStageAEnv(env_config, agent.oracle, agent.reward, incoming_states=eval_bank)
     try:

@@ -129,6 +129,98 @@ not identical finite-step learning updates.
 MUJOCO_GL=disable python -m unittest tests.test_acrobot_stage_a -v
 ```
 
+### Automatic temperature for soft Stage A
+
+Temperature is fixed by default. To tune it toward a target policy entropy:
+
+```bash
+MUJOCO_GL=disable python -m benchmarks.run_acrobot_stage_a \
+  --mode stage_a_soft --auto-temperature --target-entropy -1 \
+  --temperature-learning-rate 0.0003 --output out/stage_a_auto/seed0
+```
+
+After each value update, a separate optimizer adjusts `log(temperature)` using
+the analytic policy's entropy on nonterminal minibatch states. It increases
+temperature when entropy is below the target and decreases it when above.
+Entropy is differential entropy relative to normalized action `a` in `[-1,1]`;
+negative values are valid, and targets must be below the maximum `log(2)`.
+The default bounds are `--temperature-min 0.0001` and `--temperature-max 10`.
+Automatic tuning requires a positive initial temperature, so use the soft mode.
+
+The updated temperature enters both the next soft HJB target and stochastic
+action sampling. The deterministic evaluation mode at a given value gradient
+is independent of temperature. Checkpoints preserve the learned temperature and
+its optimizer; training logs include temperature, entropy, entropy error, and
+temperature loss. The CSV exposes matching `algo_` columns; existing presets
+retain fixed temperature unless overridden.
+
+Entropy uses the same continuous-action quadrature as the soft HJB score. For
+very concentrated policies, check sensitivity to `--quadrature-points`; a small
+temperature floor alone does not guarantee accurate integration. Adaptive
+temperature changes the soft objective during learning and is not a guarantee
+of stabilization or a fix for value-learning instability.
+
+### Stage A fixed versus moving target diagnostic
+
+This diagnostic requires fixed temperature; automatic tuning is rejected to
+keep the comparison focused on value-target feedback. It compares fitting labels calculated once with the usual bootstrapped HJB
+update. Both arms start with identical value, target, and Adam states and use
+identical minibatch indices. No dynamics model is learned. Start from the same
+CSV presets as Stage A:
+
+```bash
+MUJOCO_GL=disable python -m benchmarks.check_acrobot_stage_a_targets \
+  --mode stage_a_hard --output out/stage_a_targets/hard_seed0 --seed 0 \
+  --train-states 4096 --heldout-states 2048 --collection-steps 4096 \
+  --updates 10000 --eval-every 1000
+```
+
+Repeat with `--mode stage_a_soft` and independent `--seed`, `--dataset-seed`,
+and `--batch-seed` values for additional replications. To branch from an existing
+Stage A checkpoint, add `--checkpoint path/to/checkpoint.pt`. This initializes
+both arms, including their optimizer histories; physical, reward, and value-flow
+settings come from the checkpoint and override the CSV/CLI settings for those
+components. `--updates` is the number of **additional** diagnostic updates.
+
+Before fitting, the initial policy collects independent trajectories for training
+and held-out data. Each fixed dataset contains half reset-distribution states and
+half sampled visited states, preserving absorbing failure labels. Both arms then
+train without new interaction; control-evaluation trajectories never enter the
+datasets. `--collection-steps` is the number of decisions **per split**; increase
+it if there are too few distinct visited states. `--collection-steps 0` runs a
+reset-only diagnostic, which cannot diagnose replay or failure-boundary effects.
+Incoming data require trajectory-disjoint `--incoming-states` and
+`--incoming-eval-states` banks. `--buffer-size` has no effect on this diagnostic.
+
+Outputs include:
+
+- `dataset.npz`: fixed canonical states, terminal/source masks, and initial labels
+  for both splits; `config.json` records effective settings, seeds, and hashes.
+- `metrics.csv` and `probes.jsonl`: train/held-out label RMSE, error against the
+  original labels, label drift, interior/boundary errors, online HJB residuals,
+  value/state-gradient magnitudes, target disagreement, and action saturation.
+- `training.jsonl`: minibatch losses and optimizer gradient norms.
+- `fixed/` and `moving/`: checkpoints and per-state probe arrays at initialization
+  and every evaluation interval, including the final update.
+- `evaluations.jsonl`: the usual deterministic control metrics on fixed resets;
+  `--skip-rollouts` omits these evaluations for a faster regression-only check.
+- `summary.json`: completion status; `failures.json` records any nonfinite arm,
+  while the other arm continues. The command exits nonzero after such a failure.
+
+Falling training error with rising held-out error indicates overfitting to the
+fixed assignment. If fixed-label fitting behaves well but moving-label fitting
+deteriorates, target feedback is implicated under this frozen state distribution.
+This does not establish the true value function, prove divergence, or reproduce
+the changing replay distribution of online training. Moving-label RMSE measures
+a changing assignment, so interpret it alongside label drift, fixed-state HJB
+residuals, and control performance. HJB residual summaries exclude absorbing
+terminal states; their boundary errors are reported separately. An empty boundary
+subset has null error metrics and provides no evidence about boundary fitting.
+
+```bash
+MUJOCO_GL=disable python -m unittest tests.test_acrobot_stage_a tests.test_acrobot_stage_a_targets -v
+```
+
 ## Reproducing Results & Reporting
 
 This repository includes a comprehensive evaluation pipeline to generate plots, tables, and statistical tests.

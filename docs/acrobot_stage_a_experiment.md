@@ -227,6 +227,45 @@ Stage A directly maximizes the score and regresses $V$. CT-SAC regresses an acti
 
 The experiment therefore evaluates a different approximation and optimization arrangement, not a new Bellman principle. Comparison with CT-SAC requires a matched upright task and information budget; results from an orbit-only reward are not a controlled baseline for this balance objective.
 
+### 3.5 Optional adaptive temperature
+
+The two baseline configurations keep temperature fixed. A separate soft variant
+can adapt $\alpha>0$ to a declared differential-entropy target. For the analytic
+density on normalized actions $a\in[-1,1]$, write
+
+$$g_V(z,a)=u_{\max}\eta_V(z)a-\tfrac12w_u u_{\max}^2a^2,$$
+
+$$H(\pi_{V,\alpha}(\cdot\mid z))
+=\log Z_V(z)-\mathbb E_{\pi_{V,\alpha}}[g_V(z,a)/\alpha].$$
+
+After each value update, measure this entropy using the updated online value
+gradient and current temperature on the nonterminal minibatch states. With
+$\lambda=\log\alpha$, take an Adam step on the SAC-style surrogate
+
+$$L_\alpha(\lambda)=\lambda\,\operatorname{stopgrad}
+\left(\overline{H(\pi_{V,\alpha})}-H_{\mathrm{target}}\right).$$
+
+Thus low entropy increases temperature and high entropy decreases it. The
+entropy measurement is detached: this optimization step changes only temperature.
+An all-terminal minibatch skips the temperature update. Defaults are initial
+$\alpha=0.1$, target entropy $-1$, learning rate $3\times10^{-4}$, and bounds
+$10^{-4}\le\alpha\le10$. The next HJB target and sampled policy both use the
+updated temperature. Deterministic mode evaluation, at a fixed value gradient,
+does not depend directly on temperature.
+
+The entropy convention is relative to $da$, not physical torque measure $du$ or
+categorical node probabilities. Negative differential entropy is valid; the
+maximum on this action interval is $\log 2$. Targets must be strictly below that
+maximum. Entropy is evaluated by the same continuous-action quadrature used for
+the soft HJB integral; concentrated policies require checking quadrature
+resolution. The parameter bounds do not guarantee that the target is attained.
+
+This option introduces another changing component of the learning objective.
+Report its temperature and entropy trajectories separately from fixed-temperature
+results. It is excluded from the fixed-label versus moving-label diagnostic below,
+which isolates feedback from updating the value target network. No convergence
+or stabilization guarantee follows from temperature adaptation alone.
+
 ---
 
 ## 4. Evaluation and progression criteria
@@ -283,9 +322,95 @@ If these criteria are missed, inspect learned action gains near upright, value-g
 
 ---
 
-## 5. Evidence available and interpretation
+## 5. Fixed-label versus moving-label diagnostic
 
-### 5.1 Completed preliminary checks
+### 5.1 Question and controlled comparison
+
+This diagnostic asks whether a stationary regression assignment can be fitted
+reliably, and whether repeatedly recomputing HJB targets introduces deterioration.
+It does not compare an Euler prediction with the value at a physical successor
+state. The step $\Delta\tau$ advances the value-learning iteration at a fixed state.
+
+Let $\bar V_0$ be a frozen initial target network and define
+
+$$y_0(z)=\bar V_0(z)+\Delta\tau\,\mathcal H[\bar V_0](z),$$
+
+where
+
+$$\mathcal H[V](z)=-\ell(z)+\nabla V(z)^\top f_0(z)
+-\beta V(z)+\chi_\alpha\!\left(\frac{\partial V}{\partial p_2}(z)\right).$$
+
+Here $\chi_0$ is the bounded action maximum and $\chi_\alpha$ for $\alpha>0$
+is the entropy-regularized action integral. At absorbing failure states, replace
+the label by $V_F$ in both arms.
+
+Create two copies of the same online network, target network, and optimizer state.
+They may start from initialization or from a chosen training checkpoint. Apply
+the same minibatches and number of optimizer updates to both copies:
+
+- **Fixed labels:** minimize the squared error to $y_0(z)$ throughout the run;
+  leave the initial target network frozen.
+- **Moving labels:** recompute $y_k(z)$ from the current target network and use
+  the usual target-parameter averaging after every optimizer update.
+
+The first regression update is identical in both arms. Later assignments can
+differ because only the moving-label arm updates the network generating labels.
+
+### 5.2 Fixed training and held-out states
+
+Before either arm learns, collect separate trajectories with the initial policy
+for the training and held-out partitions. For each partition, combine an equal
+number of reset-distribution collocation states and visited states sampled without
+replacement from its distinct rollout states. Preserve failure-state indicators;
+time-limit truncations are not absorbing failures. Do not split adjacent states
+from a single trajectory between training and held-out partitions.
+
+The default diagnostic uses 4,096 training states, 2,048 held-out states, and
+4,096 collection decisions per partition. During fitting, use the same half-reset,
+half-visited minibatch indices for both arms. The held-out states are used only
+for measurement. Control-evaluation trajectories are also excluded from fitting.
+No new states enter either fixed partition as the policies change.
+
+An optional reset-only comparison omits trajectory collection. It tests local
+regression but cannot explain difficulties caused by visited-state coverage or
+absorbing boundary labels. Report the actual terminal-state count in each
+partition; a partition with no terminals does not test boundary fitting.
+
+### 5.3 Measurements and interpretation
+
+At initialization and every 1,000 updates, save both networks and measure:
+
+- Training and held-out root-mean-square error against each arm's current labels.
+- Error against the original labels and the magnitude of label drift.
+- Separate interior, absorbing-boundary, reset-state, and visited-state errors.
+- Online value, state-gradient, and $\eta_V$ magnitudes at the same states.
+- Online HJB residuals on nonterminal states, online/target value disagreement,
+  and analytic-action saturation.
+- Deterministic retention, hold durations, return, and failures on fixed control
+  evaluation starts.
+
+Retain per-state measurements in addition to averages. Boundary states obey an
+assigned terminal value, so their HJB residuals should not be pooled with the
+interior residual. A nonfinite loss, derivative, or prediction is recorded as a
+numerical failure for that arm; the other arm can continue.
+
+If fixed-label training error decreases while held-out error grows, the network
+is overfitting the fixed assignment. If both decrease, this demonstrates that
+the assignment can be fitted and generalized over the sampled distribution.
+Neither result establishes that the assignment is the correct optimal value.
+
+If fixed-label fitting behaves well but moving-label learning deteriorates,
+target feedback is implicated under the controlled state distribution. This
+is evidence for further investigation, not a proof of divergence or isolation
+of a unique cause. Conversely, stability in both arms does not rule out an
+instability involving online collection and changing state coverage. Repeat
+the comparison across network and dataset seeds before drawing conclusions.
+
+---
+
+## 6. Evidence available and interpretation
+
+### 6.1 Completed preliminary checks
 
 As of 14 September 2026, numerical and integration checks have exercised agreement between the canonical oracle and MuJoCo, physical energy balance, torque saturation, the soft action integral, checkpoint reloads, reward timing, and hold-duration tracking.
 
@@ -298,7 +423,7 @@ Short training smoke runs produced the following final-checkpoint observations:
 
 Both used local starts and deterministic evaluation. Their different budgets and small evaluation sets do not support a comparison between training methods. They show that updates and evaluations execute, while providing no evidence yet of sustained balance. No incoming-state capture result or full five-seed study is established by these checks.
 
-### 5.2 What a successful result would establish
+### 6.2 What a successful result would establish
 
 A successful local study would establish empirical retention for the tested initial-state distribution, torque bound, timing, and horizon. A successful incoming study would additionally show that the learned policy can complete the capture stage from the tested swing-up approaches.
 
