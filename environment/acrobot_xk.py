@@ -1,35 +1,36 @@
 """Acrobot plant with Xin & Kaneda's geometry and their analysis's assumptions.
 
-The swing-up results of `Xin & Kaneda 2007
-<https://doi.org/10.1002/rnc.1184>`_ are derived and simulated for a specific
-two-link robot, and the plant here reproduces it exactly:
+`Xin & Kaneda 2007 <https://doi.org/10.1002/rnc.1184>`_ derive and simulate
+their swing-up results for one specific two-link robot. The plant here
+reproduces that robot exactly:
 
     m1 = m2 = 1 kg, l1 = 1 m, l2 = 2 m, lc1 = 0.5 m, lc2 = 1 m,
     I1 = 0.083 kg m^2, I2 = 0.33 kg m^2, g = 9.8 m/s^2
 
-which gives the grouped parameters their equations are written in,
-``a = (1.333, 1.330, 1.000)`` and ``b = (14.7, 9.8)``, and hence ``E_r = 24.5``.
-The link inertias are set through explicit ``<inertial>`` elements rather than
-inferred from geom shape, so ``I1`` and ``I2`` land on the published values
-instead of on whatever a capsule of that length would have.
+Those values give the grouped parameters that their equations use,
+``a = (1.333, 1.330, 1.000)`` and ``b = (14.7, 9.8)``, and so ``E_r = 24.5``.
+Explicit ``<inertial>`` elements set the link inertias. ``I1`` and ``I2``
+therefore land on the published values, and not on the inertia of a capsule of
+that length.
 
 Two further properties of their setting are carried over:
 
-* **No dissipation.**  ``Edot = qdot2 tau2`` is the engine of the entire
-  derivation.  With joint damping ``d`` it becomes
-  ``Edot = qdot2 tau2 - d (qdot1^2 + qdot2^2)``, which leaves
-  ``Vdot = -k_V qdot2^2 - (E - E_r) d |qdot|^2`` whose second term is *positive*
-  throughout a swing-up.  Worse, on the target set ``q2 = qdot2 = 0`` the
-  injected power is identically zero while the shoulder keeps dissipating, so
-  the homoclinic orbit is not an invariant set of the damped closed loop for any
-  gains.  ``damping`` therefore defaults to 0; a positive value stays reachable
-  so the obstruction can be measured rather than asserted.
-* **Bounded actuation and runaway termination.**  The law asks for just under
-  20 N*m at the paper's gains, so ``torque_limit`` defaults to 20 N*m.  The
-  episode terminates if the unwrapped elbow winds to ``4 pi``, either the elbow
-  rate reaches ``4 pi`` rad/s, or the shoulder rate reaches twice its peak on
-  the target homoclinic orbit.  These bounds retain the analytical swing-up
-  trajectories while stopping the energetic runaways seen during learning.
+* **No dissipation.** ``Edot = qdot2 tau2`` is the engine of the whole
+  derivation. With joint damping ``d`` it becomes
+  ``Edot = qdot2 tau2 - d (qdot1^2 + qdot2^2)``. That leaves
+  ``Vdot = -k_V qdot2^2 - (E - E_r) d |qdot|^2``, whose second term is
+  *positive* throughout a swing-up. On the target set ``q2 = qdot2 = 0`` the
+  injected power is exactly zero, and the shoulder still dissipates. The
+  homoclinic orbit is then no invariant set of the damped closed loop, at any
+  gains. ``damping`` therefore defaults to 0. A positive value stays reachable,
+  so a run can measure the obstruction.
+* **Bounded actuation and runaway termination.** The law asks for a little
+  under 20 N*m at the paper's gains, so ``torque_limit`` defaults to 20 N*m.
+  The episode terminates on any of three events. The unwrapped elbow winds to
+  ``4 pi``. The elbow rate reaches ``4 pi`` rad/s. The shoulder rate reaches
+  twice its peak on the target homoclinic orbit. These bounds keep the
+  analytical swing-up trajectories, and stop the energetic runaways that appear
+  during learning.
 
 The task selects one of the four reward rates in
 ``docs/reward_shaping_for_acrobot_swingup.md`` with ``reward_kind``:
@@ -40,56 +41,59 @@ The task selects one of the four reward rates in
     r3(x, u) = [-V(x) - eta Vdot(x, u) + lambda eta V(x)] / V_down
 
 The optional ``reward_transform="log_reciprocal"`` maps the selected reward
-family to ``log(1 / -r) = -log(-r)``.  A small floor on ``-r`` keeps the
-transform finite at the target and for shaped rewards that cross zero; the raw
-values remain available in the reward diagnostics under ``raw_r0`` through
+family to ``log(1 / -r) = -log(-r)``. A small floor on ``-r`` keeps the
+transform finite at the target, and for shaped rewards that cross zero. The raw
+values stay available in the reward diagnostics under ``raw_r0`` through
 ``raw_r3``.
 
-Historical runs retain these definitions through the default
-``reward_base="lyapunov"``.  The ``reward_base="r0"`` experiment family keeps
-the same r1--r3 shaping structure but replaces only the leading
-``-V(x) / V_down`` term with the normalized baseline reward:
+Historical runs keep these definitions through the default
+``reward_base="lyapunov"``. The ``reward_base="r0"`` experiment family keeps
+the same r1--r3 shaping structure, and replaces the leading
+``-V(x) / V_down`` term alone with the normalized baseline reward:
 
     r1_r0(x) = r0(x)
     r2_r0(x, u) = r0(x) - eta Vdot(x, u) / V_down
     r3_r0(x, u) = r0(x) - eta Vdot(x, u) / V_down
                   + lambda eta V(x) / V_down
 
-Thus the derivative and, for r3, the discount correction still use the
-original Xin--Kaneda ``V``; ``reward_base`` does not reinterpret them as a
-derivative or potential of ``r0``.
+The derivative, and for r3 the discount correction, therefore still use the
+original Xin--Kaneda ``V``. ``reward_base`` leaves both of them alone, and
+never rereads them as a derivative or potential of ``r0``.
 
-``reward_base="lai_she"`` instead replaces ``V`` with
-:class:`controllers.acrobot_gated_lyapunov.NonsmoothLyapunov` -- Lai, Wu, She
-and Yang's nonsmooth Lyapunov function, built from this task's own physics
-via ``AcrobotParams.from_physics`` and its ``k_v``/``k_d``/``k_p`` gains, and
-already normalized on its own scale.  ``V`` and ``Vdot`` in the r1--r3
-formulas above become that function's value and directional derivative; the
-r0 baseline and ``reward_transform`` are unaffected.  It requires
-``lyapunov_rate_source="actual"``: the ``xk_closed_loop`` surrogate assumes
-the global Xin--Kaneda swing-up law and is not meaningful once the
-Lai--She function's LQR-gated local piece is active.
+``reward_base="lai_she"`` replaces ``V`` with
+:class:`controllers.acrobot_gated_lyapunov.NonsmoothLyapunov`. That is the
+nonsmooth Lyapunov function of Lai, Wu, She and Yang. The task builds it from
+its own physics through ``AcrobotParams.from_physics`` and its ``k_v``,
+``k_d`` and ``k_p`` gains, already normalized on its own scale. ``V`` and
+``Vdot`` in the r1--r3 formulas above become the value and the directional
+derivative of that function. The r0 baseline and ``reward_transform`` stay as
+they are. This base requires ``lyapunov_rate_source="actual"``. The
+``xk_closed_loop`` surrogate assumes the global Xin--Kaneda swing-up law, and
+loses its meaning once the LQR-gated local piece of the Lai--She function is
+active.
 
-By default ``Vdot`` is the true directional derivative under the action the
-plant applies.  The counterfactual ``lyapunov_rate_source="xk_closed_loop"``
-instead substitutes the identity from the exact Xin--Kaneda feedback law,
-``Vdot_XK = -k_V qdot2^2``.  Under a learned policy this is an
-action-independent surrogate, not the derivative of ``V`` along that policy;
-it can reward elbow speed and is therefore kept as an explicit experiment arm
-rather than replacing the physical derivative.
+By default ``Vdot`` is the true directional derivative under the action that
+the plant applies. The counterfactual ``lyapunov_rate_source="xk_closed_loop"``
+substitutes the identity from the exact Xin--Kaneda feedback law,
+``Vdot_XK = -k_V qdot2^2``. Under a learned policy that identity is an
+action-independent surrogate for the derivative of ``V`` along the policy. It
+can reward elbow speed, so it stays an explicit experiment arm and never
+replaces the physical derivative.
 
 Here ``V_down = V(x_down) = E_s^2 / 2`` is the Lyapunov value at hanging rest.
-The common linear scale preserves the shape and units of every Lyapunov term;
-the state, rate, and torque caps make their ranges finite without clipping.
-``eta`` is an explicit, non-negative parameter required by ``r2`` and ``r3``;
-``r3`` also requires the physical discount rate ``lambda``.  On a cap crossing,
-the selected reward's finite lower envelope -- the minimum reward attainable
-anywhere in the capped state/action closure -- is emitted as the terminal
-reward and frozen over the unexecuted episode remainder.  CT-SAC sums that
-remaining-horizon return analytically, so a cap can never be preferable to any
-admissible ordinary transition.  These rewards are training signals only: the
-analytical controller ignores them, and comparisons are made with the seven
-reward-independent metrics recomputed from state, physical time, and torque.
+The common linear scale preserves the shape and units of every Lyapunov term.
+The state, rate, and torque caps make their ranges finite, with no clipping.
+``eta`` is an explicit, non-negative parameter that ``r2`` and ``r3`` require.
+``r3`` also requires the physical discount rate ``lambda``. On a cap crossing,
+the task emits the finite lower envelope of the selected reward as the terminal
+reward. It then freezes that value over the part of the episode that never
+runs. That lower
+envelope is the minimum reward attainable anywhere in the capped state and
+action closure. CT-SAC sums the remaining-horizon return analytically, so a cap
+is never preferable to any admissible ordinary transition. These rewards are
+training signals alone. The analytical controller ignores them, and every
+comparison uses the seven reward-independent metrics recomputed from state,
+physical time, and torque.
 """
 
 from __future__ import annotations
@@ -124,9 +128,10 @@ REACH = LINK1_LENGTH + LINK2_LENGTH
 # The paper-gain controller peaks at about 19.71 N*m on the release protocol.
 DEFAULT_TORQUE_LIMIT = 20.0
 
-# State bounds used to stop physically unhelpful high-energy trajectories.
-# The shoulder-rate threshold is multiplied by the plant-derived omega_s after
-# energy calibration; the elbow angle is deliberately checked unwrapped.
+# State bounds that stop physically unhelpful high-energy trajectories.
+# The task multiplies the shoulder-rate threshold by the plant-derived omega_s
+# after energy calibration. The elbow angle test reads the angle unwrapped, on
+# purpose.
 ELBOW_ANGLE_LIMIT = 4.0 * np.pi
 ELBOW_RATE_LIMIT = 4.0 * np.pi
 SHOULDER_RATE_SCALE_LIMIT = 2.0
@@ -136,15 +141,15 @@ TERMINATION_ELBOW_RATE = "elbow_rate_limit"
 TERMINATION_SHOULDER_RATE = "shoulder_rate_limit"
 LOWER_BOUND_TERMINATION_REWARD_SOURCE = "reward_lower_bound"
 
-# Reset used by the swing-up arms: near hanging, matching the paper's own
-# initial condition, which sits a small angle off the downward equilibrium.
+# Reset for the swing-up arms. It starts near hanging, at the paper's own
+# initial condition, a small angle off the downward equilibrium.
 DEFAULT_ANGLE_NOISE = 0.05
 DEFAULT_VELOCITY_NOISE = 0.01
 
-# Xin & Kaneda's Section-7 gains used by the Lyapunov rewards.  k_D and k_P
-# define V; k_V is used only by the optional closed-loop Vdot surrogate.  Keep
-# them configurable so reward studies can vary either construction without
-# changing the plant.
+# Xin & Kaneda's Section-7 gains for the Lyapunov rewards. k_D and k_P define
+# V. Only the optional closed-loop Vdot surrogate reads k_V. Keep all three
+# open to the caller, so that a reward study can vary either construction and
+# leave the plant alone.
 DEFAULT_LYAPUNOV_K_D = 35.8
 DEFAULT_LYAPUNOV_K_P = 61.2
 DEFAULT_LYAPUNOV_K_V = 66.3
@@ -217,11 +222,12 @@ def _elbow_acceleration_abs_bound(
 ) -> float:
     """Bound ``|qddot2|`` over the capped state/action closure.
 
-    At fixed ``q2`` the velocity, damping, torque and gravity contributions to
-    the second row of ``M^-1`` can each be maximized analytically.  What remains
-    is a smooth one-dimensional periodic envelope.  A dense deterministic grid
-    followed by bounded refinement of every sampled local maximum avoids a
-    costly five-dimensional optimizer while retaining a small outward margin.
+    At fixed ``q2`` an analytical step maximizes each of the velocity, damping,
+    torque and gravity contributions to the second row of ``M^-1``. A smooth
+    one-dimensional periodic envelope remains. The function sweeps a dense
+    deterministic grid, then refines every sampled local maximum within bounds.
+    That path avoids a costly five-dimensional optimizer and keeps a small
+    outward margin.
     """
     from scipy.optimize import minimize_scalar
 
@@ -306,27 +312,29 @@ def _transform_reward(reward: float, reward_transform: str) -> float:
 
 @lru_cache(maxsize=32)
 def _lai_she_delta_over_scale(k_v: float, k_d: float, k_p: float) -> float:
-    """``Delta / scale`` for a Lai-She function built on this module's own
-    hardcoded paper parameters, used to correct the raw-quadratic
-    reward-rate lower bound below for ``reward_base='lai_she'``.
+    """``Delta / scale`` for a Lai-She function on this module's paper parameters.
 
-    Physics-free by construction: this plant already *is* the paper's fixed
-    geometry (``AcrobotParams.from_physics`` on it recovers exactly ``_A1``
-    through ``_B2``), and ``gear`` plays no part in ``NonsmoothLyapunov``'s
-    value (only in its control output, which this function never asks for),
-    so an arbitrary placeholder is fine.
+    The raw-quadratic reward-rate lower bound below uses this value as a
+    correction under ``reward_base='lai_she'``.
 
-    The correction stays a valid (conservative) bound everywhere, inside or
-    outside the LQR-gated region: NonsmoothLyapunov's Definition-3 property
-    -- Delta is built so the local piece never exceeds the outer, swing-up
-    piece anywhere in the region (tested in
-    ``test_delta_dominates_the_local_value_everywhere_on_the_region``) --
-    means the switched value is bounded above by the swing-up piece alone,
-    ``(raw_XK_V + Delta) / scale``, everywhere. Since ``raw_XK_V`` is exactly
-    the quantity the raw-quadratic bound below already bounds (same energy,
-    unwrapped-elbow formula, cf. ``_xk_raw_value_and_gradient``), adding this
-    one constant to that existing bound is a valid upper bound on
-    NonsmoothLyapunov's value everywhere in the caps closure.
+    The function needs no physics argument. This plant already *is* the paper's
+    fixed geometry, and ``AcrobotParams.from_physics`` on it recovers exactly
+    ``_A1`` through ``_B2``. ``gear`` plays no part in the value of
+    ``NonsmoothLyapunov``. It enters the control output alone, which this
+    function never asks for, so any placeholder works.
+
+    The correction stays a valid and conservative bound everywhere, inside the
+    LQR-gated region and outside it. The Definition-3 property of
+    ``NonsmoothLyapunov`` builds ``Delta`` so that the local piece never exceeds
+    the outer swing-up piece anywhere in the region. The test
+    ``test_delta_dominates_the_local_value_everywhere_on_the_region`` covers
+    that property. The swing-up piece alone, ``(raw_XK_V + Delta) / scale``,
+    therefore bounds the switched value everywhere. ``raw_XK_V`` is exactly the
+    quantity that the raw-quadratic bound below already bounds, through the same
+    energy and unwrapped-elbow formula, so compare
+    ``_xk_raw_value_and_gradient``. This one constant added to that existing
+    bound is therefore a valid upper bound on the value of
+    ``NonsmoothLyapunov`` everywhere in the caps closure.
     """
     from controllers.acrobot_gated_lyapunov import AttractiveRegion, NonsmoothLyapunov
     from controllers.xin_kaneda import AcrobotParams, Gains
@@ -568,13 +576,13 @@ HOMOCLINIC_ENERGY_TOLERANCE = 0.05
 HOMOCLINIC_ANGLE_TOLERANCE = 0.025
 HOMOCLINIC_RATE_TOLERANCE = 0.05
 
-# The "release" reset: the chain held straight and released from rest with the
-# shoulder displaced from hanging.  This is the family the paper's own initial
-# condition belongs to (its displacement is 0.1708 rad), and it is the shared
-# evaluation distribution for the reward experiments -- see
-# ``docs/reward_shaping_for_acrobot_swingup.md``.  The displacement is bounded
-# away from zero because hanging is an equilibrium of the closed loop, so a zero
-# displacement would never start.
+# The "release" reset. The chain is straight, starts at rest, and the shoulder
+# is displaced from hanging. The paper's own initial condition belongs to this
+# family, at a displacement of 0.1708 rad. The reward experiments share it as
+# their evaluation distribution. See
+# ``docs/reward_shaping_for_acrobot_swingup.md``. The displacement stays away
+# from zero, because hanging is an equilibrium of the closed loop and a zero
+# displacement never starts.
 RELEASE_ANGLE_RANGE = (0.05, 0.5)
 
 # The upright and hanging equilibria of eq. 10, and the paper's own initial
@@ -583,24 +591,25 @@ UPRIGHT_SHOULDER = 0.5 * np.pi
 HANGING_SHOULDER = -0.5 * np.pi
 PAPER_INITIAL_SHOULDER = -1.4
 
-# The planar problem only constrains the inertia about the hinge axis; the
-# out-of-plane principal moment just has to keep the tensor admissible.
+# The planar problem constrains the inertia about the hinge axis alone. The
+# out-of-plane principal moment only has to keep the tensor admissible.
 _MINOR_INERTIA = 0.001
 
-# The model is laid out so that ``qpos`` *is* the paper's ``(q1, q2)``, which
-# removes the coordinate transform rather than hiding it:
+# The layout of the model makes ``qpos`` *be* the paper's ``(q1, q2)``. That
+# removes the coordinate transform:
 #
-#   * the links rest along +x, so ``q1 = 0`` is link 1 horizontal, as in eq. 10;
-#   * the hinges turn about -y, so increasing ``q1`` lifts the link toward +z
-#     and upright is ``q1 = +pi/2``, hanging ``-pi/2``;
-#   * the shoulder sits at the world origin, so MuJoCo's gravitational potential
-#     equals ``P(q) = b1 sin q1 + b2 sin(q1 + q2)`` of eq. 7 with no offset.
+#   * the links rest along +x, so ``q1 = 0`` is link 1 horizontal, as in eq. 10
+#   * the hinges turn about -y, so a larger ``q1`` lifts the link toward +z,
+#     upright is ``q1 = +pi/2``, and hanging is ``-pi/2``
+#   * the shoulder sits at the world origin, so the gravitational potential of
+#     MuJoCo equals ``P(q) = b1 sin q1 + b2 sin(q1 + q2)`` of eq. 7, with no
+#     offset
 #
-# Consequences, all verified in the tests: ``mj_fullM`` equals ``M(q)``,
-# ``qfrc_bias`` equals ``+(H + G)`` with no sign flip, the MuJoCo mechanical
-# energy equals ``E`` outright, and ``gear * ctrl`` is ``tau2`` directly.
-# ``diaginertia`` is ordered ``(about the rod, about y, about z)`` so the
-# published moment lands on the hinge axis.
+# Four consequences follow, and the tests cover all four. ``mj_fullM`` equals
+# ``M(q)``. ``qfrc_bias`` equals ``+(H + G)`` with no sign flip. The MuJoCo
+# mechanical energy equals ``E`` outright. ``gear * ctrl`` is ``tau2`` directly.
+# ``diaginertia`` runs in the order ``(about the rod, about y, about z)``, so
+# the published moment lands on the hinge axis.
 _MODEL_XML = """
 <mujoco model="acrobot-xk">
   <include file="./common/visual.xml"/>
@@ -717,13 +726,13 @@ class BalanceXK(suite_base.Task):
         plant_scales: PlantScales = PlantScales(),
     ) -> None:
         super().__init__(random=random)
-        # When True (default), a state-cap crossing freezes the reward at the
-        # conservative reward-rate lower envelope and CT-SAC analytically
-        # sums that frozen rate over the unexecuted episode remainder (see
-        # DMCContinuousEnv._step_physics_unlocked). When False, a cap simply
-        # ends the episode at the live, actually-computed reward for the
-        # terminal state -- an ordinary termination with no absorbing
-        # continuation, no bootstrap.
+        # True is the default. A state-cap crossing then freezes the reward at
+        # the conservative reward-rate lower envelope, and CT-SAC sums that
+        # frozen rate analytically over the part of the episode that never runs
+        # (see DMCContinuousEnv._step_physics_unlocked). With False, a cap ends
+        # the episode at the live reward computed for the terminal state. That
+        # is an ordinary termination, with no absorbing continuation and no
+        # bootstrap.
         self.cap_terminal_penalty = bool(cap_terminal_penalty)
         self.angle_noise = float(angle_noise)
         self.velocity_noise = float(velocity_noise)
@@ -907,9 +916,9 @@ class BalanceXK(suite_base.Task):
         physics.named.data.qpos[["shoulder", "elbow"]] = [UPRIGHT_SHOULDER, 0.0]
         physics.forward()
         energy_up = self._mechanical_energy(physics)
-        # M11 with the elbow straight, which is where the homoclinic orbit lives;
-        # taking it here keeps the reward's velocity scale a constant instead of
-        # a pose-dependent one.
+        # M11 with the elbow straight, where the homoclinic orbit lives. Read
+        # here, the velocity scale of the reward stays a constant, and does not
+        # depend on the pose.
         extended_m11 = float(self._mass_matrix(physics)[0, 0])
         physics.named.data.qpos[["shoulder", "elbow"]] = [HANGING_SHOULDER, 0.0]
         physics.forward()
@@ -1010,12 +1019,12 @@ class BalanceXK(suite_base.Task):
         return self._last_termination_reason
 
     def get_termination(self, physics) -> Optional[float]:
-        """Terminate energetic runaways, returning dm-control discount zero.
+        """Terminate energetic runaways, and return dm-control discount zero.
 
-        The checks are made on the post-step state.  In particular, ``q2`` is
-        read directly from ``qpos`` rather than wrapped, so elbow winding can
-        actually reach its limit.  The terminal endpoint may overshoot by one
-        control interval; no nonphysical state clipping is applied.
+        The tests here read the post-step state. The method reads ``q2``
+        directly from ``qpos`` and never wraps it, so a winding elbow can reach
+        its limit. The terminal endpoint can overshoot by one control interval.
+        The method applies no nonphysical state clipping.
         """
         rate_scale = self._rate_scale
         if rate_scale is None:
@@ -1040,10 +1049,10 @@ class BalanceXK(suite_base.Task):
     def get_observation(self, physics):
         """Wrapped joint angles and rates.
 
-        dm_control's stock Acrobot helpers read the body z-axes, which assume
-        links along +z; this model lays them along +x, so the observation is
-        built from the joint angles directly.  The swing-up arms use
-        ``raw_state_obs`` anyway, which bypasses this entirely.
+        The stock Acrobot helpers of dm_control read the body z-axes, and so
+        assume links along +z. This model lays the links along +x, so the
+        method builds the observation from the joint angles directly. The
+        swing-up arms use ``raw_state_obs``, which skips this method.
         """
         angles = np.asarray(physics.data.qpos, dtype=np.float64)
         obs = collections.OrderedDict()
@@ -1082,13 +1091,13 @@ class BalanceXK(suite_base.Task):
     def _ensure_lai_she(self, physics):
         """Build and cache the Lai-She nonsmooth Lyapunov function.
 
-        Deferred until first use because it needs ``physics`` (to recover
-        this plant's own mass/length/inertia via
-        :meth:`AcrobotParams.from_physics`); built once and reused across the
-        task's lifetime since those parameters don't change between resets.
-        Reuses the task's own ``k_v``/``k_d``/``k_p`` gains rather than the
-        module's paper-section defaults, so it stays tunable the same way the
-        other reward bases are.
+        The build waits for first use, because it needs ``physics``. It
+        recovers the mass, length and inertia of this plant through
+        :meth:`AcrobotParams.from_physics`. Those parameters stay the same
+        between resets, so the method builds the function once and reuses it
+        for the lifetime of the task. It reads the task's own ``k_v``, ``k_d``
+        and ``k_p`` gains, and never the paper-section defaults of this module.
+        A caller therefore tunes it exactly as it tunes the other reward bases.
         """
         if self._lai_she is None:
             from controllers.acrobot_gated_lyapunov import (
@@ -1105,10 +1114,10 @@ class BalanceXK(suite_base.Task):
     def baseline_terms(self, physics) -> Dict[str, float]:
         """The ``r0`` baseline and its three normalized parts.
 
-        Scales follow the doc: ``E_s`` is the swing-up energy span, ``q_s = pi``,
-        and ``omega_s`` is the peak shoulder speed on the homoclinic orbit,
-        ``sqrt(2 E_s / M11(0))`` — the speed at which the whole span is carried
-        as kinetic energy in the extended pose.
+        The scales follow the doc. ``E_s`` is the swing-up energy span, and
+        ``q_s = pi``. ``omega_s`` is the peak shoulder speed on the homoclinic
+        orbit, ``sqrt(2 E_s / M11(0))``. That is the speed at which the extended
+        pose carries the whole span as kinetic energy.
         """
         if self._energy_hang is None or self._energy_span is None:
             self._calibrate_energy(physics)
@@ -1154,16 +1163,16 @@ class BalanceXK(suite_base.Task):
     def xk_reward_terms(self, physics) -> Dict[str, float]:
         """Return all four reward rates at the live endpoint state.
 
-        ``r0`` is the normalized, periodic distance already shipped with this
-        task. The Lyapunov rewards use Xin--Kaneda's unwrapped shape coordinate
-        because their function penalizes elbow winding on ``R``.  The r1 state
-        term is either ``-V / V_down`` or ``r0`` according to ``reward_base``;
-        r2 and r3 build on that selection.  The derivative and r3 correction
-        always retain the original ``V`` and its common ``V_down`` scale.  The
-        actual derivative uses the generalized force the plant applies, so the
-        normalized policy action is never mistaken for physical torque.  The
-        separately named Xin--Kaneda closed-loop value is the optional
-        action-independent surrogate ``-k_V qdot2^2``.
+        ``r0`` is the normalized, periodic distance that this task already
+        ships. The Lyapunov rewards use the unwrapped shape coordinate of
+        Xin--Kaneda, because their function penalizes elbow winding on ``R``.
+        ``reward_base`` picks the r1 state term, either ``-V / V_down`` or
+        ``r0``. r2 and r3 build on that choice. The derivative and the r3
+        correction always keep the original ``V`` and its common ``V_down``
+        scale. The actual derivative reads the generalized force that the plant
+        applies, so nothing reads the normalized policy action as a physical
+        torque. The Xin--Kaneda closed-loop value carries its own name. It is
+        the optional action-independent surrogate ``-k_V qdot2^2``.
         """
         baseline = self.baseline_terms(physics)
         qpos = np.asarray(physics.data.qpos, dtype=np.float64).reshape(-1)
@@ -1199,14 +1208,13 @@ class BalanceXK(suite_base.Task):
         elbow_rate = float(qvel[1])
         lyapunov_scale = self.lyapunov_scale
         if self.reward_base == "lai_she":
-            # This plant already *is* the Xin-Kaneda paper's own
-            # coordinates (raw_state_obs's [qpos; qvel] needs no frame
-            # conversion), so state and its derivative are read straight
-            # off physics. NonsmoothLyapunov.value/.rate are already
-            # normalized on their own scale, so multiplying back by
-            # lyapunov_scale here lets every downstream computation --
-            # normalization, selection, raw_r1..r3 -- stay byte-for-byte
-            # the same as the other reward bases.
+            # This plant already *is* the Xin-Kaneda paper's own coordinates.
+            # The [qpos; qvel] of raw_state_obs needs no frame conversion, so
+            # the state and its derivative come straight off physics.
+            # NonsmoothLyapunov.value and .rate are already normalized on their
+            # own scale. A multiplication back by lyapunov_scale here keeps
+            # every later step byte-for-byte the same as the other reward
+            # bases: normalization, selection, and raw_r1 through raw_r3.
             lai_she = self._ensure_lai_she(physics)
             state = np.array(
                 [qpos[0], qpos[1], qvel[0], qvel[1]], dtype=np.float64
@@ -1328,34 +1336,39 @@ def swingup_xk(
 ):
     """Construct ``acrobot-swingup-xk``.
 
-    ``damping = 0`` and a configurable ``torque_limit`` are the two deviations
-    from the stock model; both are recoverable from the built model, so a caller
-    can always confirm which plant it is holding.  ``roa_start_fraction``
-    (only meaningful with ``release_start=True``) replaces that fraction of
-    ``release_start`` draws with a state sampled uniformly, by volume, from
-    the SOS-certified region of attraction itself (angles and rates both,
-    not the release law's zero-velocity start) -- see
+    This plant deviates from the stock model in two places, ``damping = 0`` and
+    a configurable ``torque_limit``. The built model carries both values, so a
+    caller can always make sure that it holds the plant it expects.
+
+    ``uniform_start=True`` samples both joint angles over ``[-pi, pi)`` and
+    releases them at exactly zero joint velocity. It excludes ``paper_start``
+    and the near-hanging ``release_start``.
+
+    ``roa_start_fraction`` only means anything alongside
+    ``release_start=True``. It replaces that fraction of the ``release_start``
+    draws with a state drawn uniformly by volume from the SOS-certified region
+    of attraction itself -- angles and rates both, not the release law's
+    zero-velocity start. See
     ``controllers.acrobot_sos_switched.SOSCertificate.sample_uniform``.
-    ``uniform_start=True`` samples
-    both joint angles over ``[-pi, pi)`` and releases them at exactly zero joint
-    velocity; it is mutually exclusive with ``paper_start`` and the near-hanging
-    ``release_start``.  ``reward_kind`` chooses the training reward.  For
-    r1--r3, ``reward_base`` chooses the historical
-    ``-V / V_down`` state term or substitutes ``r0`` while retaining the
-    original-V shaping terms.  ``r2`` and ``r3`` additionally require an
-    explicit ``eta`` shaping time scale, and ``r3`` requires the physical
-    ``discount_rate`` used by CT-SAC.  ``lyapunov_rate_source`` selects the
-    actual action-dependent derivative or the counterfactual Xin--Kaneda
-    closed-loop surrogate.  ``reward_transform="log_reciprocal"`` applies
-    ``log(1 / -r)`` with a finite numerical floor.  The three state limits are
-    instance kwargs.  By default (``cap_terminal_penalty=True``), a cap
-    crossing emits the selected reward's finite lower envelope as the terminal
-    reward -- the minimum reward attainable anywhere in the capped state/action
-    closure -- and freezes that rate so CT-SAC sums it over the unexecuted
-    episode remainder.  With ``cap_terminal_penalty=False``, a cap crossing
-    is instead an ordinary termination: the episode simply ends there, using
-    the live, actually-computed reward for that terminal state (no penalty
-    override, no analytical continuation).
+
+    ``reward_kind`` chooses the training reward. For r1 through r3,
+    ``reward_base`` chooses between the historical ``-V / V_down`` state term
+    and ``r0``. The r0 choice keeps the shaping terms built on the original
+    ``V``. ``r2`` and ``r3`` also require an explicit ``eta`` shaping time
+    scale, and ``r3`` requires the physical ``discount_rate`` that CT-SAC uses.
+    ``lyapunov_rate_source`` selects the actual action-dependent derivative, or
+    the counterfactual Xin--Kaneda closed-loop surrogate.
+    ``reward_transform="log_reciprocal"`` applies ``log(1 / -r)`` with a finite
+    numerical floor. The three state limits are instance kwargs.
+
+    ``cap_terminal_penalty=True`` is the default. A cap crossing then emits the
+    finite lower envelope of the selected reward as the terminal reward, and
+    freezes that rate. The lower envelope is the minimum reward attainable
+    anywhere in the capped state and action closure. CT-SAC sums the frozen rate
+    over the part of the episode that never runs. With
+    ``cap_terminal_penalty=False``, a cap crossing is an ordinary termination.
+    The episode ends there at the live reward computed for that terminal state,
+    with no penalty override and no analytical continuation.
     """
     plant_scales = PlantScales.coerce(plant_scales)
     physics = mujoco.Physics.from_xml_string(

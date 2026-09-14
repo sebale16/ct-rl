@@ -842,8 +842,8 @@ class TestLaiSheRewardBase(unittest.TestCase):
         )
 
     def test_reported_value_and_rate_match_the_controller_module(self):
-        """Confirms the plumbing, not the math -- NonsmoothLyapunov's value
-        and gradient are already covered by test_acrobot_xk_gated_lyapunov.py.
+        """Pin the plumbing. test_acrobot_xk_gated_lyapunov.py already covers
+        the value and the gradient of NonsmoothLyapunov.
         """
         from controllers.acrobot_gated_lyapunov import (
             AttractiveRegion,
@@ -909,8 +909,9 @@ class TestLaiSheRewardBase(unittest.TestCase):
                     )
 
     def test_lai_she_reuses_the_task_s_own_gains(self):
-        """k_v/k_d/k_p feed NonsmoothLyapunov's gains, same as every other
-        reward_base -- a non-default k_p should change the reward."""
+        """k_v, k_d and k_p feed the gains of NonsmoothLyapunov, as they do for
+        every other reward_base. A non-default k_p changes the reward.
+        """
         default_env = self._env("r1", reward_base="lai_she")
         custom_env = self._env("r1", reward_base="lai_she", k_p=2.0 * DEFAULT_LYAPUNOV_K_P)
         state = np.array([-1.1, 0.4, 1.2, -0.7])

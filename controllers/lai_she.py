@@ -1,22 +1,21 @@
 """Lai--She unified WCLF controller for the Acrobot.
 
-Implements the Acrobot specialization of Lai, She, Yang & Wu,
+This module implements the Acrobot specialization of Lai, She, Yang & Wu,
 "Comprehensive Unified Control Strategy for Underactuated Two-Link
-Manipulators", IEEE TSMC-B 39(2), 2009, equations (20), (25), (36), (41),
-and (46).
+Manipulators", IEEE TSMC-B 39(2), 2009. It covers equations (20), (25), (36),
+(41), and (46).
 
 The paper measures the shoulder from the upward vertical: upright is
-``x=(0, 0, 0, 0)`` and hanging is ``x=(pi, 0, 0, 0)``.  The dedicated
-``acrobot-swingup-wclf`` plant uses these coordinates directly.  An adapter for
-the repository's horizontal-frame ``acrobot-swingup-xk`` plant remains
-available and applies
+``x=(0, 0, 0, 0)`` and hanging is ``x=(pi, 0, 0, 0)``. The dedicated
+``acrobot-swingup-wclf`` plant uses these coordinates directly. An adapter for
+the horizontal-frame ``acrobot-swingup-xk`` plant of this repository stays
+available, and applies
 
     x = [pi/2 - q1, -q2, -qdot1, -qdot2],  tau_q = -tau_x.
 
-Unlike the earlier Lai--She controller, this formulation contains no fuzzy
-logic and no intermediate transition controller.  A single state-dependent
-weak-control Lyapunov function (WCLF) governs swing-up, then a published LQR
-gain takes over on first entry to the attractive area.
+One state-dependent weak-control Lyapunov function (WCLF) governs the whole
+swing-up. A published LQR gain then takes over on first entry to the attractive
+area.
 """
 
 from __future__ import annotations
@@ -226,9 +225,9 @@ class Design:
         """Equation (17)'s region carrying these tolerances.
 
         The region itself lives in :mod:`controllers.acrobot_gated_lyapunov`,
-        which also builds the nonsmooth Lyapunov function on it; its conditions
-        are even in their arguments, so the same object serves this paper frame
-        and the repository's Xin--Kaneda frame unchanged.
+        which also builds the nonsmooth Lyapunov function on it. Its conditions
+        are even in their arguments. One object therefore serves both this paper
+        frame and the Xin--Kaneda frame of this repository, with no change.
         """
         return AttractiveRegion(
             angle_tolerance=self.angle1_tolerance,
@@ -284,9 +283,9 @@ def lqr_solution(
     return a, b, f, p
 
 
-# Equation (75).  Recomputing the CARE from the rounded Table-II inertia gives
-# a gain within 0.2 N.m of these entries; use the explicitly published control
-# law for reproduction rather than silently substituting the rounded rebuild.
+# Equation (75). A CARE solved from the rounded Table-II inertia gives a gain
+# within 0.2 N.m of these entries. To reproduce the paper, use the published
+# control law here, and not the rounded rebuild.
 PUBLISHED_LQR_GAIN = np.array(
     [[-260.559, -104.448, -112.604, -52.944]], dtype=np.float64
 )

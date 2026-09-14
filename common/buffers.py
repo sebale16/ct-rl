@@ -140,10 +140,10 @@ class ReplayBuffer(BaseBuffer):
     failure_reward_rate, failure_remaining_time, s', t, t', dt).
 
     ``done`` is the terminal mask for the learning objective. ``episode_end``
-    records every reset boundary, including time-limit truncations that should
-    continue bootstrapping. ``cap_failure`` identifies cap-triggered terminal
-    rows; its reward-rate and remaining-time fields define the analytical
-    return over the unexecuted portion of the finite episode.
+    records every reset boundary, a time-limit truncation included. Such a
+    truncation continues to bootstrap. ``cap_failure`` marks the terminal rows
+    that a cap triggered. Its reward-rate and remaining-time fields define the
+    analytical return over the part of the finite episode that never runs.
     """
 
     def __init__(
@@ -206,11 +206,11 @@ class ReplayBuffer(BaseBuffer):
         """
         Add a batch of transitions for all envs.
 
-        All inputs are expected shape (n_envs, ...) for obs/action/etc,
-        and (n_envs,) for reward/done/t/next_t and optional annotations.
+        Every observation and action input takes the shape (n_envs, ...).
+        Reward, done, t, next_t and the optional annotations take (n_envs,).
 
-        For compatibility with older callers, ``episode_end`` defaults to
-        ``done`` and the failure annotations default to zero.
+        ``episode_end`` defaults to ``done``, and the failure annotations
+        default to zero. Older callers therefore keep working.
         """
         # Ensure proper shapes for vectorized envs
         obs = np.asarray(obs, dtype=np.float32).reshape((self.n_envs, *self.obs_shape))
@@ -257,9 +257,9 @@ class ReplayBuffer(BaseBuffer):
             failure_remaining_time = failure_remaining_time.reshape(
                 (self.n_envs,)
             )
-        # Form the small duration before narrowing the much larger absolute
-        # timestamps to float32.  For example, float32(20.0) -
-        # float32(19.9995) is not an accurate representation of 0.5 ms.
+        # Form the small duration first, and narrow the much larger absolute
+        # timestamps to float32 after. For example, float32(20.0) -
+        # float32(19.9995) is a poor representation of 0.5 ms.
         t64 = np.asarray(t, dtype=np.float64).reshape((self.n_envs,))
         next_t64 = np.asarray(next_t, dtype=np.float64).reshape((self.n_envs,))
         dt = np.asarray(next_t64 - t64, dtype=np.float32)
@@ -375,8 +375,9 @@ class ReplayBuffer(BaseBuffer):
         dt = self.dt[steps, env_cols]                           # (B, H)
 
         # Step k stays valid while every earlier transition in the window kept
-        # the episode alive and step k did not enter the seam slot. The episode
-        # ending transition itself is a valid target; the step after it is not.
+        # the episode alive, and while step k stays out of the seam slot. The
+        # transition that ends the episode is a valid target. The step after it
+        # is not.
         valid = np.ones((batch, horizon), dtype=np.float32)
         if horizon > 1:
             cont = (

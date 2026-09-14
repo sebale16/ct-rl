@@ -626,18 +626,19 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         # 32-seed analytical rollout) by more than VIOLATION_TOLERANCE
         # outside the LQR set. r1 alone (r0/r1 rows) has no eta and is
         # unaffected. r2 has no discount term, so its bound does not depend
-        # on horizon; r3's does, since its extra +lambda*eta*Vbar term
-        # tightens the bound at lambda=0.5 (h2s) more than at lambda=0.1
-        # (h10s). See docs/reward_shaping_for_acrobot_swingup.md and
+        # on horizon. The bound of r3 does, because its extra
+        # +lambda*eta*Vbar term tightens the bound at lambda=0.5 (h2s) more
+        # than at lambda=0.1 (h10s).
+        # See docs/reward_shaping_for_acrobot_swingup.md and
         # benchmarks/plot_acrobot_xk_r3_eta_sweep.py.
         #
         # The q2dot4pi r3 ladders additionally carry the peak-locality eta
         # (0.18, 0.58, 0.2) that the demonstration-warm-start arms train on:
         # never_enters_lqr_level bounds the ceiling excess by an absolute
         # 1e-3, ~17x the ceiling's own magnitude, which still admits an
-        # r -> 0 spike mid-pump; scaling that tolerance to 10% of |max r1|
-        # keeps the peak on the settled orbit instead. Only this cap has
-        # them, since only it has _xkdemo arms -- hence the per-cap keys.
+        # r -> 0 spike mid-pump. That tolerance scaled to 10% of |max r1|
+        # keeps the peak on the settled orbit. Only this cap carries them,
+        # because only this cap has _xkdemo arms, so the keys are per cap.
         # See docs/acrobot_xk_eta_peak_reward_locality.md.
         expected_sweeps = {
             ("lyapunov", "xk_closed_loop", "r2", "h10s", "q2dot4pi"): {0.1, 0.24, 0.28},
@@ -730,13 +731,13 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
         #
         # All four start the learned temperature at 0.01 rather than the 1.0
         # of the _temp1 ladder they fork, so the four are matched to each
-        # other but not to the existing _xkdemo/_xkdemo20k/_xkdemo100k arms;
-        # a shorter-seeding no-KL control at this temperature would have to be
-        # added before those comparisons mean anything.
+        # other alone, and not to the existing _xkdemo, _xkdemo20k and
+        # _xkdemo100k arms. Those comparisons mean something only after
+        # someone adds a shorter-seeding no-KL control at this temperature.
         #
         # Both discount horizons carry the set.  Each forks its own ladder,
-        # since the peak-locality eta and the discount rate differ between
-        # them -- h2s is eta 0.23 at 0.5 s^-1 where h10s is 0.26 at 0.1.
+        # because the peak-locality eta and the discount rate differ between
+        # them. h2s is eta 0.23 at 0.5 s^-1, and h10s is 0.26 at 0.1.
         arms = {
             "_xkkl": (0, 1.0, "forward"),
             "_xkkl_xkdemo100k": (100_000, 1.0, "forward"),
@@ -754,11 +755,11 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
             "imitation_coef",
             "imitation_direction",
             "imitation_sigma",
-            # Tied to demonstration_steps rather than held fixed -- see the
-            # explicit assertion below.  A seeding length longer than
-            # learning_starts would hand the actor the buffer while the
-            # controller was still driving, and the temperature ran away
-            # (train/alpha reached 1e7) on the rows where the two disagreed.
+            # Tied to demonstration_steps, and not held fixed. See the
+            # explicit assertion below. A seeding length longer than
+            # learning_starts hands the actor the buffer while the controller
+            # still drives. On the rows where the two disagreed, the
+            # temperature ran away and train/alpha reached 1e7.
             "learning_starts",
         }
         for horizon, base_stem in base_stems.items():
@@ -793,7 +794,8 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
                     self.assertNotIn("imitation_sigma", algo)
 
                     # The r3 shaping rate and the critic discount are the same
-                    # physical lambda; CTSAC rejects a mismatch at construction.
+                    # physical lambda. CTSAC rejects a mismatch at
+                    # construction.
                     rate = expected_rates[horizon]
                     self.assertEqual(algo["discount_rate"], rate)
                     self.assertEqual(env["task_kwargs"]["discount_rate"], rate)
@@ -812,13 +814,13 @@ class TestAcrobotXKCTSACConfig(unittest.TestCase):
     def test_annealed_mean_mse_arms_bootstrap_then_release_the_actor(self):
         """The mean-MSE arms share one schedule and one target timescale.
 
-        Both floors anneal over the same 600k window opening at
-        ``learning_starts``, so they reach it at 800k of a 2M run and differ
-        only in where they land -- 0.0 releases the actor entirely, 0.5 keeps
-        the law engaged.  ``tau`` is 1.25e-3 at ``train_freq=1`` so that
-        ``T_target = dt / (tau * updates_per_env_step)`` is 0.80 s, matching
-        every other arm since the dtscale sweep rather than the 0.20 s that
-        tau=5e-3 would give at this update ratio.
+        Both floors anneal over the same 600k window, which opens at
+        ``learning_starts``. They reach the floor at 800k of a 2M run, and they
+        differ in where they land. 0.0 releases the actor entirely, and 0.5
+        keeps the law engaged. ``tau`` is 1.25e-3 at ``train_freq=1``, so
+        ``T_target = dt / (tau * updates_per_env_step)`` is 0.80 s. That matches
+        every other arm since the dtscale sweep. tau=5e-3 gives 0.20 s at this
+        update ratio.
         """
         stem = "_fixed1ms_{h}_temp0p01_xkdot_q2dot4pi_logrecip_xkmse_xkdemo200k_tau1p25e3_"
         cases = (

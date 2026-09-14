@@ -1,43 +1,45 @@
 #!/usr/bin/env python
 """Plot the Lyapunov reward r1 = -V under the analytical controller.
 
-Re-runs the shared evaluation protocol of
-``docs/reward_shaping_for_acrobot_swingup.md`` -- the ``release`` reset, 32
-starts, 20 s, 2 ms control period -- and records
+The script re-runs the shared evaluation protocol of
+``docs/reward_shaping_for_acrobot_swingup.md``. That protocol uses the
+``release`` reset, 32 starts, 20 s, and a 2 ms control period. At every step the
+script records
 
     V(x) = 1/2 Etil^2 + 1/2 k_D qdot2^2 + 1/2 k_P q2^2,   r1 = -V
 
-at every step, then draws the mean across starts with a +-1 standard deviation
-band.  Every episode shares one time grid, so the band is a spread across
-initial conditions at fixed time rather than an average over ragged runs.
+It then draws the mean across starts with a +-1 standard deviation band. Every
+episode shares one time grid, so the band is a spread across initial conditions
+at fixed time, and not an average over ragged runs.
 
-V is drawn on a log axis, where the decay is legible over the three orders of
-magnitude a linear axis compresses; r1 = -V is the same curve mirrored.
+The plot draws V on a log axis, where the decay stays legible over the three
+orders of magnitude that a linear axis compresses. r1 = -V is the same curve
+mirrored.
 
-The Lyapunov levels at which the eq. 74 switching set becomes reachable are
-computed by :func:`lqr_thresholds` but deliberately *not* drawn here: this
-figure is generated at a 0.5 ms hold, where the control period contributes about
-0.02 to that residual against a box of width 0.04, so the run cannot support a
-read-off of when the switch becomes available.  Use a 0.1 ms hold for anything
-that turns on the switching set.
+:func:`lqr_thresholds` computes the Lyapunov levels at which the eq. 74
+switching set becomes reachable. The plot leaves them out on purpose. This
+figure runs at a 0.5 ms hold, where the control period contributes about 0.02 to
+that residual against a box of width 0.04. The run therefore cannot say when the
+switch becomes available. Use a 0.1 ms hold for any work on the switching set.
 
-For reference, the two levels are.  On the target set the shoulder turns back short of upright at
-delta = sqrt(2|Etil| / E_r) and V ~ Etil^2 / 2 there, so setting delta = zeta
-gives
+For reference, here are the two levels. On the target set the shoulder turns
+back short of upright at delta = sqrt(2|Etil| / E_r), and V ~ Etil^2 / 2 there.
+With delta = zeta that gives
 
     V* = zeta^4 E_r^2 / 8
 
-(1.92e-4 at zeta = 0.04, E_r = 24.5).  This is a threshold on the *per-lap
-closest approach*, not a sufficient condition for being inside the set at a
-given instant: V vanishes on the whole homoclinic orbit, hanging included.
+which is 1.92e-4 at zeta = 0.04 and E_r = 24.5. It is a threshold on the
+*per-lap closest approach*. It is not sufficient for membership of the set at a
+given instant, because V vanishes on the whole homoclinic orbit, hanging
+included.
 
     MUJOCO_GL=disable python -m benchmarks.plot_acrobot_xk_baseline_r1
     MUJOCO_GL=disable python -m benchmarks.plot_acrobot_xk_baseline_r1 --validate
 
 ``--validate`` integrates the analytic closed loop from each start out to
-``--validate-horizon`` and prints when V actually crosses V*.  It is a check on
-the tail extrapolation, which underestimates: the decay rate itself decays as
-the lap period grows near the saddle.
+``--validate-horizon``, and prints when V crosses V*. It tests the tail
+extrapolation, which reads low. The decay rate itself decays as the lap period
+grows near the saddle.
 """
 
 import argparse
@@ -62,9 +64,9 @@ from evaluations.acrobot_homoclinic_metrics import (
     inside_tube,
 )
 
-# One series, so no categorical palette is in play: a single accent against
-# recessive ink.  The band is the same hue at low alpha rather than a second
-# color, since it is the same quantity's spread.
+# There is one series, so no categorical palette applies. The plot uses one
+# accent against recessive ink. The band takes the same hue at low alpha, and
+# no second color, because it is the spread of the same quantity.
 ACCENT = "#2b6cb0"
 BAND = "#2b6cb0"
 CAPTURE = "#b7791f"
@@ -76,11 +78,11 @@ MUTED = "#4a5568"
 def lyapunov_series(state, params, gains):
     """``V(x)`` along a trajectory, from raw state in the paper's frame.
 
-    ``q2`` enters **unwrapped**.  2007 §3 takes the underactuated ``q1`` in S^1
-    but the actuated shape variable ``q2`` in R, and that is what makes V
-    penalize winding: the elbow passes ``pi`` during the pump on this plant
-    (max |q2| ~ 3.6 rad), and folding it to (-pi, pi] puts a spurious ~10% rise
-    into an otherwise monotone V.  The vectorized form here agrees with
+    ``q2`` enters **unwrapped**. 2007 §3 takes the underactuated ``q1`` in S^1
+    and the actuated shape variable ``q2`` in R. That is what makes V penalize
+    winding. The elbow passes ``pi`` during the pump on this plant, at a maximum
+    |q2| of about 3.6 rad. A fold to (-pi, pi] then puts a spurious rise of
+    about 10% into an otherwise monotone V. The vectorized form here agrees with
     ``controllers.xin_kaneda.lyapunov``.
     """
     values = np.atleast_2d(np.asarray(state, dtype=np.float64))
@@ -143,9 +145,9 @@ def collect(args):
               flush=True)
     length = min(len(c) for c in curves)
     values = np.stack([c[:length] for c in curves])
-    # V is non-increasing under the exact law; a zero-order hold leaves a
-    # residual that scales with the control period.  Guard the scale of it so a
-    # sign or wrapping error cannot pass unnoticed.
+    # V is non-increasing under the exact law. A zero-order hold leaves a
+    # residual that scales with the control period. Guard the scale of that
+    # residual, so that a sign error or a wrapping error cannot pass unseen.
     excursion = float(np.max(values - np.minimum.accumulate(values, axis=1)))
     tolerance = 10.0 * args.dt * values[:, 0].mean()
     print(f"  V excursion above running min: {excursion:.4f} (tolerance {tolerance:.3f})")
@@ -161,9 +163,9 @@ def collect(args):
 def _set_style():
     """The repo's paper style, inlined.
 
-    ``evaluations.plot_helpers.set_paper_style`` is the house version but it
-    imports seaborn, which is not in this environment; these are the rcParams it
-    would set.
+    ``evaluations.plot_helpers.set_paper_style`` is the house version. It
+    imports seaborn, which this environment lacks. The rcParams below are the
+    ones it sets.
     """
     matplotlib.rcParams.update(
         {
@@ -184,9 +186,8 @@ def _set_style():
 def validate(args, params):
     """Integrate the exact closed loop until V crosses V*, and report the mean.
 
-    Uses continuous feedback rather than the
-    plant's zero-order hold, since over hundreds of seconds the hold residual
-    would otherwise dominate the tail.
+    The function uses continuous feedback, and not the zero-order hold of the
+    plant. Over hundreds of seconds the hold residual dominates the tail.
     """
     from controllers.xin_kaneda import closed_loop
 
@@ -226,7 +227,7 @@ def validate(args, params):
 
 
 def _sci(value, digits=3):
-    """Format as KaTeX-style scientific notation with ``digits`` significant figures."""
+    """Format as KaTeX-style scientific notation, to ``digits`` figures."""
     exponent = int(np.floor(np.log10(abs(value))))
     mantissa = value / 10.0**exponent
     return rf"{mantissa:.{digits - 1}f}\times 10^{{{exponent}}}"
@@ -235,20 +236,20 @@ def _sci(value, digits=3):
 def lqr_thresholds(params, zeta):
     """Lyapunov levels at which the eq. 74 set becomes reachable, both branches.
 
-    Which one applies depends on the sign the energy error approaches from, and
-    they differ by a factor of ~360:
+    The branch that applies depends on the side the energy error comes from.
+    The two levels differ by a factor of about 360:
 
-    * **pass-through** (Etil > 0): the shoulder crosses upright with speed
-      ``qdot1 = sqrt(2 Etil / M11)``, and the residual costs only ``0.1 qdot1``.
-      Setting that to zeta gives ``Etil = 50 M11 zeta^2`` and
+    * **pass-through** (Etil > 0): the shoulder crosses upright at speed
+      ``qdot1 = sqrt(2 Etil / M11)``, and the residual costs ``0.1 qdot1``
+      alone. That set to zeta gives ``Etil = 50 M11 zeta^2`` and
       ``V = 1250 M11^2 zeta^4``.
     * **turning point** (Etil < 0): the shoulder stops short of upright at
-      ``delta = sqrt(2|Etil| / E_r)`` and pays the full angle, giving
+      ``delta = sqrt(2|Etil| / E_r)`` and pays the full angle. That gives
       ``V = zeta^4 E_r^2 / 8``.
 
-    Measured closest approaches sit on whichever branch the run is on, and the
-    ones that come near the box are pass-throughs, so that is the operative
-    level; the turning-point value is the pessimistic bound.
+    A measured closest approach sits on whichever branch the run is on. The
+    approaches that come near the box are pass-throughs, so that is the
+    operative level. The turning-point value is the pessimistic bound.
     """
     m11 = params.a1 + params.a2 + 2.0 * params.a3
     return (
@@ -258,7 +259,9 @@ def lqr_thresholds(params, zeta):
 
 
 def tail_fit(time, mean_value, window):
-    """Exponential fit of the tail; returns ``(tau, intercept)`` for ``V ~ e^{-t/tau}``."""
+    """Exponential fit of the tail. Returns ``(tau, intercept)`` for
+    ``V ~ e^{-t/tau}``.
+    """
     inside = (time >= window[0]) & (time <= window[1])
     slope, intercept = np.polyfit(time[inside], np.log(mean_value[inside]), 1)
     return -1.0 / slope, intercept

@@ -18,12 +18,13 @@ from models.actor_q_critic import ActorQCriticModel
 from models.port_hamiltonian import FlowIntegrationError, integrate_drift
 
 
-#: Which KL the imitation term minimizes.  ``forward`` is KL(pi_E || pi_theta)
-#: with the law read as a point mass, which reduces to the negative
-#: log-likelihood of its action under the policy -- mass-covering, and defined
-#: without a width for the law.  ``reverse`` is KL(pi_theta || pi_E) against the
-#: law smeared into a Gaussian of width ``imitation_sigma`` -- mode-seeking, and
-#: it re-weights the policy's own entropy on top of the SAC term.
+#: Which KL the imitation term minimizes. ``forward`` is KL(pi_E || pi_theta),
+#: with the law read as a point mass. It reduces to the negative
+#: log-likelihood of the law's action under the policy. It is mass-covering,
+#: and it needs no width for the law. ``reverse`` is KL(pi_theta || pi_E)
+#: against the law smeared into a Gaussian of width ``imitation_sigma``. It is
+#: mode-seeking, and it re-weights the policy's own entropy on top of the SAC
+#: term.
 IMITATION_DIRECTIONS = ("forward", "reverse")
 IMITATION_LOSS_TYPES = ("kl", "mean_mse")
 
@@ -31,10 +32,10 @@ IMITATION_LOSS_TYPES = ("kl", "mean_mse")
 class ModelBasedTargetNumericalError(RuntimeError):
     """A typed CT-SAC critic-target numerical failure.
 
-    The model-based guard catches this type only around its model branch; a
-    non-finite model-free anchor still propagates. Arbitrary ``RuntimeError``
-    instances remain distinct, so an OOM or programming error cannot be
-    mistaken for learned-model divergence.
+    The model-based guard catches this type around its model branch alone. A
+    non-finite model-free anchor still propagates. Any other ``RuntimeError``
+    stays distinct, so nothing reads an out-of-memory error or a programming
+    error as learned-model divergence.
     """
 
 
@@ -255,38 +256,38 @@ class CTSAC(OffPolicyAlgorithm):
         q_V(x,a) = r + (L^a V)(x) - beta V(x)
     where (L^a V) is the controlled generator. By default this is estimated
     model-free by a finite difference over the sampled next state (Eq. 166).
-    When ``use_model_based_q=True`` and a ``dynamics_model`` is supplied, the
-    generator is evaluated analytically from a port-Hamiltonian drift b(x,a):
+    With ``use_model_based_q=True`` and a supplied ``dynamics_model``, the
+    generator comes analytically from a port-Hamiltonian drift b(x,a):
         (L^a V) = b . grad V + 1/2 Tr(sigma sigma^T Hess V)
     which removes the dependence on the sampled next state.
 
-    ``demonstration_policy``, if set, replaces the base class's random-action
-    warmup with a fixed ``act(obs) -> action`` law for the first
-    ``demonstration_steps`` calls to ``_sample_action`` (default: matching
-    ``learning_starts``), so the replay buffer starts from states that law
-    actually reaches -- e.g. the analytical Xin-Kaneda controller for
-    acrobot-swingup-xk (``benchmarks/run_ct_rl.py:_build_demonstration_policy``,
-    selected via ``algo_demonstration_controller=xin_kaneda`` in the
-    hyperparameter table).
+    ``demonstration_policy``, when set, replaces the random-action warmup of
+    the base class with a fixed ``act(obs) -> action`` law. It covers the first
+    ``demonstration_steps`` calls to ``_sample_action``, and the default matches
+    ``learning_starts``. The replay buffer then starts from states that the law
+    reaches. One example is the analytical Xin-Kaneda controller for
+    acrobot-swingup-xk, built in
+    ``benchmarks/run_ct_rl.py:_build_demonstration_policy`` and selected with
+    ``algo_demonstration_controller=xin_kaneda`` in the hyperparameter table.
 
     ``imitation_coef > 0`` adds an imitation loss between the policy and that
-    same control law, evaluated on the replayed states of every gradient step
-    rather than only during the warm start.  The default is the historical KL:
+    same control law. It runs on the replayed states of every gradient step,
+    and not during the warm start alone. The default is the historical KL:
 
         actor_loss = alpha log pi - Q + imitation_coef * KL(pi_theta, pi_E)
 
-    with :data:`IMITATION_DIRECTIONS` choosing which KL.  Alternatively,
-    ``imitation_loss_type="mean_mse"`` penalizes only the squared gap between
-    the actor's deterministic mean action and the law.  It therefore leaves
-    the actor's exploration variance to SAC.  ``imitation_decay_steps > 0``
-    linearly anneals the coefficient to zero over that many environment
-    transitions, starting at the first actor update after ``learning_starts``.
+    :data:`IMITATION_DIRECTIONS` chooses which KL.
+    ``imitation_loss_type="mean_mse"`` penalizes the squared gap between the
+    actor's deterministic mean action and the law alone. It therefore leaves
+    the actor's exploration variance to SAC. ``imitation_decay_steps > 0``
+    anneals the coefficient linearly to zero over that many environment
+    transitions. The anneal starts at the first actor update after
+    ``learning_starts``.
 
-    The law is read from ``imitation_policy``, defaulting to
-    ``demonstration_policy``, and must offer a batched ``actions(obs)``.
-    Seeding and imitation are independent knobs: ``demonstration_steps=0``
-    with ``imitation_coef>0`` distills the law without ever handing it the
-    environment.
+    The law comes from ``imitation_policy``, which defaults to
+    ``demonstration_policy``, and it must offer a batched ``actions(obs)``.
+    Seeding and imitation are independent knobs. ``demonstration_steps=0`` with
+    ``imitation_coef>0`` distils the law and never hands it the environment.
     """
 
     def __init__(
@@ -338,48 +339,49 @@ class CTSAC(OffPolicyAlgorithm):
         target_reanchor: bool = False,
         target_reanchor_gate_rho: float = 0.0,
         *,
-        # Physical-time target semantics. ``gamma`` remains the legacy discount
-        # per target-reference interval. New experiments should instead provide
+        # Physical-time target semantics. ``gamma`` stays the legacy discount
+        # per target-reference interval. For a new experiment, give
         # ``discount_rate`` in s^-1 and an explicit ``target_reference_dt`` in
-        # seconds so neither quantity depends on a simulator's native control
-        # timestep. ``reward_is_rate`` converts a physical reward rate to the
-        # reference-interval contribution used by the CT-SAC critic.
+        # seconds. Neither quantity then depends on the native control timestep
+        # of a simulator. ``reward_is_rate`` converts a physical reward rate to
+        # the reference-interval contribution that the CT-SAC critic reads.
         discount_rate: Optional[float] = None,
         target_reference_dt: Optional[float] = None,
         reward_is_rate: bool = False,
-        # Demonstration warm start: replaces the random-action warmup with a
-        # fixed act(obs) -> action law (e.g. an analytical controller) so the
-        # replay buffer starts from states that law actually reaches.
+        # Demonstration warm start. It replaces the random-action warmup with
+        # a fixed act(obs) -> action law, an analytical controller for example.
+        # The replay buffer then starts from states that the law reaches.
         demonstration_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         demonstration_steps: Optional[int] = None,
-        # Imitation: a KL or mean-action MSE actor-loss term pulling pi_theta
+        # Imitation. A KL or mean-action MSE actor-loss term pulls pi_theta
         # towards a known control law on replayed states.
-        # Off at imitation_coef=0.
+        # imitation_coef=0 turns it off.
         imitation_coef: float = 0.0,
         imitation_direction: str = "forward",
         imitation_sigma: float = 0.1,
         imitation_loss_type: str = "kl",
         imitation_decay_steps: int = 0,
         imitation_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-        # Optional linear anneal of the imitation weight, so the law can guide
-        # the actor early and then hand back control.  ``imitation_coef`` is the
-        # starting weight and ``imitation_coef_final`` the one reached after
-        # ``imitation_anneal_steps`` environment steps of training (measured
-        # from ``learning_starts``, i.e. from when the actor first updates, not
-        # from step 0 -- a seeded run spends its whole warm start with no actor
-        # gradient at all).  Leaving ``imitation_coef_final`` unset keeps the
-        # weight constant, as every row that predates this did.
+        # Optional linear anneal of the imitation weight. The law then guides
+        # the actor early and hands control back later. ``imitation_coef`` is
+        # the starting weight. ``imitation_coef_final`` is the weight after
+        # ``imitation_anneal_steps`` environment steps of training. The count
+        # starts at ``learning_starts``, at the first actor update. A seeded run
+        # spends its whole warm start with no actor gradient, so a count from
+        # step 0 misstates the schedule. An unset ``imitation_coef_final``
+        # holds the weight constant, as every earlier row does.
         imitation_coef_final: Optional[float] = None,
         imitation_anneal_steps: int = 0,
-        # Global-norm clip on the critic gradient. ``0`` (the default) leaves the
-        # update unclipped, preserving the historical behaviour of every row that
-        # does not set it. The pre-clip norm is logged either way, so a run can
-        # measure whether the critic gradient is running away before choosing a
+        # Global-norm clip on the critic gradient. ``0`` is the default, and
+        # leaves the update unclipped. Every row that sets nothing here keeps
+        # its historical behavior. The log carries the pre-clip norm either way,
+        # so a run can measure a runaway critic gradient before it picks a
         # bound.
         critic_grad_norm: float = 0.0,
-        # Lower bound on the learned entropy temperature. ``0`` (the default)
-        # leaves the dual unbounded, preserving the behaviour of every row that
-        # does not set it. See the clamp site in ``train`` for why it matters.
+        # Lower bound on the learned entropy temperature. ``0`` is the default,
+        # and leaves the dual unbounded. Every row that sets nothing here keeps
+        # its historical behavior. The clamp site in ``train`` explains the
+        # reason for the bound.
         alpha_min: float = 0.0,
     ) -> None:
         if gamma is not None and discount_rate is not None:
@@ -442,11 +444,11 @@ class CTSAC(OffPolicyAlgorithm):
                 f"{target_reference_dt!r}"
             )
 
-        # ``dt_default`` is retained as a compatibility alias because the
-        # model-based/re-anchored target paths already use it as their nominal
-        # integration duration. It now means the explicit target reference,
-        # never an implicitly re-read simulator clock when the new argument is
-        # supplied.
+        # ``dt_default`` stays as a compatibility alias, because the
+        # model-based and re-anchored target paths already read it as their
+        # nominal integration duration. It now means the explicit target
+        # reference. Once the caller supplies the new argument, it never means
+        # a simulator clock read again.
         self.target_reference_dt = reference_dt
         self.dt_default = reference_dt
         self.time_rescale = 1.0 / reference_dt
@@ -745,16 +747,16 @@ class CTSAC(OffPolicyAlgorithm):
                 "model_v_net_arch."
             )
 
-        # Demonstration warm start: for the first `demonstration_steps` calls
-        # to _sample_action (default: learning_starts), _sample_action defers
-        # to `demonstration_policy` instead of the base class's random-action
-        # warmup, so the replay buffer starts from states the demonstrator
-        # actually reaches rather than a uniform random walk's states.
-        # Gradient updates are unaffected -- train() still only begins once
-        # num_timesteps > learning_starts, per the base class -- so
-        # demonstration_steps can be set independently (e.g. shorter, to hand
-        # off to the untrained policy sooner, or longer, to keep imitating
-        # while early gradient updates run against that data).
+        # Demonstration warm start. For the first `demonstration_steps` calls
+        # to _sample_action, the default being learning_starts, _sample_action
+        # defers to `demonstration_policy` in place of the random-action warmup
+        # of the base class. The replay buffer then starts from states that the
+        # demonstrator reaches, and not from the states of a uniform random
+        # walk. Gradient updates stay as they are, because train() still begins
+        # once num_timesteps > learning_starts, per the base class. A caller can
+        # therefore set demonstration_steps on its own. A shorter value hands
+        # off to the untrained policy sooner. A longer value keeps the law in
+        # place while the early gradient updates run against that data.
         self.demonstration_policy = demonstration_policy
         self.demonstration_steps = (
             self.learning_starts
@@ -768,10 +770,10 @@ class CTSAC(OffPolicyAlgorithm):
             )
 
         # Imitation term between the policy and an analytical control law on
-        # replayed states. Unlike the demonstration warm start -- which only
-        # decides which states get written into the buffer -- this shapes actor
-        # gradients. It lasts for the whole run by default or can be annealed;
-        # seeding and imitation remain independent.
+        # replayed states. It shapes actor gradients. The demonstration warm
+        # start above chooses which states reach the buffer, and nothing more.
+        # The term runs for the whole run by default, and a caller can anneal
+        # it. Seeding and imitation stay independent.
         self.imitation_coef = float(imitation_coef)
         if not np.isfinite(self.imitation_coef) or self.imitation_coef < 0.0:
             raise ValueError(
@@ -838,10 +840,10 @@ class CTSAC(OffPolicyAlgorithm):
                 )
 
         # ``imitation_decay_steps`` is the decay-to-zero spelling of the same
-        # schedule.  Normalize it onto the (final, steps) pair here so
-        # _current_imitation_coef has one code path and the two spellings can
-        # never describe different curves.  Setting both is only allowed when
-        # they agree, since silently honouring one would misreport the other.
+        # schedule. Normalize it onto the (final, steps) pair here.
+        # _current_imitation_coef then has one code path, and the two spellings
+        # can never describe different curves. Both together are legal only
+        # when they agree, because one honored spelling misreports the other.
         if self.imitation_decay_steps > 0:
             implied = (0.0, self.imitation_decay_steps)
             if self.imitation_coef_final is None:
@@ -865,8 +867,8 @@ class CTSAC(OffPolicyAlgorithm):
                     "imitation_coef > 0 needs a control law to imitate; pass "
                     "imitation_policy, or a demonstration_policy to reuse."
                 )
-            # The term is evaluated once per gradient step on a whole minibatch,
-            # so a per-state Python call is not affordable at training rates.
+            # The term runs once per gradient step on a whole minibatch. A
+            # per-state Python call is too slow at training rates.
             batched = getattr(self.imitation_policy, "actions", None)
             if not callable(batched):
                 raise ValueError(
@@ -887,10 +889,11 @@ class CTSAC(OffPolicyAlgorithm):
     def _validate_reward_discount_rate(self, env) -> None:
         """Require an r3 task's shaping rate to match the critic discount.
 
-        The same physical ``lambda`` appears in both the r3 reward and the
-        Bellman target.  A mismatch silently destroys the advertised
-        discount-consistent potential transformation, so reject it through
-        common vector/Gym wrapper layers at construction time.
+        The same physical ``lambda`` appears in the r3 reward and in the
+        Bellman target. A mismatch destroys the discount-consistent potential
+        transformation, and reports nothing. The method therefore rejects a
+        mismatch at construction time, through the common vector and Gym
+        wrapper layers.
         """
         pending = [env]
         seen = set()
@@ -1268,10 +1271,10 @@ class CTSAC(OffPolicyAlgorithm):
     def _sample_action(self, obs: np.ndarray) -> np.ndarray:
         """Defer to ``demonstration_policy`` during the demonstration warm start.
 
-        Falls through to the base class (random actions before
-        ``learning_starts``, the trained policy after) once
-        ``demonstration_policy`` is unset or ``num_timesteps`` reaches
-        ``demonstration_steps``.
+        The method falls through to the base class once
+        ``demonstration_policy`` is unset, or once ``num_timesteps`` reaches
+        ``demonstration_steps``. The base class returns random actions before
+        ``learning_starts``, and the trained policy after it.
         """
         if (
             self.demonstration_policy is None
@@ -1359,15 +1362,15 @@ class CTSAC(OffPolicyAlgorithm):
                 self.alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 self.alpha_optimizer.step()
-                # Anti-windup on the entropy dual. While the entropy constraint
-                # is slack the dual correctly drives alpha toward zero, and
-                # nothing stops it: measured runs reach 1e-17, from which
-                # climbing back to a useful 1e-2 costs ~1e5 Adam steps at this
-                # learning rate. If the constraint later becomes active -- as it
-                # does once an imitation term presses actions toward the tanh
-                # boundary -- the multiplier has no authority left when it is
-                # finally needed. Flooring log_alpha keeps that recovery within
-                # ~1e4 steps. Off at alpha_min=0.0.
+                # Anti-windup on the entropy dual. While the entropy
+                # constraint is slack, the dual correctly drives alpha toward
+                # zero, and nothing stops it. Measured runs reach 1e-17. A climb
+                # back to a useful 1e-2 from there costs about 1e5 Adam steps at
+                # this learning rate. The constraint becomes active again once
+                # an imitation term presses actions toward the tanh boundary.
+                # The multiplier then has no authority left at the moment it is
+                # needed. A floor on log_alpha holds that recovery to about 1e4
+                # steps. alpha_min=0.0 turns the floor off.
                 if self._log_alpha_min is not None:
                     with th.no_grad():
                         self.log_alpha.clamp_(min=self._log_alpha_min)
@@ -1504,18 +1507,19 @@ class CTSAC(OffPolicyAlgorithm):
 
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
-            # Report the pre-clip critic gradient norm on every row, clipped or
-            # not: it is what separates a diverging critic from a merely
-            # large-valued one, and an unclipped run needs it to choose a bound.
+            # Report the pre-clip critic gradient norm on every row, clipped
+            # or unclipped. That norm separates a diverging critic from one
+            # with merely large values, and an unclipped run needs it to pick
+            # a bound.
             if self.critic_grad_norm > 0.0:
                 critic_grad_norm = th.nn.utils.clip_grad_norm_(
                     self.model.critic_parameters, self.critic_grad_norm
                 )
             else:
-                # Measurement only -- deliberately not routed through
-                # clip_grad_norm_, whose clip coefficient is inf/inf = NaN at an
-                # infinite max_norm once the norm itself goes non-finite, which
-                # would rescale the very gradients this branch must leave alone.
+                # Measurement alone. This path avoids clip_grad_norm_ on
+                # purpose. At an infinite max_norm, once the norm itself goes
+                # non-finite, its clip coefficient is inf/inf = NaN. That
+                # rescales the gradients this branch must leave alone.
                 grads = [
                     p.grad.detach()
                     for p in self.model.critic_parameters
@@ -1541,9 +1545,9 @@ class CTSAC(OffPolicyAlgorithm):
                 self._entropy_price(alpha_tensor) * log_prob_pi - q_values_pi
             ).mean()
 
-            # Log the coefficient unconditionally so a schedule that has
-            # reached zero is still visible in the run's history, but skip the
-            # expert evaluation itself once it can no longer move the actor.
+            # Log the coefficient on every step, so a schedule that reached
+            # zero stays visible in the run history. Skip the expert evaluation
+            # itself once the coefficient can no longer move the actor.
             imitation_coef = self._current_imitation_coef()
             self.logger.record("train/imitation_coef", imitation_coef)
             if self._imitation_expert is not None and imitation_coef > 0.0:
@@ -1573,17 +1577,17 @@ class CTSAC(OffPolicyAlgorithm):
     def _current_imitation_coef(self) -> float:
         """Imitation weight for this update, after any anneal.
 
-        One schedule serves both spellings.  ``imitation_coef_final`` /
-        ``imitation_anneal_steps`` anneal linearly to an arbitrary floor;
-        ``imitation_decay_steps`` is the special case of that floor being zero
-        and is normalized onto the same pair in ``__init__``, so there is a
-        single code path and the two can never disagree.
+        One schedule serves both spellings. ``imitation_coef_final`` with
+        ``imitation_anneal_steps`` anneals linearly to any floor.
+        ``imitation_decay_steps`` is the special case of a zero floor, and
+        ``__init__`` normalizes it onto the same pair. There is therefore one
+        code path, and the two spellings can never disagree.
 
-        The window opens at ``learning_starts`` rather than at reset, so a
-        demonstration warm start does not silently consume it before the actor
-        has taken a single gradient step.  Reading the clock off
-        ``num_timesteps`` -- which the checkpoint carries -- keeps the schedule
-        continuous across a resumed chunk instead of restarting it.
+        The window opens at ``learning_starts``, and not at reset. A
+        demonstration warm start therefore never consumes the window before the
+        actor takes its first gradient step. The clock comes from
+        ``num_timesteps``, which the checkpoint carries, so the schedule runs on
+        across a resumed chunk.
         """
         if self.imitation_coef_final is None or self.imitation_anneal_steps <= 0:
             return self.imitation_coef
@@ -1605,28 +1609,28 @@ class CTSAC(OffPolicyAlgorithm):
 
         ``forward`` reads the law as a point mass a*(x), so
         ``KL(pi_E || pi_theta) = -log pi_theta(a*(x) | x)`` up to a constant in
-        theta: the policy's own density at the law's action, tanh correction
-        included.  ``reverse`` smears the law into ``N(a*, sigma^2 I)`` and takes
-        ``KL(pi_theta || pi_E) = E_pi[log pi_theta(a)] + E_pi[|a - a*|^2] /
-        (2 sigma^2)``, again up to a constant, differentiated through the same
-        reparameterized sample the SAC term uses.
+        theta. That is the policy's own density at the law's action, with the
+        tanh correction. ``reverse`` smears the law into ``N(a*, sigma^2 I)``
+        and takes ``KL(pi_theta || pi_E) = E_pi[log pi_theta(a)] +
+        E_pi[|a - a*|^2] / (2 sigma^2)``, again up to a constant. It
+        differentiates through the same reparameterized sample as the SAC term.
 
         ``mean_mse`` compares the actor's deterministic, tanh-squashed mean
-        action with the law.  It does not depend on the actor's log standard
-        deviation, leaving SAC alone to choose the exploration entropy.
+        action with the law. It reads no log standard deviation from the actor,
+        so SAC alone chooses the exploration entropy.
 
-        A control law need not be defined everywhere the replay buffer has been
-        -- the Xin-Kaneda law is singular where ``k_D M11 + (E - E_r) det M``
-        vanishes -- so rows the law cannot score are dropped and the remainder
-        averaged.  ``None`` means the whole minibatch was undefined and the
-        actor update should carry no imitation gradient at all.
+        A control law can be undefined at states the replay buffer holds. The
+        Xin-Kaneda law is singular where ``k_D M11 + (E - E_r) det M`` vanishes.
+        This method therefore drops the rows that the law cannot score, and
+        averages the rest. ``None`` says that the whole minibatch was undefined,
+        and that the actor update must carry no imitation gradient.
         """
         obs_np = obs.detach().cpu().numpy()
         expert_np = np.asarray(self._imitation_expert(obs_np), dtype=np.float32)
         expert = th.as_tensor(
             expert_np, dtype=actions_pi.dtype, device=actions_pi.device
         )
-        if expert.ndim == 1:  # a scalar-action law may drop the trailing axis
+        if expert.ndim == 1:  # a scalar-action law can drop the trailing axis
             expert = expert.unsqueeze(-1)
         if expert.shape != actions_pi.shape:
             raise ValueError(
@@ -1674,12 +1678,12 @@ class CTSAC(OffPolicyAlgorithm):
     ) -> th.Tensor:
         """Build one target batch without bootstrapping through cap failures.
 
-        Ordinary rows retain the configured model-free/model-based target.
-        Cap rows take a separate analytical route over the unexecuted episode
-        remainder and are never passed through a learned endpoint value or
-        dynamics target.  Splitting before target evaluation is important:
-        merely overwriting afterward would still let a non-finite learned
-        terminal value poison the batch.
+        Ordinary rows keep the configured model-free or model-based target.
+        Cap rows take a separate analytical route over the part of the episode
+        that never runs. They never pass through a learned endpoint value or a
+        dynamics target. The split happens before the target evaluation, on
+        purpose. An overwrite afterward still lets a non-finite learned terminal
+        value poison the batch.
         """
         cap_mask = batch.cap_failures.reshape(-1) > 0.5
         regular_mask = ~cap_mask
@@ -1722,10 +1726,10 @@ class CTSAC(OffPolicyAlgorithm):
                     regular_target = self._model_based_target(
                         obs, actions, next_obs, rewards, dones, dt, alpha_tensor
                     )
-                # Each model-based construction performs one aggregate finite
-                # check and diagnoses the first bad component only on failure.
-                # There is deliberately no model-free fallback outside the
-                # explicit, separately-labeled guard mode (target_guard_*).
+                # Each model-based construction runs one aggregate finite
+                # test, and names the first bad component on failure alone.
+                # Outside the explicit guard mode (target_guard_*) there is no
+                # model-free fallback, on purpose.
             else:
                 regular_target = self._finite_difference_target(
                     obs, next_obs, rewards, dones, dt, alpha_tensor
@@ -1749,21 +1753,22 @@ class CTSAC(OffPolicyAlgorithm):
     ) -> th.Tensor:
         r"""Analytical cap target over the unexecuted episode remainder.
 
-        For reference interval ``T``, realized duration ``h``, physical
-        discount rate ``lambda``, remaining time ``R`` and the configured
-        reward's finite lower envelope ``r_F``, the frozen absorbing value is
+        Write ``T`` for the reference interval, ``h`` for the realized
+        duration, ``lambda`` for the physical discount rate, and ``R`` for the
+        remaining time. Write ``r_F`` for the finite lower envelope of the
+        configured reward. The frozen absorbing value is then
 
         ``G_F = r_F (1-exp(-lambda R))/lambda``
 
-        (or ``r_F R`` at zero discount).  It replaces the learned ``V(s')`` in
-        the CT finite-difference target.  At the regular ``h == T`` interval,
-        the current-value anchor cancels exactly:
+        At zero discount it is ``r_F R``. It replaces the learned ``V(s')`` in
+        the CT finite-difference target. At the regular ``h == T`` interval, the
+        current-value anchor cancels exactly:
 
         ``y_F = T r_F + exp(-lambda T) G_F``.
 
-        The lower envelope is both the emitted reward on the realized cap
-        interval and the rate frozen over the unexecuted remainder.  No dummy
-        absorbing transitions are inserted in replay.
+        The lower envelope serves twice. It is the emitted reward on the
+        realized cap interval, and it is the rate frozen over the remainder that
+        never runs. Replay holds no dummy absorbing transitions.
         """
         with th.no_grad():
             dt_seconds = _duration_column(dt, rewards, name="dt")
@@ -1805,8 +1810,8 @@ class CTSAC(OffPolicyAlgorithm):
                 future[nominal] = gamma_dt[nominal] * continuation[nominal]
             irregular = ~nominal
             if bool(th.any(irregular)):
-                # V(s) is the existing CT re-anchor for h != T.  It is not a
-                # learned terminal bootstrap; the endpoint is still G_F.
+                # V(s) is the existing CT re-anchor for h != T. It is a
+                # re-anchor alone, and the endpoint stays G_F.
                 value_current = self._state_value(
                     obs[irregular], alpha_tensor
                 )
@@ -1903,19 +1908,20 @@ class CTSAC(OffPolicyAlgorithm):
         """``alpha`` converted to one target-reference interval.
 
         The soft Bellman target accumulates reward and entropy over the same
-        interval, so both enter as amounts: ``T r + T alpha H``.  A reward
-        exposed as a physical rate already gets its ``T`` from
-        ``_target_reward_term``; ``alpha`` is the matching price per second and
-        needs the same factor.  Without it the entropy term is over-weighted by
-        ``1/T`` -- a thousandfold at a 1 ms control step -- which is why the
-        temperatures that leave the critic inside its physically admissible
-        range here are ``~2e-4``, exactly a conventional ``0.2`` divided by
-        ``T``.  Above ``alpha ~ 0.0138`` the ``alpha log pi`` term, amplified by
-        ``1/(1 - exp(-lambda T))``, pushes ``|Q|`` past the range the reward can
-        physically produce, whatever the discount horizon.
+        interval, so both enter as amounts: ``T r + T alpha H``. A reward
+        exposed as a physical rate already takes its ``T`` from
+        ``_target_reward_term``. ``alpha`` is the matching price per second, and
+        needs the same factor. Without that factor the entropy term carries
+        ``1/T`` too much weight, a thousandfold at a 1 ms control step. That is
+        why the temperatures that hold the critic inside its physically
+        admissible range here are about ``2e-4``, exactly a conventional
+        ``0.2`` divided by ``T``. Above ``alpha ~ 0.0138`` the ``alpha log pi``
+        term carries an amplification of ``1/(1 - exp(-lambda T))``. It pushes
+        ``|Q|`` past the range that the reward can physically produce, at any
+        discount horizon.
 
-        Environments whose reward is already an interval amount are left alone:
-        there both terms are per-interval and the pair is already consistent.
+        An environment whose reward is already an interval amount stays as it
+        is. Both terms are then per-interval, and the pair is consistent.
         """
         if not self.reward_is_rate:
             return alpha_tensor
@@ -1924,9 +1930,9 @@ class CTSAC(OffPolicyAlgorithm):
     def _target_reward_term(self, rewards: th.Tensor) -> th.Tensor:
         """Convert configured rewards to one target-reference-interval.
 
-        Historical environments expose a reward already normalized per
-        reference interval. Acrobot-XK explicitly exposes a physical reward
-        rate, for which the CT target requires multiplication by ``T``.
+        A historical environment exposes a reward already normalized per
+        reference interval. Acrobot-XK exposes a physical reward rate, and the
+        CT target multiplies that rate by ``T``.
         """
         return (
             rewards * self.target_reference_dt
@@ -1939,9 +1945,9 @@ class CTSAC(OffPolicyAlgorithm):
     ) -> th.Tensor:
         """Finite-difference target from already paired state-value reads.
 
-        The re-anchor gate uses this path so its model target and model-free
-        anchor share the exact same ``V_cur`` rather than performing a second
-        stochastic value read.  Callers are expected to hold ``no_grad``.
+        The re-anchor gate uses this path, so its model target and model-free
+        anchor share one ``V_cur``. There is no second stochastic value read.
+        The caller must hold ``no_grad``.
         """
         dt_seconds = _duration_column(dt, V_cur, name="dt")
         if bool(th.any(dt_seconds <= 0.0)):
@@ -1952,11 +1958,11 @@ class CTSAC(OffPolicyAlgorithm):
         discount_log = -self.discount_rate * dt_seconds
         gamma_dt = th.exp(discount_log)
 
-        # Evaluate the difference as delta-V plus expm1's accurate discount
-        # correction. This avoids subtracting nearly equal values when dt is
-        # very small. For nominal rows use the algebraically reduced expression
-        # directly, eliminating both the current-value sample and roundoff from
-        # subtracting and re-adding it.
+        # Evaluate the difference as delta-V plus the accurate discount
+        # correction from expm1. That path avoids a subtraction of nearly equal
+        # values at a very small dt. For nominal rows, use the algebraically
+        # reduced expression directly. It drops the current-value sample, and
+        # the roundoff from a subtraction and a re-addition of it.
         value_delta = V_next - V_cur
         discount_delta = th.expm1(discount_log)
         fraction = (value_delta + discount_delta * V_next) / dt_ratio
@@ -1996,33 +2002,36 @@ class CTSAC(OffPolicyAlgorithm):
         self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
         check: bool = True,
     ) -> th.Tensor:
-        """Model-based target: the generator is evaluated analytically from the
-        port-Hamiltonian drift b(x,a), so no sampled next state is required.
+        """Model-based target. The generator comes analytically from the
+        port-Hamiltonian drift b(x,a), so the target needs no sampled next
+        state.
 
-          (L^a V - beta V) ~ dt_default * b . grad V - beta V   (rescaled-time
-          convention matching the finite-difference target; see
-          docs/port_hamiltonian_ct_sac.md, sec 2.2)
+          (L^a V - beta V) ~ dt_default * b . grad V - beta V
 
-        When ``generator_gate_scale > 0`` the analytic drift is blended
-        per-component with the realized drift ``(x' - x)/dt``: a gate
+        That is the rescaled-time convention of the finite-difference target.
+        See docs/port_hamiltonian_ct_sac.md, sec 2.2.
+
+        With ``generator_gate_scale > 0``, the target blends the analytic drift
+        per component with the realized drift ``(x' - x)/dt``. The gate
         ``g_i = exp(-|b_i * dt| / generator_gate_scale)`` trusts the analytic
-        drift only where the effective step ``|b_i * dt|`` is small (the regime
-        where the first-order generator is valid), and falls back to the data
-        elsewhere (e.g. stiff contact coordinates). g=1 everywhere recovers the
-        pure generator; g=0 everywhere is a first-order finite difference.
+        drift where the effective step ``|b_i * dt|`` is small, which is the
+        regime where the first-order generator holds. Elsewhere it falls back to
+        the data, at a stiff contact coordinate for example. ``g=1`` everywhere
+        recovers the pure generator. ``g=0`` everywhere is a first-order finite
+        difference.
 
-        With sigma != 0 (human input), the diffusion term
-          1/2 Tr(sigma sigma^T Hess V)
-        is added via Hessian-vector products.
+        With sigma != 0, from a human input, Hessian-vector products add the
+        diffusion term
+          1/2 Tr(sigma sigma^T Hess V).
 
-        When ``generator_substeps >= 1`` the first-order autograd term is replaced
-        by a sub-step quadrature: integrate the model over the nominal interval
-        with the same finite-duration flow routine used by dynamics fitting and
-        read the value change directly from the V-head endpoints,
-          lf = (V(x_hat) - V(x)) - beta*V(x). This is autograd-free and captures
-        curvature the first-order term drops. ``m=1`` is a single Euler step only
-        when no finer dynamics integration step applies. See
-        docs/ct_sac_substep_quadrature.md.
+        With ``generator_substeps >= 1``, a sub-step quadrature replaces the
+        first-order autograd term. It integrates the model over the nominal
+        interval, with the same finite-duration flow routine as the dynamics
+        fit. It then reads the value change from the V-head endpoints,
+          lf = (V(x_hat) - V(x)) - beta*V(x). That route uses no autograd, and
+        it keeps the curvature that the first-order term drops. ``m=1`` is a
+        single Euler step only when no finer dynamics integration step applies.
+        See docs/ct_sac_substep_quadrature.md.
         """
         if self.generator_substeps >= 1:
             if self.target_reanchor:
@@ -2099,19 +2108,20 @@ class CTSAC(OffPolicyAlgorithm):
     ) -> th.Tensor:
         """Sub-step quadrature generator target (``generator_substeps = m``).
 
-        The drift-induced value change over the nominal interval is the integral
-        of the rate along the model orbit,
-          V(x') - V(x) = integral_0^dt_default (L^a V)(x(s)) ds,
-        which the first-order term dt_default*(b.grad V) samples at one point. Here
-        the model is integrated with explicit-Euler steps no larger than
-        min(dt_default/m, dynamics_integration_step) when the latter is known. The
-        V-head is read at the rolled endpoint and the value change is taken directly:
+        The drift-induced value change over the nominal interval is the
+        integral of the rate along the model orbit:
+          V(x') - V(x) = integral_0^dt_default (L^a V)(x(s)) ds.
+        The first-order term dt_default*(b.grad V) samples that integral at one
+        point. Here the method integrates the model with explicit-Euler steps no
+        larger than min(dt_default/m, dynamics_integration_step), when the
+        latter is known. It reads the V-head at the rolled endpoint and takes
+        the value change directly:
           lf = (V(x_hat) - V(x)) - beta*V(x),  target = r_T + V(x) + lf.
-        No autograd / gradient is used; the value gradient and its curvature enter
-        through the finite difference of the (clean) V-head over the predicted
-        states. Larger m requests a finer integration; an even finer exposed
-        physics step takes precedence. The discount is kept as the single
-        -beta*V(x) lump, matching the first-order target.
+        The path uses no autograd and no gradient. The value gradient and its
+        curvature enter through the finite difference of the clean V-head over
+        the predicted states. A larger m asks for a finer integration, and an
+        even finer exposed physics step wins. The discount stays one
+        -beta*V(x) lump, as in the first-order target.
         """
         with th.no_grad():
             flow_args = (
@@ -2188,18 +2198,18 @@ class CTSAC(OffPolicyAlgorithm):
         self, obs, actions, next_obs, rewards, dones, dt, alpha_tensor,
         check: bool = True,
     ) -> th.Tensor:
-        """Re-anchored quadrature target -- the EXPLICIT ``target_reanchor``
-        mode (off by default).
+        """Re-anchored quadrature target, the explicit ``target_reanchor`` mode.
+
+        The mode is off by default.
 
         This target uses the sub-step quadrature formula with an endpoint from
         ``reanchored_endpoint``. The observed x' supplies the measured segment,
-        and the model covers the duration mismatch |dt_default - dt|. On short
-        rows this excludes the model's error over the measured prefix and
-        starts the residual roll on-manifold;
-        on long rows it uses a time-scaled endpoint-defect correction. This can
-        reduce a batch-common target offset that the guard deliberately
-        preserves. The state-space defect and guard's target-space median remain
-        distinct statistics.
+        and the model covers the duration mismatch |dt_default - dt|. On a short
+        row that excludes the model error over the measured prefix, and starts
+        the residual roll on-manifold. On a long row it applies a time-scaled
+        endpoint-defect correction. That can reduce a batch-common target offset
+        which the guard keeps on purpose. The state-space defect and the
+        target-space median of the guard stay distinct statistics.
 
           lf = (V(x_re) - V(x)) - beta * V(x),
           y_re = r_T + keep * (V(x) + lf)
@@ -2210,24 +2220,25 @@ class CTSAC(OffPolicyAlgorithm):
 
           rho_innov_i = (||e_i||/dt_i) / med_batch(||x'-x||/dt),
 
-        then scale it by the fraction of the interval that actually needs
-        transport, chi_i = |T-dt_i| / max(T,dt_i): rho_i = chi_i*rho_innov_i,
-        lambda_i = exp(-(rho_i/rho0)^2). Thus dt_i=T implies chi_i=0 and
-        lambda_i=1: the direct-data branch assigns full reanchored weight to the
-        measured nominal endpoint. Finally,
+        then scale it by the fraction of the interval that needs transport,
+        chi_i = |T-dt_i| / max(T,dt_i). That gives rho_i = chi_i*rho_innov_i and
+        lambda_i = exp(-(rho_i/rho0)^2). So dt_i=T gives chi_i=0 and
+        lambda_i=1, and the direct-data branch puts the full reanchored weight
+        on the measured nominal endpoint. Finally,
 
           y_i = lambda_i * y_re,i + (1 - lambda_i) * y_fd,i .
 
         The innovation supplies a calibration statistic for confidence in the
-        model-dependent transport. The measured x' remains an input to both
-        target estimators. With a positive gate scale, non-finite re-anchored
-        entries select the finite-difference target and are counted; a finite
-        anchor is required. Gate scale zero selects the strict model-based
-        contract of the quadrature target. Activation begins after the required
-        explicit V-head is ready. The model target and finite-difference anchor
-        reuse the same V(x) read, preserving the RNG state and minibatch pairing
-        under the continuation harness. The mode carries a separate label; a
-        positive gate scale adds a model-free component to the target.
+        model-dependent transport. The measured x' stays an input to both target
+        estimators. With a positive gate scale, a non-finite re-anchored entry
+        selects the finite-difference target, and the counters record it. The
+        anchor itself must be finite. A gate scale of zero selects the strict
+        model-based contract of the quadrature target. The mode starts once the
+        required explicit V-head is ready. The model target and the
+        finite-difference anchor reuse the same V(x) read, so the RNG state and
+        the minibatch pairing hold under the continuation harness. The mode
+        carries its own label, and a positive gate scale adds a model-free
+        component to the target.
         """
         if not self._value_head_ready:
             raise RuntimeError(

@@ -60,10 +60,10 @@ class VecContinuousEnv:
 
         return (
             np.stack(obs_t_list, axis=0),
-            # Keep absolute timestamps in float64 until the replay/rollout
-            # buffer has formed ``dt = next_t - t``.  At long episode times,
-            # subtracting float32 timestamps can noticeably distort sub-ms
-            # transition durations.
+            # Keep absolute timestamps in float64 until the replay or rollout
+            # buffer forms ``dt = next_t - t``. Late in a long episode, a
+            # subtraction of float32 timestamps distorts transition durations
+            # below one millisecond.
             np.asarray(t_list, dtype=np.float64),
             actions,
             np.asarray(rew_list, dtype=np.float32),

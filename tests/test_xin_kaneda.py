@@ -1,9 +1,9 @@
 """Tests for the Xin-Kaneda swing-up controller, its plant, and its metrics.
 
-The strongest checks are fixtures: both papers publish enough numbers to pin the
-gain-condition module down exactly, and the 2007 paper publishes the
-characteristic equation of the closed loop at the hanging equilibrium, which
-pins down the whole control law plus the linearization.
+The strongest tests here are fixtures. Both papers publish enough numbers to
+pin the gain-condition module down exactly. The 2007 paper also publishes the
+characteristic equation of the closed loop at the hanging equilibrium. That
+equation pins down the whole control law and the linearization.
 """
 
 import os
@@ -254,8 +254,8 @@ class TestMappedFrameModelAgreement(unittest.TestCase):
         self.assertLess(worst, 1e-11)
 
     def test_metrics_energy_error_agrees_with_the_paper_frame(self):
-        # evaluations.acrobot_homoclinic_metrics computes E - E_r straight from
-        # repo coordinates; it must equal the mapped analytic value.
+        # evaluations.acrobot_homoclinic_metrics computes E - E_r straight
+        # from repo coordinates. It must equal the mapped analytic value.
         states = self._random_states(64)
         mapped = np.array([xk.obs_to_paper(s) for s in states])
         direct = metrics.energy_error(mapped, self.params)
@@ -350,7 +350,7 @@ class TestLyapunovDescent(unittest.TestCase):
         values = np.array(
             [xk.lyapunov(self.params, self.gains, x) for x in trace]
         )
-        # Round-off only; the initial value is O(400) here.
+        # Round-off alone. The initial value is O(400) here.
         self.assertLess(np.max(np.diff(values)), 1e-9)
         self.assertLess(values[-1], values[0])
 
@@ -432,10 +432,11 @@ class TestEnvironment(unittest.TestCase):
 
     def test_control_period_finer_than_the_physics_step_is_a_no_op(self):
         # The wrapper realizes a control period as nsub = max(1, round(dt /
-        # physics_dt)) physics steps, so requesting a period below the model's
-        # own timestep silently degrades to that timestep.  The evaluation CLI
-        # defaults physics_dt to min(dt, model timestep) because of this; the
-        # behaviour is pinned here so the default cannot quietly stop mattering.
+        # physics_dt)) physics steps. A request for a period below the model's
+        # own timestep therefore falls back to that timestep, and reports
+        # nothing. For that reason the evaluation CLI defaults physics_dt to
+        # min(dt, model timestep). This test pins the behavior, so the default
+        # cannot stop mattering without notice.
         from evaluations.eval_acrobot_xk import Arm, MODEL_TIMESTEP, build_env
 
         arm = Arm(
@@ -664,7 +665,7 @@ class TestMetrics(unittest.TestCase):
         )
 
     def test_capture_requires_a_full_dwell(self):
-        # Inside from t = 2 onward; with a 1 s dwell the capture time is 2.
+        # Inside from t = 2 onward. With a 1 s dwell the capture time is 2.
         time = np.linspace(0.0, 5.0, 51)
         inside = time >= 2.0
         self.assertAlmostEqual(
@@ -684,9 +685,9 @@ class TestMetrics(unittest.TestCase):
         )
 
     def test_rollout_drops_a_trailing_zero_length_step(self):
-        # A pre-built time grid can run out before the duration check clears,
-        # in which case the env reports a step with next_t == cur_t.  It carries
-        # no physical time, and keeping it would break the trajectory invariant.
+        # A pre-built time grid can run out before the duration test passes.
+        # The env then reports a step with next_t == cur_t. That step carries no
+        # physical time, and it breaks the trajectory invariant.
         class _Stalling:
             """An env whose last step advances the clock by nothing."""
 
@@ -718,7 +719,7 @@ class TestMetrics(unittest.TestCase):
     def test_capture_handles_irregular_timesteps(self):
         time = np.array([0.0, 0.3, 0.35, 1.9, 2.05, 2.4, 3.9, 4.0])
         inside = np.array([False, True, True, True, True, True, True, True])
-        # The first qualifying endpoint is t = 0.3; a 1 s dwell is reached at
+        # The first qualifying endpoint is t = 0.3. A 1 s dwell completes at
         # the endpoint t = 1.9.
         self.assertAlmostEqual(
             metrics.capture_time(time, inside, 1.0), 0.3, places=9
@@ -727,8 +728,8 @@ class TestMetrics(unittest.TestCase):
     def test_retention_is_the_post_capture_time_fraction(self):
         time = np.linspace(0.0, 4.0, 5)
         inside = np.array([True, True, True, False, True])
-        # Capture at t = 0; intervals [0,1] and [1,2] qualify, [2,3] and [3,4]
-        # do not, so the fraction is 0.5.
+        # Capture at t = 0. The intervals [0,1] and [1,2] qualify, and [2,3]
+        # and [3,4] fail, so the fraction is 0.5.
         self.assertAlmostEqual(
             metrics.retention_fraction(time, inside, 0.0), 0.5, places=9
         )
@@ -858,9 +859,9 @@ class TestClosedLoopOnThePlant(unittest.TestCase):
 class TestBatchedLaw(unittest.TestCase):
     """``torque_batch`` / ``actions``: the same law read on many states at once.
 
-    CT-SAC's imitation term scores a whole replay minibatch per gradient step,
-    which the per-state entry points cannot afford, so the batched pair has to
-    reproduce them exactly rather than approximately.
+    The imitation term of CT-SAC scores a whole replay minibatch per gradient
+    step. The per-state entry points are too slow for that. The batched pair
+    must therefore reproduce them exactly.
     """
 
     def setUp(self):
@@ -920,8 +921,8 @@ class TestBatchedLaw(unittest.TestCase):
         single = np.stack([controller(x) for x in self.states])
         np.testing.assert_allclose(batched, single, rtol=1e-12, atol=1e-12)
 
-        # The saturation counters describe what the controller drove; a batched
-        # read of states it did not drive must not enter them.
+        # The saturation counters describe what the controller drove. A batched
+        # read of states it did not drive must never enter them.
         steps, saturated = controller.steps, controller.saturated_steps
         controller.actions(self.states)
         self.assertEqual((controller.steps, controller.saturated_steps),
