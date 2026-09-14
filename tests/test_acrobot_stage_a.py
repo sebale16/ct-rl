@@ -34,7 +34,7 @@ class TestAcrobotStageA(unittest.TestCase):
 
     def test_oracle_matches_mujoco_with_coordinate_conversion(self):
         oracle = AcrobotOracle(damping=0.13)
-        env = self.env(oracle=oracle)
+        env = self.env(oracle=oracle, config=StageAConfig(shoulder_limit=None))
         rng = np.random.default_rng(5)
         for _ in range(12):
             qv = np.r_[rng.uniform(-np.pi, np.pi, 2), rng.uniform(-1., 1., 2)]
@@ -149,7 +149,7 @@ class TestAcrobotStageA(unittest.TestCase):
 
     def test_state_limit_exit_has_absorbing_cost_and_terminal_value_target(self):
         env = self.env()
-        env.reset(options={"qv": [math.pi, 0., 0., 11.99]})
+        env.reset(options={"qv": [math.pi, 0., 0., env.config.velocity_limit - .01]})
         z, reward, terminated, truncated, info = env.step(np.ones(1))
         self.assertTrue(terminated)
         self.assertFalse(truncated)
@@ -162,6 +162,56 @@ class TestAcrobotStageA(unittest.TestCase):
         before = float(agent.value(torch.tensor(z)).detach())
         metrics = agent.update(z[None], terminal_mask=[True], terminal_value=env.failure_value)
         self.assertAlmostEqual(metrics["value_loss"] / (before - env.failure_value)**2, 1., places=5)
+
+    def test_shoulder_boundaries_reject_resets_and_terminate_outward_motion(self):
+        env = self.env()
+        for angle in (math.pi / 2, 3 * math.pi / 2, -math.pi, 3 * math.pi):
+            with self.subTest(invalid_angle=angle), self.assertRaisesRegex(ValueError, "within state limits"):
+                env.reset(options={"qv": [angle, 0., 0., 0.]})
+        for boundary, direction in ((math.pi / 2, -1), (3 * math.pi / 2, 1)):
+            with self.subTest(boundary=boundary):
+                env.reset(options={"qv": [boundary - direction * 1e-4, 0., direction * .2, 0.]})
+                _, reward, terminated, truncated, info = env.step(np.zeros(1))
+                self.assertTrue(terminated)
+                self.assertFalse(truncated)
+                self.assertTrue(info["state_limit_failure"])
+                self.assertLess(info["dt_used"], env.config.dt)
+                self.assertLessEqual(reward, math.exp(-env.config.discount_rate * info["dt_used"]) * env.failure_value)
+                self.assertLess(np.abs(info["qv"][2:]).max(), env.config.velocity_limit)
+                self.assertLess(abs(info["qv"][1]), env.config.elbow_limit)
+        with self.assertRaisesRegex(ValueError, "within declared state limits"):
+            AcrobotStageAEnv(incoming_states=[[0., 0., 0., 0.]])
+
+    def test_shoulder_domain_reward_bound_and_configuration(self):
+        env = self.env()
+        self.assertAlmostEqual(env.failure_rate, -25.75685752037776)
+        self.assertAlmostEqual(env.failure_value, -257.5685752037775)
+        # Approach all maximal cost terms from inside the allowed domain.
+        qv = np.array([3 * math.pi / 2 - 1e-7, math.pi - 1e-7,
+                       2 * math.pi - 1e-7, 2 * math.pi - 1e-7])
+        self.assertGreater(env._rate(qv, 20.), env.failure_rate)
+        self.assertAlmostEqual(env._rate(qv, 20.), env.failure_rate, places=5)
+        for limit in (0., -.1, float("inf"), float("nan"), .04):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                StageAConfig(shoulder_limit=limit)
+        with tempfile.TemporaryDirectory() as tmp:
+            from benchmarks.run_acrobot_stage_a import build_agent
+            from dataclasses import asdict
+            path = Path(tmp) / "agent.pt"
+            agent = AcrobotPHValue()
+            environment = asdict(StageAConfig())
+            agent.save(path, metadata={"environment": environment})
+            args = parser().parse_args(["--checkpoint", str(path), "--output", str(Path(tmp) / "eval")])
+            _, config = build_agent(args)
+            self.assertEqual(config.shoulder_limit, math.pi / 2)
+            del environment["shoulder_limit"]
+            environment.update(velocity_limit=12., elbow_limit=4 * math.pi)
+            agent.save(path, metadata={"environment": environment})
+            _, legacy_config = build_agent(args)
+            self.assertIsNone(legacy_config.shoulder_limit)
+            legacy = self.env(config=legacy_config)
+            legacy.reset(options={"qv": [0., 0., 0., 0.]})
+            self.assertAlmostEqual(legacy.failure_value, -457.0337302665053)
 
     def test_incoming_training_requires_separate_evaluation_bank(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,6 +268,9 @@ class TestStageAHyperparameters(unittest.TestCase):
         self.assertEqual(hard.mode, "stage_a_hard")
         self.assertEqual(hard.temperature, 0.)
         self.assertEqual(hard.hidden_width, 64)
+        self.assertEqual(hard.shoulder_limit, math.pi / 2)
+        custom = p.parse_args(["--output", "/tmp/not-created-stage-a", "--shoulder-limit", ".4"])
+        self.assertEqual(custom.shoulder_limit, .4)
         soft = p.parse_args(["--output", "/tmp/not-created-stage-a", "--mode", "stage_a_soft"])
         self.assertEqual(soft.temperature, .1)
         self.assertEqual(soft.exploration_std, 0.)

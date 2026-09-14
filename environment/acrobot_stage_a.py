@@ -43,12 +43,15 @@ class StageAConfig:
     capture_angle: float = 0.1
     capture_velocity: float = 0.25
     hold_seconds: float = 1.0
-    velocity_limit: float = 12.0
-    elbow_limit: float = 4 * math.pi
+    velocity_limit: float = 2 * math.pi
+    elbow_limit: float = math.pi
+    shoulder_limit: float | None = math.pi / 2
     incoming_probability: float = 0.5
 
     def __post_init__(self):
         for name, value in vars(self).items():
+            if name == "shoulder_limit" and value is None:
+                continue  # Legacy checkpoints had no shoulder failure boundary.
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name in ("dt", "physics_dt", "episode_seconds", "discount_rate", "capture_angle",
@@ -63,6 +66,8 @@ class StageAConfig:
             raise ValueError("reset velocity radius must be below the velocity limit")
         if self.angle_radius >= self.elbow_limit:
             raise ValueError("reset angle radius must be below the elbow limit")
+        if self.shoulder_limit is not None and self.angle_radius >= self.shoulder_limit:
+            raise ValueError("reset angle radius must be below the shoulder limit")
         for name in ("dt", "episode_seconds"):
             ratio = getattr(self, name) / self.physics_dt
             if ratio < 1 or not np.isclose(ratio, round(ratio), rtol=0, atol=1e-8):
@@ -94,11 +99,9 @@ class AcrobotStageAEnv(gym.Env):
                 raise ValueError("incoming_states must be finite nonempty [N,4] q/v")
             if any(self._failed(x) for x in self.incoming_states):
                 raise ValueError("incoming states must lie within declared state limits")
-        r = self.reward_spec
-        self.failure_rate = -(2 * r.angle1_weight + 2 * r.angle2_weight
-                              + (r.velocity1_weight + r.velocity2_weight)
-                              * (self.config.velocity_limit / r.velocity_scale)**2
-                              + 0.5 * r.effort_weight * self.oracle.torque_limit**2)
+        self.failure_rate = -self.reward_spec.cost_bound(
+            self.oracle, velocity_limit=self.config.velocity_limit,
+            elbow_limit=self.config.elbow_limit, shoulder_limit=self.config.shoulder_limit)
         self.failure_value = self.failure_rate / self.config.discount_rate
         self._done = True
 
@@ -129,7 +132,9 @@ class AcrobotStageAEnv(gym.Env):
 
     def _failed(self, qv):
         return bool(np.any(np.abs(qv[2:]) >= self.config.velocity_limit)
-                    or abs(qv[1]) >= self.config.elbow_limit)
+                    or abs(qv[1]) >= self.config.elbow_limit
+                    or (self.config.shoulder_limit is not None
+                        and abs(qv[0] - math.pi) >= self.config.shoulder_limit))
 
     def _rate(self, qv, torque):
         r = self.reward_spec

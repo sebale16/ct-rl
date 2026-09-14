@@ -205,6 +205,8 @@ def run(args):
         "diagnostic": "paired_fixed_and_moving_hjb_labels_v1",
         "environment": asdict(env_config), "oracle": asdict(initial.oracle), "reward": asdict(initial.reward),
         "value_flow": asdict(initial.config), "initial_updates": initial.updates,
+        "reward_scale": initial.metadata.get("reward_scale", 1.),
+        "unscaled_reward": initial.metadata.get("unscaled_reward", asdict(initial.reward)),
         "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "hyperparams": initial.metadata.get("hyperparams") if args.checkpoint else args.hyperparams_source,
         "checkpoint_sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest() if args.checkpoint else None,

@@ -4,7 +4,7 @@ No fitted dynamics or trainable physical parameters. Torque is in N m.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import torch
@@ -77,6 +77,22 @@ class UprightReward:
         for name, value in vars(self).items():
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+
+    def scaled(self, factor: float):
+        """Scale the entire reward, including the controller's effort weight."""
+        if not math.isfinite(factor) or factor <= 0:
+            raise ValueError("reward scale must be finite and positive")
+        return replace(self, **{name: getattr(self, name) * factor for name in (
+            "angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight", "effort_weight")})
+
+    def cost_bound(self, oracle: AcrobotOracle, *, velocity_limit, elbow_limit, shoulder_limit):
+        """Upper bound on ordinary cost inside the declared state/action limits."""
+        shoulder = (2 * self.angle1_weight if shoulder_limit is None else
+                    self.angle1_weight * (1 - math.cos(min(shoulder_limit, math.pi))))
+        elbow = self.angle2_weight * (1 - math.cos(min(elbow_limit, math.pi)))
+        return (shoulder + elbow
+                + (self.velocity1_weight + self.velocity2_weight) * (velocity_limit / self.velocity_scale)**2
+                + 0.5 * self.effort_weight * oracle.torque_limit**2)
 
     def state_cost(self, z: torch.Tensor, oracle: AcrobotOracle) -> torch.Tensor:
         v = oracle.velocity(z) / self.velocity_scale

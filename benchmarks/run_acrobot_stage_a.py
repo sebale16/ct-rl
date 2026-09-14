@@ -62,6 +62,18 @@ def _bank(path):
                     "count": len(states)}
 
 
+def reward_scale_argument(value):
+    if value == "auto":
+        return value
+    try:
+        scale = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("reward scale must be 'auto' or a positive number") from exc
+    if not math.isfinite(scale) or scale <= 0:
+        raise argparse.ArgumentTypeError("reward scale must be finite and positive")
+    return scale
+
+
 def parser():
     p = StageAArgumentParser(description=__doc__)
     p.add_argument("--mode", default=DEFAULT_MODE, help="row name in acrobot_ph_value.csv")
@@ -85,8 +97,10 @@ def parser():
     p.add_argument("--velocity-radius", type=float, default=0.1)
     p.add_argument("--capture-angle", type=float, default=0.1)
     p.add_argument("--capture-velocity", type=float, default=0.25)
-    p.add_argument("--velocity-limit", type=float, default=12.)
-    p.add_argument("--elbow-limit", type=float, default=4 * math.pi)
+    p.add_argument("--velocity-limit", type=float, default=2 * math.pi)
+    p.add_argument("--elbow-limit", type=float, default=math.pi)
+    p.add_argument("--shoulder-limit", type=float, default=math.pi / 2,
+                   help="failure at this unwrapped shoulder deviation from upright pi (radians)")
     p.add_argument("--incoming-probability", type=float, default=0.5)
     p.add_argument("--torque-limit", type=float, default=20.)
     p.add_argument("--damping", type=float, default=0.)
@@ -112,6 +126,8 @@ def parser():
     p.add_argument("--velocity2-weight", type=float, default=1.)
     p.add_argument("--velocity-scale", type=float, default=4.5844)
     p.add_argument("--effort-weight", type=float, default=0.01)
+    p.add_argument("--reward-scale", type=reward_scale_argument, default="auto",
+                   help="common multiplier for reward and temperature; auto normalizes the cost bound to one")
     p.add_argument("--incoming-states", type=Path, help="training NPZ: states[N,4] q/v and explicit frame")
     p.add_argument("--incoming-eval-states", type=Path, help="held-out NPZ from separate swing-up trajectories")
     return p
@@ -121,18 +137,35 @@ def build_agent(args):
     """Shared physical/value configuration for training and target diagnostics."""
     if args.checkpoint:
         agent = AcrobotPHValue.load(args.checkpoint, device=args.device)
-        env_config = StageAConfig(**agent.metadata["environment"])
+        environment = dict(agent.metadata["environment"])
+        environment.setdefault("shoulder_limit", None)  # Preserve historical evaluation domains.
+        env_config = StageAConfig(**environment)
     else:
         env_config = StageAConfig(dt=args.dt, physics_dt=args.physics_dt,
                                  episode_seconds=args.episode_seconds, hold_seconds=args.hold_seconds,
                                  discount_rate=args.discount_rate, angle_radius=args.angle_radius,
                                  velocity_radius=args.velocity_radius, capture_angle=args.capture_angle,
                                  capture_velocity=args.capture_velocity, velocity_limit=args.velocity_limit,
-                                 elbow_limit=args.elbow_limit, incoming_probability=args.incoming_probability)
-        reward = UprightReward(**{key: getattr(args, key) for key in UprightReward.__dataclass_fields__})
-        flow = ValueFlowConfig(**{key: getattr(args, key) for key in ValueFlowConfig.__dataclass_fields__})
-        agent = AcrobotPHValue(AcrobotOracle(damping=args.damping, torque_limit=args.torque_limit), reward, flow,
-                               device=args.device)
+                                 elbow_limit=args.elbow_limit, shoulder_limit=args.shoulder_limit,
+                                 incoming_probability=args.incoming_probability)
+        oracle = AcrobotOracle(damping=args.damping, torque_limit=args.torque_limit)
+        raw_reward = UprightReward(**{key: getattr(args, key) for key in UprightReward.__dataclass_fields__})
+        scale = (1 / raw_reward.cost_bound(oracle, velocity_limit=env_config.velocity_limit,
+                                          elbow_limit=env_config.elbow_limit, shoulder_limit=env_config.shoulder_limit)
+                 if args.reward_scale == "auto" else float(args.reward_scale))
+        reward = raw_reward.scaled(scale)
+        flow_parameters = {key: getattr(args, key) for key in ValueFlowConfig.__dataclass_fields__}
+        for key in ("temperature", "temperature_min", "temperature_max"):
+            flow_parameters[key] *= scale
+        flow = ValueFlowConfig(**flow_parameters)
+        agent = AcrobotPHValue(oracle, reward, flow, device=args.device)
+        # Keep the initial value-gradient policy identical across reward units.
+        # This is initialization only, never a rescaling of loaded Adam state.
+        with torch.no_grad():
+            for network in (agent.value, agent.target):
+                network.net[-1].weight.mul_(scale)
+                network.net[-1].bias.mul_(scale)
+        agent.metadata = {"reward_scale": scale, "unscaled_reward": asdict(raw_reward)}
     return agent, env_config
 
 
@@ -163,6 +196,8 @@ def run(args):
         args.output.mkdir(parents=True, exist_ok=True)
         metadata = {"environment": asdict(env_config), "oracle": asdict(agent.oracle),
                     "reward": asdict(agent.reward), "value_flow": asdict(agent.config),
+                    "reward_scale": agent.metadata.get("reward_scale", 1.),
+                    "unscaled_reward": agent.metadata.get("unscaled_reward", asdict(agent.reward)),
                     "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                     "training_incoming": train_source, "evaluation_incoming": eval_source,
                     "hyperparams": agent.metadata.get("hyperparams") if args.checkpoint else args.hyperparams_source,

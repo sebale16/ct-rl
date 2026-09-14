@@ -34,7 +34,7 @@ This experiment does not train a PH dynamics model, initialize from an LQR or ID
 | Quantity | Hard maximization | Soft maximization |
 |---|---|---|
 | Action maximization in the value update | Exact bounded quadratic maximum | Continuous entropy-regularized integral |
-| Temperature $\alpha$ | $0$ | $0.1$ |
+| Temperature $\alpha$ | $0$ | $0.1\kappa\approx0.00388246$ |
 | Training action | Bounded deterministic torque plus collection noise | Sample from the truncated-Gaussian action density |
 | Extra collection noise | Standard deviation $0.02$ in normalized action units | None |
 | Upright value anchor | $V(z^\star)=0$ | No zero-value anchor |
@@ -91,20 +91,43 @@ The nominal damping is $D=0$. The learner receives full state observations and t
 | Physics integration interval | $0.001\ \mathrm{s}$ |
 | Maximum episode duration | $5\ \mathrm{s}$ |
 | Physical discount rate $\beta$ | $0.1\ \mathrm{s}^{-1}$ |
-| Joint-speed failure threshold | $|v_i|\ge12\ \mathrm{rad/s}$ |
-| Unwrapped elbow-angle failure threshold | $|q_2|\ge4\pi$ |
+| Joint-speed failure threshold | $|v_i|\ge2\pi\ \mathrm{rad/s}$ |
+| Unwrapped elbow-angle failure threshold | $|q_2|\ge\pi$ |
+| Unwrapped shoulder failure threshold | $q_1\le\pi/2$ or $q_1\ge3\pi/2$ |
 
 Actions are held constant between decisions. Episodes continue after capture. The five-second endpoint is a data-collection and evaluation truncation; it does not assert that the infinite-horizon value becomes zero there. Physical-limit crossings terminate the episode with an absorbing failure cost.
 
+The shoulder interval is centered on upright $q_1=\pi$ and is checked without
+angle wrapping. Reaching either endpoint counts as failure, consistently with
+the speed and elbow thresholds. Resets and incoming states must start strictly
+inside these limits. Earlier pilot and diagnostic runs had no shoulder failure
+boundary, a speed threshold of $12$ rad/s, and an elbow threshold of $4\pi$;
+runs with the new restrictions are a revised local stabilization task.
+
 ### 2.3 Fixed physical reward
 
-Let $\omega_s=4.5844\ \mathrm{rad/s}$. The state cost and reward rate are
+Let $\omega_s=4.5844\ \mathrm{rad/s}$. Define the unscaled state cost
 
-$$\ell(z)=10(1+\cos q_1)+5(1-\cos q_2)
+$$\ell_0(z)=10(1+\cos q_1)+5(1-\cos q_2)
 +\left(\frac{v_1}{\omega_s}\right)^2
 +\left(\frac{v_2}{\omega_s}\right)^2,$$
 
-$$\boxed{r(z,u)=-\ell(z)-\tfrac12(0.01)u^2.}$$
+and the uniform reward multiplier
+
+$$C_{\max}=10+10+2\left(\frac{2\pi}{4.5844}\right)^2
++\tfrac12(0.01)(20)^2\approx25.75685752,\qquad
+\kappa=C_{\max}^{-1}\approx0.0388246120.$$
+
+The implemented state cost, effort coefficient, and reward rate are
+
+$$\ell=\kappa\ell_0,\qquad w_u=\kappa(0.01),\qquad
+\boxed{r(z,u)=-\ell(z)-\tfrac12w_u u^2.}$$
+
+The multiplier is computed once for each new experiment from its declared
+weights and limits, then held fixed. Ordinary reward rates lie within $[-1,0]$
+inside the state limits. The terminal integration interval can slightly
+overshoot a limit before the failure is detected. There is no clipping or
+nonlinear transformation of the reward.
 
 The reward is maximal at upright rest with zero torque. It penalizes residual velocity, so passing through the upright pose rapidly does not have the same instantaneous reward as balancing there. It uses the physical state and fixed coefficients throughout training.
 
@@ -112,8 +135,17 @@ No orbit-targeting Lyapunov term or potential-shaping term is included in these 
 
 For a failure state, define a pessimistic continuing reward rate using an upper bound on the ordinary cost within the declared limits:
 
-$$r_F=-\left[2(10)+2(5)+2\left(\frac{12}{4.5844}\right)^2
-+\tfrac12(0.01)(20)^2\right],\qquad V_F=\frac{r_F}{\beta}.$$
+$$r_F=-\kappa C_{\max}=-1,\qquad V_F=\frac{r_F}{\beta}=-10.$$
+
+Before scaling, the revised-domain failure rate would be approximately
+$-25.7569$ and its value $-257.5686$. Uniform scaling includes the absorbing
+continuation and preserves policy rankings for the deterministic discounted
+objective on this domain. For the soft objective, temperature and its bounds
+are also multiplied by $\kappa$ to preserve the relative entropy weighting.
+Initial online and target value outputs are scaled by $\kappa$, so the initial
+analytic policy is unchanged. The entropy target and optimizer learning rates
+are unchanged. These statements do not imply identical neural optimization
+trajectories or resolve the moving-target instability.
 
 The simulated return includes the discounted absorbing continuation after a failure. Value regression at sampled failure states uses the boundary target $V_F$. This is an explicit task boundary condition, not a stability certificate. For both arms, the absorbing state has no further action choice or entropy reward.
 
@@ -161,7 +193,7 @@ $$\eta_V(z)=G^\top\nabla V(z)=\frac{\partial V}{\partial p_2}.$$
 The score becomes
 
 $$A_V(z,u)=\underbrace{-\ell+\nabla V^\top f_0-\beta V}_{\text{independent of }u}
-+\underbrace{\left(-\tfrac12w_u u^2+\eta_Vu\right)}_{\text{depends on }u},\qquad w_u=0.01.$$
++\underbrace{\left(-\tfrac12w_u u^2+\eta_Vu\right)}_{\text{depends on }u},\qquad w_u=0.01\kappa.$$
 
 The hard maximizer is
 
@@ -248,8 +280,8 @@ $$L_\alpha(\lambda)=\lambda\,\operatorname{stopgrad}
 Thus low entropy increases temperature and high entropy decreases it. The
 entropy measurement is detached: this optimization step changes only temperature.
 An all-terminal minibatch skips the temperature update. Defaults are initial
-$\alpha=0.1$, target entropy $-1$, learning rate $3\times10^{-4}$, and bounds
-$10^{-4}\le\alpha\le10$. The next HJB target and sampled policy both use the
+$\alpha=0.1\kappa$, target entropy $-1$, learning rate $3\times10^{-4}$, and bounds
+$10^{-4}\kappa\le\alpha\le10\kappa$. The next HJB target and sampled policy both use the
 updated temperature. Deterministic mode evaluation, at a fixed value gradient,
 does not depend directly on temperature.
 
@@ -421,7 +453,7 @@ Short training smoke runs produced the following final-checkpoint observations:
 | Hard | 300 | $2.999\ \mathrm{s}$ | 4 | $0/4$ | $0.1955\ \mathrm{s}$ | $4/4$ |
 | Soft | 100 | $1.000\ \mathrm{s}$ | 2 | $0/2$ | $0.1550\ \mathrm{s}$ | $2/2$ |
 
-Both used local starts and deterministic evaluation. Their different budgets and small evaluation sets do not support a comparison between training methods. They show that updates and evaluations execute, while providing no evidence yet of sustained balance. No incoming-state capture result or full five-seed study is established by these checks.
+Both used local starts and deterministic evaluation, with the earlier state limits and unscaled reward. Their different budgets and small evaluation sets do not support a comparison between training methods or validate the revised limits and scaling above. They show that updates and evaluations execute, while providing no evidence yet of sustained balance. No incoming-state capture result or full five-seed study is established by these checks.
 
 ### 6.2 What a successful result would establish
 

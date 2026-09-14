@@ -21,6 +21,8 @@ CSV_ARGUMENTS = {
     "env_capture_angle": "capture_angle", "env_capture_velocity": "capture_velocity",
     "env_torque_limit": "torque_limit", "env_damping": "damping",
     "env_velocity_limit": "velocity_limit", "env_elbow_limit": "elbow_limit",
+    "env_shoulder_limit": "shoulder_limit",
+    "env_reward_scale": "reward_scale",
     "env_incoming_probability": "incoming_probability",
     "model_hidden_width": "hidden_width", "model_momentum_scale": "momentum_scale",
     "algo_discount_rate": "discount_rate", "algo_value_step": "value_step",
@@ -71,7 +73,7 @@ def load_preset(directory, mode, argument_types):
         if value:
             try:
                 defaults[destination] = argument_types[destination](value)
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, argparse.ArgumentTypeError) as exc:
                 raise ValueError(f"invalid {column}={value!r} in mode {mode!r}") from exc
     source = {"path": str(path.resolve()), "sha256": hashlib.sha256(contents).hexdigest(),
               "env_id": ENV_ID, "mode": mode, "row": row}

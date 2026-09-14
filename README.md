@@ -129,6 +129,42 @@ not identical finite-step learning updates.
 MUJOCO_GL=disable python -m unittest tests.test_acrobot_stage_a -v
 ```
 
+New Stage A runs terminate when the unwrapped shoulder reaches `pi/2` or
+`3*pi/2`, with upright at `pi` in the downward-vertical frame. Resets and incoming
+states outside that open interval are rejected. `--shoulder-limit` specifies
+the allowed deviation from upright (default `pi/2`), also exposed as
+`env_shoulder_limit` in the CSV. The absorbing failure cost accounts for the
+smaller shoulder-angle cost bound. Joint speeds must stay strictly below
+`2*pi` rad/s and the unwrapped elbow angle strictly between `-pi` and `pi`.
+These are `--velocity-limit` and `--elbow-limit`, with matching CSV columns.
+Existing checkpoints
+without this field retain their original unrestricted shoulder domain when
+evaluated or used to initialize a diagnostic.
+
+Stage A presets use `--reward-scale auto` (`env_reward_scale=auto` in the CSV).
+Before training, this calculates one fixed multiplier from the reward weights,
+torque bound, and state limits. With current defaults the multiplier is
+`1 / 25.7568575204 = 0.0388246120`. It scales all angle, speed, and torque costs,
+including the effort coefficient in the analytic controller, and the absorbing
+failure continuation. Ordinary reward rates are bounded by `[-1, 0]` inside the
+allowed region, and the failure-value target is `-10` at discount rate `0.1`.
+An ordinary 10 ms reward is approximately `[-0.01, 0]`; a failure step includes
+the additional discounted absorbing continuation and may cross a threshold
+slightly before termination is detected. No reward clipping is applied.
+
+The same multiplier scales the initial online/target value outputs and the
+configured soft temperature and its bounds. This preserves the initial analytic
+policy and the relative weighting of reward and entropy. The entropy target and
+optimizer learning rates are unchanged; numerical training trajectories need
+not be invariant to reward scaling. `--reward-scale 1` disables normalization;
+another positive number sets an explicit multiplier. Changing limits or raw
+weights recalculates the automatic factor for a new run, never during training.
+`config.json` and checkpoints record `reward_scale`, `unscaled_reward`, and the
+effective scaled reward/value-flow settings. Checkpoint loading uses those
+settings directly, with no second scaling. Standalone reward objects retain
+their explicit coefficients; the runner applies the normalization when building
+the experiment, including the fixed/moving diagnostic.
+
 ### Automatic temperature for soft Stage A
 
 Temperature is fixed by default. To tune it toward a target policy entropy:
@@ -144,7 +180,9 @@ the analytic policy's entropy on nonterminal minibatch states. It increases
 temperature when entropy is below the target and decreases it when above.
 Entropy is differential entropy relative to normalized action `a` in `[-1,1]`;
 negative values are valid, and targets must be below the maximum `log(2)`.
-The default bounds are `--temperature-min 0.0001` and `--temperature-max 10`.
+The configured bounds are `--temperature-min 0.0001` and `--temperature-max 10`
+in unscaled reward units; they and the initial temperature are multiplied by
+the run's reward scale. Logs report temperature in the effective scaled units.
 Automatic tuning requires a positive initial temperature, so use the soft mode.
 
 The updated temperature enters both the next soft HJB target and stochastic
