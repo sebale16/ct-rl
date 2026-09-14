@@ -222,6 +222,9 @@ benchmarks/*
 !benchmarks/package-lock.json
 !benchmarks/hyperparams/
 !benchmarks/hyperparams/*
+!benchmarks/configs/
+benchmarks/configs/*
+!benchmarks/configs/acrobot_experiment3.json
 #  render-time only (see benchmarks/package.json); benchmarks/* already covers it
 benchmarks/node_modules/
 # Slurm run logs (per-run stdout/err; not reproducibility artifacts)
