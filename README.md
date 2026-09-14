@@ -48,6 +48,87 @@ python -m benchmarks.run_discrete_rl --algo sac --env_id cheetah-run --log_root 
 *   `--algo`: The algorithm to use. Options: `sac`, `td3`, `ppo`, `trpo`.
 *   `--env_id`: Same options as above.
 
+### Acrobot Stage A: oracle PH value control
+
+Stage A learns capture and sustained upright balance from near-upright resets.
+It uses the fixed Xin–Kaneda Acrobot mechanics, a smooth upright reward, and
+HJB fitted value-flow updates. Only the return-value network is trained. The
+elbow torque comes from its momentum gradient and is clipped to the physical
+actuator bounds. This is a dedicated value-based experiment, separate from
+the Q-based `ct_sac` trainer above. There is no learned dynamics model, LQR
+initialization, or controller handoff.
+
+```bash
+MUJOCO_GL=disable python -m benchmarks.run_acrobot_stage_a \
+  --mode stage_a_hard --output out/acrobot_stage_a/seed_0 --seed 0
+```
+
+Hyperparameters are read from `benchmarks/hyperparams/acrobot_ph_value.csv`,
+using the same `mode`, `env_id`, `env_*`, `model_*`, `algo_*`, and `log_*`
+column convention as the CT-SAC table. The rows `stage_a_hard` and
+`stage_a_soft` select deterministic and entropy-regularized value control.
+These are untuned starting presets. `--hyperparams-dir` selects another table
+directory, and explicit CLI options override CSV values, for example
+`--updates 20000 --learning-rate 0.0001`. Blank cells retain runner defaults.
+The selected row, file hash, and effective settings are saved with each run.
+Checkpoint evaluation uses the checkpoint's physical/model settings rather
+than reloading today's training preset.
+
+The defaults use a 20 N m torque limit, zero damping, a 10 ms control interval,
+1 ms MuJoCo integration, 5 s episodes, and a 1 s hold criterion. Resets sample
+each angle within 0.05 rad of upright and each velocity within 0.1 rad/s of
+rest. Capture requires both angle errors below 0.1 rad and both velocities
+below 0.25 rad/s. Episodes continue after capture. State-limit exits incur an
+absorbing failure cost; time limits are evaluation truncations. These defaults
+are an initial experiment configuration, not a validated stabilizing policy.
+
+The deterministic formulation is the default. `--mode stage_a_soft` selects the
+soft value operator and an analytic truncated-Gaussian training policy;
+`--quadrature-points` controls integration accuracy. Evaluation always uses
+the bounded deterministic mode, and records this choice. For deterministic
+training, `--exploration-std` adds collection noise in normalized action units.
+`--value-step` is the value-iteration time step, distinct from physical `--dt`.
+
+Each run writes `config.json`, `training.jsonl`, `evaluations.jsonl`, `best.pt`,
+and `last.pt`. Evaluation uses fixed held-out seeds and reports capture,
+terminal retention, dwell times, effort, saturation, and state-limit failures.
+Best-checkpoint selection prioritizes terminal retention, then terminal hold
+duration, then return. Output directories must be empty to prevent accidental
+replacement of another experiment.
+
+```bash
+MUJOCO_GL=disable python -m benchmarks.run_acrobot_stage_a \
+  --checkpoint out/acrobot_stage_a/seed_0/best.pt \
+  --output out/acrobot_stage_a/seed_0_eval --eval-episodes 32
+```
+
+For incoming swing-up resets, add `--incoming-states train.npz` and
+`--incoming-eval-states heldout.npz`. Each archive must contain a finite
+`states` array of shape `[N,4]` ordered `[q1,q2,v1,v2]`, and a scalar string
+`frame` equal to `downward_vertical_qv` (upright shoulder at pi) or
+`xin_kaneda_qv` (upright shoulder at pi/2). Velocities are retained. Split by
+source trajectory before exporting: exact overlapping states are rejected,
+but that check alone cannot detect neighboring samples from the same rollout.
+Training mixes these incoming resets with local resets; evaluation reports
+the two groups separately. Without archives, the runner tests local balance
+only and makes no claim about capture from previously learned swing-ups.
+
+The critic update shares CT-SAC's Bellman/HJB foundation. On nonterminal states
+with a reward rate, the first-order oracle CT-SAC branch fits a separate
+`Q(z,u)` to `V(z) + T [r(z,u) + grad(V)·f(z,u) - beta V(z)]` at replayed
+actions. Stage A instead maximizes the expression inside brackets (or uses its
+soft integral) and fits `V(z)` directly with a value-flow step `Delta_tau`.
+The existing CT-SAC value head, when enabled, is fitted to the actor's soft
+expectation of target Q. Stage A has no separate Q critic or learned actor.
+CT-SAC's model-free branch estimates the discounted value change from actual
+successor states; when the sample duration equals its reference interval, it
+reduces to the ordinary soft Bellman backup. These are related constructions,
+not identical finite-step learning updates.
+
+```bash
+MUJOCO_GL=disable python -m unittest tests.test_acrobot_stage_a -v
+```
+
 ## Reproducing Results & Reporting
 
 This repository includes a comprehensive evaluation pipeline to generate plots, tables, and statistical tests.
