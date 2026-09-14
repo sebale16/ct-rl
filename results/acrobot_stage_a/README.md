@@ -70,3 +70,53 @@ approximation instability rather than a numerical integration one.
 `success` 0.500 at update 20000, peaking at its final evaluation, with the
 lowest end-`|eta|` of the small-step arms. Its two siblings collapse normally,
 so this is one seed of three, not an arm effect.
+
+## `targets_3438282` -- fixed vs moving label diagnostic
+
+`benchmarks.check_acrobot_stage_a_targets`. Six runs, both presets, seeds 0-2,
+10k updates on each of two arms. Both arms are cloned from the same value,
+target and Adam state and fed identical minibatches drawn from one frozen
+dataset; the only difference is whether the regression labels move. Fixed
+temperature throughout, which the diagnostic requires in order to isolate
+value-target feedback.
+
+This is the experiment `sweep_3437316` pointed at. That sweep showed the
+divergence scales with the number of network updates rather than with progress
+along the value flow, implicating the regression and the moving bootstrap
+target rather than the Euler discretization. Freezing the labels removes the
+bootstrap while changing nothing else.
+
+Means over three seeds, training split, at update 10000:
+
+| preset | arm | mean \|eta\| | max \|eta\| | saturation | label drift |
+|---|---|---|---|---|---|
+| hard | fixed | 0.016 | 3.54 | 0.009 | 0 |
+| hard | moving | 2.009 | 24.65 | 0.836 | 67.5 |
+| soft | fixed | 0.316 | 5.03 | 0.238 | 0 |
+| soft | moving | 2.393 | 18.99 | 0.889 | 45.5 |
+
+The moving bootstrap target is the cause. With labels frozen, mean `|eta|`
+stays two orders of magnitude below the moving arm and well under the
+saturation threshold `effort_weight * torque_limit = 0.2`; saturation is 0.9%
+against 83.6%. Same states, same batches, same initialization, same optimizer
+state. This also rules out the dataset, Adam, and the regression itself: a
+fixed-label regression on these exact states stays bounded.
+
+Two metrics are actively misleading here. `label_rmse` is *lower* in the
+moving arm (12.5 against 18.6, hard) -- it fits its labels better while
+diverging, because the labels are running toward it. `hjb_rms` is *higher* in
+the fixed arm (154 against 102), as it must be, since frozen labels cannot
+satisfy the HJB equation the moving labels are chasing. Neither separates the
+two arms in the direction one would naively expect.
+
+The fixed arm is not perfectly tame either: max `|eta|` reaches 3.54 and max
+state-gradient norm 376, so a tail of states still develops large gradients
+without any bootstrap. It just never spreads to the bulk. The soft preset's
+fixed arm sits between the two (mean `|eta|` 0.316, saturation 0.238), so the
+entropy term contributes some growth on its own, well short of the bootstrap.
+
+Per-checkpoint `.pt` files and the per-probe `.npz` arrays (11.2 MB and
+19.8 MB) stay in `out/`. `metrics.csv` carries the per-state probe summaries
+(`eta_abs_mean`, `eta_abs_max`, `saturation_fraction`, gradient norms) for both
+splits at every checkpoint, and `config.json` records the dataset seeds, so the
+frozen dataset regenerates deterministically.

@@ -1,0 +1,8 @@
+{
+  "status": "completed",
+  "failures": {},
+  "completed_updates": {
+    "fixed": 10000,
+    "moving": 10000
+  }
+}
