@@ -107,7 +107,7 @@ class TestStageATemperature(unittest.TestCase):
     def test_runner_logging_and_diagnostic_rejects_auto(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "train"
-            args = parser().parse_args(["--mode", "stage_a_soft", "--auto-temperature", "--output", str(output),
+            args = parser().parse_args(["--mode", "stage_a_soft_auto", "--output", str(output),
                                        "--updates", "3", "--batch-size", "8", "--eval-episodes", "1",
                                        "--episode-seconds", ".02", "--hold-seconds", ".01"])
             with contextlib.redirect_stdout(io.StringIO()):
@@ -116,7 +116,7 @@ class TestStageATemperature(unittest.TestCase):
             self.assertTrue(all("policy_entropy" in row and "temperature" in row for row in rows))
             self.assertNotEqual(rows[0]["temperature"], rows[-1]["temperature"])
             with self.assertRaisesRegex(ValueError, "requires fixed temperature"):
-                diagnostic_run(diagnostic_parser().parse_args(["--mode", "stage_a_soft", "--auto-temperature",
+                diagnostic_run(diagnostic_parser().parse_args(["--mode", "stage_a_soft_auto",
                                                                "--output", str(Path(tmp) / "diag")]))
 
     def test_csv_boolean_and_invalid_configuration(self):

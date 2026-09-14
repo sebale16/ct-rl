@@ -314,7 +314,7 @@ class TestStageAHyperparameters(unittest.TestCase):
             self.assertEqual(getattr(args, key), value)
         with (DEFAULT_HYPERPARAMS_DIR / "acrobot_ph_value.csv").open() as f:
             rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         self.assertTrue(all(None not in row and all(v is not None for v in row.values()) for row in rows))
 
 

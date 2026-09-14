@@ -67,6 +67,8 @@ Hyperparameters are read from `benchmarks/hyperparams/acrobot_ph_value.csv`,
 using the same `mode`, `env_id`, `env_*`, `model_*`, `algo_*`, and `log_*`
 column convention as the CT-SAC table. The rows `stage_a_hard` and
 `stage_a_soft` select deterministic and entropy-regularized value control.
+The row `stage_a_soft_auto` uses the same soft settings with automatic
+temperature tuning enabled.
 These are untuned starting presets. `--hyperparams-dir` selects another table
 directory, and explicit CLI options override CSV values, for example
 `--updates 20000 --learning-rate 0.0001`. Blank cells retain runner defaults.
@@ -171,8 +173,7 @@ Temperature is fixed by default. To tune it toward a target policy entropy:
 
 ```bash
 MUJOCO_GL=disable python -m benchmarks.run_acrobot_stage_a \
-  --mode stage_a_soft --auto-temperature --target-entropy -1 \
-  --temperature-learning-rate 0.0003 --output out/stage_a_auto/seed0
+  --mode stage_a_soft_auto --output out/stage_a_auto/seed0
 ```
 
 After each value update, a separate optimizer adjusts `log(temperature)` using
@@ -189,8 +190,10 @@ The updated temperature enters both the next soft HJB target and stochastic
 action sampling. The deterministic evaluation mode at a given value gradient
 is independent of temperature. Checkpoints preserve the learned temperature and
 its optimizer; training logs include temperature, entropy, entropy error, and
-temperature loss. The CSV exposes matching `algo_` columns; existing presets
-retain fixed temperature unless overridden.
+temperature loss. The CSV exposes matching `algo_` columns; `stage_a_hard` and
+`stage_a_soft` retain fixed temperature unless overridden. The adaptive preset
+uses initial temperature `0.1` before reward scaling, target entropy `-1`, and
+temperature learning rate `0.0003`. `--no-auto-temperature` disables tuning.
 
 Entropy uses the same continuous-action quadrature as the soft HJB score. For
 very concentrated policies, check sensitivity to `--quadrature-points`; a small
