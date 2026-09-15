@@ -138,6 +138,11 @@ def probe(agent, dataset, labels, failure_value, chunk_size):
         "value_abs_max": float(np.abs(arrays["value"]).max()),
         "eta_abs_mean": float(np.abs(arrays["eta"]).mean()),
         "eta_abs_max": float(np.abs(arrays["eta"]).max()),
+        # The mean is dragged across the saturation threshold by a right tail
+        # long before the bulk saturates, so carry the shape of |eta| too.
+        "eta_abs_p50": float(np.percentile(np.abs(arrays["eta"]), 50)),
+        "eta_abs_p90": float(np.percentile(np.abs(arrays["eta"]), 90)),
+        "eta_abs_p99": float(np.percentile(np.abs(arrays["eta"]), 99)),
         "state_gradient_norm_mean": float(arrays["gradient_norm"].mean()),
         "state_gradient_norm_max": float(arrays["gradient_norm"].max()),
         "saturation_fraction": float(np.mean(np.abs(arrays["action"]) >= 1 - 1e-6)),
