@@ -72,35 +72,74 @@ class UprightReward:
     velocity2_weight: float = 1.0
     velocity_scale: float = 4.5844
     effort_weight: float = 0.01
+    state_cost_transform: str = "identity"
+    log_epsilon: float | None = None
+    log_cost_bound: float | None = None
 
     def __post_init__(self):
-        for name, value in vars(self).items():
+        for name in ("angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight",
+                     "velocity_scale", "effort_weight"):
+            value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if self.state_cost_transform not in ("identity", "log"):
+            raise ValueError("state_cost_transform must be identity or log")
+        if self.state_cost_transform == "log":
+            for name in ("log_epsilon", "log_cost_bound"):
+                value = getattr(self, name)
+                if value is None or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"log state cost requires finite positive {name}")
+            if not math.isfinite(self.log_cost_bound / self.log_epsilon):
+                raise ValueError("log cost bound / epsilon must be finite")
+        elif self.log_epsilon is not None or self.log_cost_bound is not None:
+            raise ValueError("log parameters require state_cost_transform=log")
 
     def scaled(self, factor: float):
         """Scale the entire reward, including the controller's effort weight."""
         if not math.isfinite(factor) or factor <= 0:
             raise ValueError("reward scale must be finite and positive")
-        return replace(self, **{name: getattr(self, name) * factor for name in (
-            "angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight", "effort_weight")})
+        parameters = {name: getattr(self, name) * factor for name in (
+            "angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight", "effort_weight")}
+        if self.state_cost_transform == "log":
+            parameters.update(log_epsilon=self.log_epsilon * factor, log_cost_bound=self.log_cost_bound * factor)
+        return replace(self, **parameters)
 
-    def cost_bound(self, oracle: AcrobotOracle, *, velocity_limit, elbow_limit, shoulder_limit):
-        """Upper bound on ordinary cost inside the declared state/action limits."""
+    def with_log_state_cost(self, cost_bound, reference_angle_deg=5.):
+        """Choose epsilon from a shoulder-only deviation at rest, in reward units."""
+        if not math.isfinite(reference_angle_deg) or not 0 < reference_angle_deg <= 180:
+            raise ValueError("log reference angle must be in (0,180] degrees")
+        epsilon = 2 * self.angle1_weight * math.sin(math.radians(reference_angle_deg) / 2)**2
+        return replace(self, state_cost_transform="log", log_epsilon=epsilon, log_cost_bound=cost_bound)
+
+    def transform_state_cost(self, cost):
+        """Same scalar/tensor mapping for MuJoCo rewards and differentiable HJB."""
+        if self.state_cost_transform == "identity":
+            return cost
+        coefficient = self.log_cost_bound / math.log1p(self.log_cost_bound / self.log_epsilon)
+        log_cost = torch.log1p(cost / self.log_epsilon) if torch.is_tensor(cost) else math.log1p(cost / self.log_epsilon)
+        return coefficient * log_cost
+
+    def base_state_cost_bound(self, *, velocity_limit, elbow_limit, shoulder_limit):
+        """State-cost bound before the optional transform; excludes effort."""
         shoulder = (2 * self.angle1_weight if shoulder_limit is None else
                     self.angle1_weight * (1 - math.cos(min(shoulder_limit, math.pi))))
         elbow = self.angle2_weight * (1 - math.cos(min(elbow_limit, math.pi)))
-        return (shoulder + elbow
-                + (self.velocity1_weight + self.velocity2_weight) * (velocity_limit / self.velocity_scale)**2
-                + 0.5 * self.effort_weight * oracle.torque_limit**2)
+        return shoulder + elbow + (self.velocity1_weight + self.velocity2_weight) * (velocity_limit / self.velocity_scale)**2
+
+    def cost_bound(self, oracle: AcrobotOracle, *, velocity_limit, elbow_limit, shoulder_limit):
+        """Upper bound on ordinary cost inside the declared state/action limits."""
+        state_bound = self.base_state_cost_bound(velocity_limit=velocity_limit, elbow_limit=elbow_limit,
+                                                shoulder_limit=shoulder_limit)
+        return self.transform_state_cost(state_bound) + 0.5 * self.effort_weight * oracle.torque_limit**2
 
     def state_cost(self, z: torch.Tensor, oracle: AcrobotOracle) -> torch.Tensor:
         v = oracle.velocity(z) / self.velocity_scale
         # Equivalent to 1+cos(q1), with better accuracy near q1=pi.
-        return (2 * self.angle1_weight * ((z[..., 0] - math.pi) / 2).sin().square()
+        cost = (2 * self.angle1_weight * ((z[..., 0] - math.pi) / 2).sin().square()
                 + 2 * self.angle2_weight * (z[..., 1] / 2).sin().square()
                 + self.velocity1_weight * v[..., 0].square()
                 + self.velocity2_weight * v[..., 1].square())
+        return self.transform_state_cost(cost)
 
     def rate(self, z: torch.Tensor, torque: torch.Tensor | float,
              oracle: AcrobotOracle) -> torch.Tensor:

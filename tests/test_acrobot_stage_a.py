@@ -335,12 +335,15 @@ class TestStageAHyperparameters(unittest.TestCase):
     def test_table_defaults_match_dataclasses(self):
         args = parser().parse_args(["--output", "/tmp/not-created-stage-a"])
         for key, value in vars(UprightReward()).items():
-            self.assertEqual(getattr(args, key), value)
+            if key in ("log_epsilon", "log_cost_bound"):
+                self.assertIsNone(value)  # Resolved from the task limits, not CLI constants.
+            else:
+                self.assertEqual(getattr(args, key), value)
         for key, value in vars(ValueFlowConfig()).items():
             self.assertEqual(getattr(args, key), value)
         with (DEFAULT_HYPERPARAMS_DIR / "acrobot_ph_value.csv").open() as f:
             rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 6)
         self.assertTrue(all(None not in row and all(v is not None for v in row.values()) for row in rows))
 
 

@@ -138,11 +138,11 @@ class AcrobotStageAEnv(gym.Env):
 
     def _rate(self, qv, torque):
         r = self.reward_spec
-        return float(-(2 * r.angle1_weight * np.sin((qv[0] - np.pi) / 2)**2
+        state_cost = (2 * r.angle1_weight * np.sin((qv[0] - np.pi) / 2)**2
                        + 2 * r.angle2_weight * np.sin(qv[1] / 2)**2
                        + r.velocity1_weight * (qv[2] / r.velocity_scale)**2
-                       + r.velocity2_weight * (qv[3] / r.velocity_scale)**2
-                       + 0.5 * r.effort_weight * torque**2))
+                       + r.velocity2_weight * (qv[3] / r.velocity_scale)**2)
+        return float(-r.transform_state_cost(state_cost) - 0.5 * r.effort_weight * torque**2)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)

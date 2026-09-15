@@ -137,6 +137,9 @@ def parser():
     p.add_argument("--effort-weight", type=float, default=0.01)
     p.add_argument("--reward-scale", type=reward_scale_argument, default="auto",
                    help="common multiplier for reward and temperature; auto normalizes the cost bound to one")
+    p.add_argument("--state-cost-transform", type=str, choices=("identity", "log"), default="identity")
+    p.add_argument("--log-reference-angle-deg", type=float, default=5.,
+                   help="log epsilon is the base shoulder cost at this deviation, with zero velocity")
     p.add_argument("--incoming-states", type=Path, help="training NPZ: states[N,4] q/v and explicit frame")
     p.add_argument("--incoming-eval-states", type=Path, help="held-out NPZ from separate swing-up trajectories")
     return p
@@ -158,11 +161,19 @@ def build_agent(args):
                                  elbow_limit=args.elbow_limit, shoulder_limit=args.shoulder_limit,
                                  incoming_probability=args.incoming_probability)
         oracle = AcrobotOracle(damping=args.damping, torque_limit=args.torque_limit)
-        raw_reward = UprightReward(**{key: getattr(args, key) for key in UprightReward.__dataclass_fields__})
+        raw_reward = UprightReward(**{key: getattr(args, key) for key in (
+            "angle1_weight", "angle2_weight", "velocity1_weight", "velocity2_weight", "velocity_scale", "effort_weight")})
         scale = (1 / raw_reward.cost_bound(oracle, velocity_limit=env_config.velocity_limit,
                                           elbow_limit=env_config.elbow_limit, shoulder_limit=env_config.shoulder_limit)
                  if args.reward_scale == "auto" else float(args.reward_scale))
         reward = raw_reward.scaled(scale)
+        if args.state_cost_transform == "log":
+            bound = reward.base_state_cost_bound(velocity_limit=env_config.velocity_limit,
+                                                 elbow_limit=env_config.elbow_limit,
+                                                 shoulder_limit=env_config.shoulder_limit)
+            reward = reward.with_log_state_cost(bound, args.log_reference_angle_deg)
+        elif args.state_cost_transform != "identity":
+            raise ValueError("state_cost_transform must be identity or log")
         flow_parameters = {key: getattr(args, key) for key in ValueFlowConfig.__dataclass_fields__}
         for key in ("temperature", "temperature_min", "temperature_max"):
             flow_parameters[key] *= scale

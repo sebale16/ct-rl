@@ -118,7 +118,7 @@ $$C_{\max}=10+10+2\left(\frac{2\pi}{4.5844}\right)^2
 +\tfrac12(0.01)(20)^2\approx25.75685752,\qquad
 \kappa=C_{\max}^{-1}\approx0.0388246120.$$
 
-The implemented state cost, effort coefficient, and reward rate are
+The baseline state cost, effort coefficient, and reward rate are
 
 $$\ell=\kappa\ell_0,\qquad w_u=\kappa(0.01),\qquad
 \boxed{r(z,u)=-\ell(z)-\tfrac12w_u u^2.}$$
@@ -126,8 +126,9 @@ $$\ell=\kappa\ell_0,\qquad w_u=\kappa(0.01),\qquad
 The multiplier is computed once for each new experiment from its declared
 weights and limits, then held fixed. Ordinary reward rates lie within $[-1,0]$
 inside the state limits. The terminal integration interval can slightly
-overshoot a limit before the failure is detected. There is no clipping or
-nonlinear transformation of the reward.
+overshoot a limit before the failure is detected. There is no clipping. The
+baseline uses the identity state-cost map; the optional log variant below
+changes that map.
 
 The reward is maximal at upright rest with zero torque. It penalizes residual velocity, so passing through the upright pose rapidly does not have the same instantaneous reward as balancing there. It uses the physical state and fixed coefficients throughout training.
 
@@ -148,6 +149,55 @@ are unchanged. These statements do not imply identical neural optimization
 trajectories or resolve the moving-target instability.
 
 The simulated return includes the discounted absorbing continuation after a failure. Value regression at sampled failure states uses the boundary target $V_F$. This is an explicit task boundary condition, not a stability certificate. For both arms, the absorbing state has no further action choice or entropy reward.
+
+#### Finite log state-cost variant
+
+An additional reward comparison applies a finite log transform to the entire
+normalized state cost (both angles and both velocities), while preserving the
+quadratic effort penalty. Write the baseline state cost as $\ell_b=\kappa\ell_0$
+and define
+
+$$C=\kappa\left[10+10+2\left(\frac{2\pi}{4.5844}\right)^2\right]
+\approx0.922350776,$$
+
+$$\epsilon=10\kappa\left[1-\cos(5\pi/180)\right]
+\approx0.001477394.$$
+
+Thus $\epsilon$ is the baseline cost of a shoulder deviation of $5^\circ$,
+with zero elbow angle and zero joint velocities. This reference sets the
+transform's cost scale; it does not change the capture tolerance. Both
+constants are computed once from the experiment's declared parameters.
+
+The variant uses
+
+$$\boxed{\ell_{\log}(z)=C\frac{\log(1+\ell_b(z)/\epsilon)}{\log(1+C/\epsilon)},
+\qquad r_{\log}(z,u)=-\ell_{\log}(z)-\tfrac12w_u u^2.}$$
+
+The map is increasing, sends $0$ to $0$ and $C$ to $C$, and has finite derivative
+
+$$\frac{d\ell_{\log}}{d\ell_b}
+=\frac{C}{(\epsilon+\ell_b)\log(1+C/\epsilon)}.$$
+
+At a shoulder-only deviation of $0.1^\circ$, it multiplies the state-cost
+gradient by approximately $96.93$. At exact upright rest, the state gradient
+is still zero because the baseline state gradient is zero. The ordinary reward
+rate remains within $[-1,0]$ inside the declared limits, and the absorbing
+failure target remains $-10$. The effort coefficient and temperature settings
+are the same as in the corresponding baseline configuration.
+
+In the subsequent value-learning equations, $\ell$ denotes the selected state
+cost: $\ell_b$ for the baseline or $\ell_{\log}$ for this variant. The simulated
+reward and the HJB target must use the same selection. Because only the state
+cost is transformed, the analytical quadratic action maximizer and soft
+action density remain applicable.
+
+Compare this variant with the baseline separately under hard maximization,
+fixed-temperature soft maximization, and adaptive-temperature soft
+maximization. It changes the relative cost of state error and effort and need
+not preserve optimal policies. A larger immediate reward gradient does not
+establish better learned control; evaluate held-out upright errors, retention,
+failures, and torque use across matched training seeds. Compare these physical
+metrics rather than returns computed under different reward definitions.
 
 ### 2.4 Reset distributions
 
