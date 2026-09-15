@@ -23,6 +23,8 @@ CSV_ARGUMENTS = {
     "env_velocity_limit": "velocity_limit", "env_elbow_limit": "elbow_limit",
     "env_shoulder_limit": "shoulder_limit",
     "env_reward_scale": "reward_scale",
+    "env_state_cost_transform": "state_cost_transform",
+    "env_log_reference_angle_deg": "log_reference_angle_deg",
     "env_incoming_probability": "incoming_probability",
     "model_hidden_width": "hidden_width", "model_momentum_scale": "momentum_scale",
     "algo_discount_rate": "discount_rate", "algo_value_step": "value_step",

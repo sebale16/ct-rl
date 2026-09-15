@@ -167,6 +167,38 @@ settings directly, with no second scaling. Standalone reward objects retain
 their explicit coefficients; the runner applies the normalization when building
 the experiment, including the fixed/moving diagnostic.
 
+### Finite log state-cost reward
+
+The `stage_a_hard_log`, `stage_a_soft_log`, and `stage_a_soft_auto_log` CSV rows
+apply the finite transform to the combined angle and velocity cost:
+
+$$\tilde\ell=C\frac{\log(1+\ell/\epsilon)}{\log(1+C/\epsilon)},\qquad
+\tilde r=-\tilde\ell-\tfrac12w_u u^2.$$
+
+Here $\ell$ is the normalized original state cost, $C\approx0.922350776$ is its
+bound, and $\epsilon\approx0.001477394$ is its shoulder-only cost at a
+$5^\circ$ deviation from upright, at rest with zero elbow angle. The transform
+maps zero to zero and $C$ to $C$. It increases sensitivity to small state costs
+while retaining a finite slope. The quadratic torque penalty, ordinary rate
+bound `[-1, 0]`, and failure target `-10` remain unchanged with default limits.
+The transform changes the control objective; improved balance requires an
+experimental comparison with the original rows, which retain the identity map.
+
+```bash
+python -m benchmarks.run_acrobot_stage_a \
+  --mode stage_a_soft_auto_log --output out/stage_a_soft_auto_log/seed0
+```
+
+Any row can also use `--state-cost-transform log`. The reference angle is
+configurable through `--log-reference-angle-deg` (default `5`); it sets the
+cost scale, not a capture tolerance. Matching CSV columns are
+`env_state_cost_transform` and `env_log_reference_angle_deg`. The runner
+calculates $C$ and $\epsilon$ once using the run's weights, limits, and reward
+scale, and records both in configuration and checkpoints. The simulator and
+HJB operator use the same transformed state cost; the analytic action rule
+retains its quadratic effort coefficient. The fixed/moving target diagnostic
+also accepts these presets (automatic temperature remains excluded there).
+
 ### Automatic temperature for soft Stage A
 
 Temperature is fixed by default. To tune it toward a target policy entropy:
