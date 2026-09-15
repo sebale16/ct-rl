@@ -108,6 +108,9 @@ def parser():
     p.add_argument("--value-step", type=float, default=0.02)
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--target-rate", type=float, default=0.01)
+    p.add_argument("--target-interval", type=int, default=1,
+                   help="apply the Polyak step every N gradient updates instead of every one; "
+                        "labels hold still in between, so the lag is N/target_rate updates")
     p.add_argument("--hidden-width", type=int, default=64)
     p.add_argument("--momentum-scale", type=float, default=10.)
     p.add_argument("--grad-clip", type=float, default=10.)
@@ -118,6 +121,12 @@ def parser():
     p.add_argument("--temperature-min", type=float, default=1e-4)
     p.add_argument("--temperature-max", type=float, default=10.)
     p.add_argument("--quadrature-points", type=int, default=128)
+    p.add_argument("--train-freq", type=int, default=1,
+                   help="environment steps collected per gradient update; --updates still counts "
+                        "gradient steps, so this scales environment steps, not optimizer steps")
+    p.add_argument("--learning-starts", type=int, default=0,
+                   help="transitions collected under uniform random torque before the first "
+                        "gradient step; 0 reproduces the original no-warmup behaviour")
     p.add_argument("--exploration-std", type=float, default=0.02,
                    help="normalized action noise for deterministic training only; evaluation has none")
     p.add_argument("--angle1-weight", type=float, default=10.)
@@ -177,6 +186,10 @@ def run(args):
         raise ValueError("training and evaluation seeds must differ")
     if not np.isfinite(args.exploration_std) or args.exploration_std < 0:
         raise ValueError("exploration_std must be finite and nonnegative")
+    if args.learning_starts < 0:
+        raise ValueError("learning_starts must be nonnegative")
+    if args.train_freq < 1:
+        raise ValueError("train_freq must be at least one")
     if args.output.exists() and any(args.output.iterdir()):
         raise FileExistsError(f"refusing to overwrite nonempty output directory: {args.output}")
     torch.set_num_threads(args.threads)
@@ -228,20 +241,44 @@ def run(args):
         count = 0
         seconds = 0.
         z, _ = train_env.reset(seed=args.seed)
+
+        def collect(z, action):
+            """Step once, store both ends of the transition, and reset on exit."""
+            nonlocal count, seconds
+            next_z, _, terminated, truncated, info = train_env.step(action)
+            seconds += info["dt_used"]
+            for sample, terminal in ((z, False), (next_z, terminated)):
+                slot = count % args.buffer_size
+                replay[slot], terminals[slot] = sample, terminal
+                count += 1
+            if terminated or truncated:
+                next_z, _ = train_env.reset()
+            return next_z
+
+        # Warm start. The replay half of the batch is otherwise nearly
+        # degenerate for the first few hundred updates: at update one it holds
+        # the two states of a single transition, drawn 128 times. Uniform
+        # random torque rather than the value-gradient policy, whose gradient
+        # is ~0 at initialization and would barely move the arm.
+        for _ in range(args.learning_starts):
+            z = collect(z, rng.uniform(-1., 1., size=1))
+        warmup_seconds, seconds = seconds, 0.
+
         with (args.output / "training.jsonl").open("w") as log:
+            if args.learning_starts:
+                # Update 0 carries the warm start; training_physical_seconds below
+                # stays training-only, so it compares with no-warmup runs directly.
+                log.write(json.dumps({"update": 0, "warmup_transitions": args.learning_starts,
+                                      "warmup_physical_seconds": warmup_seconds}) + "\n")
             for update in range(1, args.updates + 1):
-                action = agent.act(z, deterministic=agent.config.temperature == 0, rng=rng)
-                if agent.config.temperature == 0:
-                    action = np.clip(action + rng.normal(0., args.exploration_std, size=1), -1., 1.)
-                next_z, _, terminated, truncated, info = train_env.step(action)
-                seconds += info["dt_used"]
-                for sample, terminal in ((z, False), (next_z, terminated)):
-                    slot = count % args.buffer_size
-                    replay[slot], terminals[slot] = sample, terminal
-                    count += 1
-                z = next_z
-                if terminated or truncated:
-                    z, _ = train_env.reset()
+                # train_freq environment steps per gradient step. The Polyak rate
+                # is per gradient step, so this stretches the target's lag in
+                # physical time without changing it in update count.
+                for _ in range(args.train_freq):
+                    action = agent.act(z, deterministic=agent.config.temperature == 0, rng=rng)
+                    if agent.config.temperature == 0:
+                        action = np.clip(action + rng.normal(0., args.exploration_std, size=1), -1., 1.)
+                    z = collect(z, action)
                 # Half fresh local/incoming collocation, half visited states.
                 # Oracle access is explicit; no dynamics are fitted to replay.
                 local_count = args.batch_size // 2

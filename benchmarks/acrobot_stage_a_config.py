@@ -27,6 +27,7 @@ CSV_ARGUMENTS = {
     "model_hidden_width": "hidden_width", "model_momentum_scale": "momentum_scale",
     "algo_discount_rate": "discount_rate", "algo_value_step": "value_step",
     "algo_learning_rate": "learning_rate", "algo_target_rate": "target_rate",
+    "algo_target_interval": "target_interval",
     "algo_grad_clip": "grad_clip", "algo_temperature": "temperature",
     "algo_auto_temperature": "auto_temperature",
     "algo_temperature_learning_rate": "temperature_learning_rate",

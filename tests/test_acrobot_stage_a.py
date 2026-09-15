@@ -260,6 +260,32 @@ class TestAcrobotStageA(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 run(args)
 
+    def test_warmup_fills_replay_before_the_first_gradient_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            common = ["--updates", "2", "--batch-size", "8", "--episode-seconds", ".2",
+                      "--hold-seconds", ".01", "--eval-episodes", "1", "--dt", ".01"]
+            warm = Path(tmp) / "warm"
+            run(parser().parse_args(["--output", str(warm), "--learning-starts", "5"] + common))
+            records = [json.loads(line) for line in (warm / "training.jsonl").read_text().splitlines()]
+            # Update 0 carries the warm start and is not a gradient step.
+            self.assertEqual(records[0]["update"], 0)
+            self.assertEqual(records[0]["warmup_transitions"], 5)
+            self.assertAlmostEqual(records[0]["warmup_physical_seconds"], 5 * .01, places=9)
+            self.assertNotIn("value_loss", records[0])
+            # Training time excludes the warm start, so it compares with a cold run.
+            self.assertAlmostEqual(records[1]["training_physical_seconds"], .01, places=9)
+
+            cold = Path(tmp) / "cold"
+            run(parser().parse_args(["--output", str(cold), "--learning-starts", "0"] + common))
+            first = json.loads((cold / "training.jsonl").read_text().splitlines()[0])
+            self.assertEqual(first["update"], 1)
+            self.assertNotIn("warmup_transitions", first)
+
+            for bad in ("-1", "-5"):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    run(parser().parse_args(["--output", str(Path(tmp) / "x"),
+                                             "--learning-starts", bad]))
+
 
 class TestStageAHyperparameters(unittest.TestCase):
     def test_default_and_soft_rows_and_cli_precedence(self):

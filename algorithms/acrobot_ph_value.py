@@ -22,6 +22,7 @@ class ValueFlowConfig:
     value_step: float = 0.02
     learning_rate: float = 3e-4
     target_rate: float = 0.01
+    target_interval: int = 1
     temperature: float = 0.0
     auto_temperature: bool = False
     temperature_learning_rate: float = 3e-4
@@ -39,6 +40,8 @@ class ValueFlowConfig:
                 raise ValueError(f"{key} must be finite and positive")
         if not math.isfinite(self.target_rate) or not 0 < self.target_rate <= 1:
             raise ValueError("target_rate must be in (0,1]")
+        if self.target_interval < 1:
+            raise ValueError("target_interval must be at least one")
         if not math.isfinite(self.temperature) or self.temperature < 0:
             raise ValueError("temperature must be finite and nonnegative")
         if not math.isfinite(self.temperature_learning_rate) or self.temperature_learning_rate <= 0:
@@ -210,11 +213,15 @@ class AcrobotPHValue:
         loss.backward()
         norm = nn.utils.clip_grad_norm_(self.value.parameters(), self.config.grad_clip, error_if_nonfinite=True)
         self.optimizer.step()
-        if refresh_target:
+        self.updates += 1
+        # The Polyak step every target_interval updates rather than every one.
+        # Labels are built from the target, so they are exactly constant between
+        # moves; the effective lag stretches to target_interval / target_rate
+        # updates without the abruptness of a hard copy.
+        if refresh_target and self.updates % self.config.target_interval == 0:
             with torch.no_grad():
                 for slow, fast in zip(self.target.parameters(), self.value.parameters()):
                     slow.lerp_(fast, self.config.target_rate)
-        self.updates += 1
         return {"value_loss": float(loss.detach()), "gradient_norm": float(norm)}
 
     def update(self, z, *, terminal_mask=None, terminal_value=None):
