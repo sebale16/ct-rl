@@ -1,0 +1,15 @@
+{
+  "status": "completed",
+  "completed_updates": {
+    "fixed_labels": 10000,
+    "moving_labels": 10000,
+    "online": 10000
+  },
+  "first_indefinite_probe": {
+    "fixed_labels": 0,
+    "moving_labels": 0,
+    "online": 0
+  },
+  "online_collection_seconds": 99.35500000001396,
+  "note": "First-indefinite times are probe times, not exact onset; zero means indefinite at initialization."
+}
