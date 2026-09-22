@@ -226,3 +226,6 @@ benchmarks/*
 benchmarks/node_modules/
 # Slurm run logs (per-run stdout/err; not reproducibility artifacts)
 slurm_logs/
+logs/
+results/
+videos/
